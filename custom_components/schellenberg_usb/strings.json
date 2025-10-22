@@ -1,0 +1,113 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Schellenberg USB Stick",
+        "description": "Enter the serial port path for your Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirm Schellenberg USB Stick",
+        "description": "Confirm the serial port path for your discovered Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the serial port",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB options",
+        "menu_options": {
+          "led_commands": "LED commands",
+          "calibration": "Device calibration",
+          "pairing": "Pair new device"
+        }
+      },
+      "led_commands": {
+        "title": "LED commands",
+        "menu_options": {
+          "led_blink": "Blink LED"
+        }
+      },
+      "led_blink": {
+        "title": "Blink LED",
+        "description": "The LED on the USB stick will blink 5 times and then turn off.",
+        "submit": "Blink"
+      },
+      "calibration": {
+        "title": "Device calibration",
+        "description": "Select a device to calibrate. Calibration will measure how long it takes for your blind to fully open and close.",
+        "data": {
+          "device_id": "Device"
+        },
+        "submit": "Next"
+      },
+      "calibration_confirm": {
+        "title": "Start calibration",
+        "description": "Calibration process for {device_name}:\n\n1. The blind will close all the way down\n2. Then we will time how long it takes to open (move up)\n3. Then we will time how long it takes to close (move down)\n\nThis process may take several minutes. Press 'Start' to begin.",
+        "submit": "Start"
+      },
+      "calibration_run": {
+        "title": "Calibrating...",
+        "description": "Calibration in progress. Please wait while we measure the open and close times for your blind."
+      },
+      "pairing": {
+        "title": "Pair a new device",
+        "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
+        "submit": "Pair"
+      },
+      "name_device": {
+        "title": "Name your device",
+        "description": "Pairing successful! Device ID: {device_id}\n\nPlease provide a friendly name for this blind.",
+        "data": {
+          "device_name": "Device name"
+        }
+      }
+    },
+    "error": {
+      "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
+      "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+      "unknown": "An unexpected error occurred during calibration. Please try again.",
+      "submit": "Close"
+    },
+    "abort": {
+      "no_devices": "No paired devices found. Please pair a device first.",
+      "device_not_found": "Selected device not found in storage."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Connection status"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "operating_mode": {
+        "name": "Operating mode"
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "pair": {
+      "name": "Pair device",
+      "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
+    }
+  }
+}

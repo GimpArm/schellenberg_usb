@@ -1,0 +1,5 @@
+# Services for Schellenberg USB integration
+
+pair:
+  name: Pair device
+  description: Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds.
