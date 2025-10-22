@@ -1,0 +1,20 @@
+{
+  "domain": "schellenberg_usb",
+  "name": "Schellenberg USB Stick",
+  "config_flow": true,
+  "documentation": "https://github.com/GimpArm/schellenberg-usb",
+  "issue_tracker": "https://github.com/GimpArm/schellenberg-usb/issues",
+  "codeowners": ["@GimpArm"],
+  "iot_class": "local_push",
+  "integration_type": "hub",
+  "requirements": ["pyserial-asyncio==0.6"],
+  "version": "1.0.0",
+  "homeassistant": "2025.1.0",
+  "usb": [
+    {
+      "vid": "16c0",
+      "pid": "05e1",
+      "manufacturer": "*Van Ooijen*"
+    }
+  ]
+}

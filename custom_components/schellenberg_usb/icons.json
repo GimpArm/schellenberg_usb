@@ -1,0 +1,14 @@
+{
+  "entity": {
+    "cover": {
+      "_": {
+        "default": "mdi:window-shutter"
+      }
+    }
+  },
+  "services": {
+    "calibrate": {
+      "service": "mdi:tune"
+    }
+  }
+}
