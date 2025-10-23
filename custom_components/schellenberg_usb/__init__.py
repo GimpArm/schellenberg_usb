@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
+
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.storage import Store
@@ -24,6 +27,11 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_devices"
+
+CONFIG_SCHEMA = vol.Schema(
+    {DOMAIN: cv.config_entry_only_config_schema(DOMAIN)},
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
