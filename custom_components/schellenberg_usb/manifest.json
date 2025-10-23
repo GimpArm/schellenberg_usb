@@ -3,10 +3,10 @@
   "name": "Schellenberg USB",
   "codeowners": ["@GimpArm"],
   "config_flow": true,
-  "documentation": "https://github.com/GimpArm/schellenberg-usb",
+  "documentation": "https://github.com/GimpArm/schellenberg_usb",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/GimpArm/schellenberg-usb/issues",
+  "issue_tracker": "https://github.com/GimpArm/schellenberg_usb/issues",
   "requirements": ["pyserial-asyncio==0.6"],
   "usb": [
     {

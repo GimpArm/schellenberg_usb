@@ -1,8 +1,8 @@
-# schellenberg-usb Home Assistant Component
+# schellenberg_usb Home Assistant Component
 
-[![GitHub Release](https://img.shields.io/github/release/GimpArm/schellenberg-usb.svg)](https://github.com/GimpArm/schellenberg-usb/releases)
-[![License](https://img.shields.io/github/license/GimpArm/schellenberg-usb.svg)](https://github.com/GimpArm/schellenberg-usb/blob/main/LICENSE)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/GimpArm/schellenberg-usb/build-test.yaml)
+[![GitHub Release](https://img.shields.io/github/release/GimpArm/schellenberg_usb.svg)](https://github.com/GimpArm/schellenberg_usb/releases)
+[![License](https://img.shields.io/github/license/GimpArm/schellenberg_usb.svg)](https://github.com/GimpArm/schellenberg_usb/blob/main/LICENSE)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/GimpArm/schellenberg_usb/build-test.yaml)
 
 Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](https://www.schellenberg.de/smart-home-produkte/smart-home-steuerzentralen/funk-stick/21009/).
 
@@ -10,7 +10,7 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 > This integration is not affiliated with Schellenberg, the developers take no responsibility for anything that happens to
 > your devices because of this library.
 
-![Schellenberg](https://raw.githubusercontent.com/GimpArm/schellenberg-usb/main/logo.png)
+![Schellenberg](https://raw.githubusercontent.com/GimpArm/schellenberg_usb/main/logo.png)
 
 ## Features
 
@@ -30,7 +30,7 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 
 ### Manual
 
-1. Download [the latest release](https://github.com/GimpArm/schellenberg-usb/releases)
+1. Download [the latest release](https://github.com/GimpArm/schellenberg_usb/releases)
 2. Extract the `custom_components` folder to your Home Assistant's config folder, the resulting folder structure should
    be `config/custom_components/schellenber_usb`
 3. Restart Home Assistant
