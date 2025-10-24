@@ -46,7 +46,7 @@ async def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
 @pytest.mark.asyncio
 async def test_async_setup_service_registration(hass: HomeAssistant) -> None:
     """Test that async_setup registers the pair service."""
-    from .. import async_setup
+    from custom_components.schellenberg_usb import async_setup
 
     result = await async_setup(hass, {})
     assert result is True
@@ -58,7 +58,7 @@ async def test_async_setup_pair_service_no_loaded_entries(
     hass: HomeAssistant,
 ) -> None:
     """Test pair service raises error when no entries are loaded."""
-    from .. import async_setup
+    from custom_components.schellenberg_usb import async_setup
 
     await async_setup(hass, {})
 
@@ -73,7 +73,7 @@ async def test_async_setup_pair_service_not_connected(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test pair service raises error when stick is not connected."""
-    from .. import async_setup
+    from custom_components.schellenberg_usb import async_setup
 
     await async_setup(hass, {})
 
@@ -93,7 +93,7 @@ async def test_async_setup_pair_service_success(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test pair service successfully pairs a device."""
-    from .. import async_setup
+    from custom_components.schellenberg_usb import async_setup
 
     hass.data.setdefault(DOMAIN, {})
 
@@ -123,7 +123,7 @@ async def test_async_setup_pair_service_timeout(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test pair service raises error on pairing timeout."""
-    from .. import async_setup
+    from custom_components.schellenberg_usb import async_setup
 
     await async_setup(hass, {})
 
@@ -144,7 +144,7 @@ async def test_async_setup_entry_basic(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test basic async_setup_entry functionality."""
-    from .. import async_setup_entry
+    from custom_components.schellenberg_usb import async_setup_entry
 
     with (
         patch("homeassistant.helpers.storage.Store") as mock_store_class,
@@ -170,7 +170,7 @@ async def test_async_setup_entry_loads_existing_devices(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test that async_setup_entry loads existing devices from storage."""
-    from .. import async_setup_entry
+    from custom_components.schellenberg_usb import async_setup_entry
 
     devices = [
         {"id": "device_1", "enum": "0x10", "name": "Blind 1"},
@@ -202,7 +202,7 @@ async def test_async_unload_entry(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test async_unload_entry disconnects and cleans up resources."""
-    from .. import async_setup_entry, async_unload_entry
+    from custom_components.schellenberg_usb import async_setup_entry, async_unload_entry
 
     with (
         patch("homeassistant.helpers.storage.Store") as mock_store_class,
@@ -238,7 +238,7 @@ async def test_async_unload_entry_cleanup_unsubscriber(
     hass: HomeAssistant, mock_config_entry: ConfigEntry
 ) -> None:
     """Test that async_unload_entry calls the dispatcher unsubscriber."""
-    from .. import async_setup_entry, async_unload_entry
+    from custom_components.schellenberg_usb import async_setup_entry, async_unload_entry
 
     with (
         patch("homeassistant.helpers.storage.Store") as mock_store_class,
@@ -278,7 +278,7 @@ async def test_async_remove_config_entry_device_found(
     device_registry: dr.DeviceRegistry,
 ) -> None:
     """Test async_remove_config_entry_device removes device from storage."""
-    from .. import async_remove_config_entry_device
+    from custom_components.schellenberg_usb import async_remove_config_entry_device
 
     device_entry = device_registry.async_get_or_create(
         config_entry_id=mock_config_entry.entry_id,
@@ -319,7 +319,7 @@ async def test_async_remove_config_entry_device_not_found(
     device_registry: dr.DeviceRegistry,
 ) -> None:
     """Test async_remove_config_entry_device when device not in storage."""
-    from .. import async_remove_config_entry_device
+    from custom_components.schellenberg_usb import async_remove_config_entry_device
 
     device_entry = device_registry.async_get_or_create(
         config_entry_id=mock_config_entry.entry_id,
