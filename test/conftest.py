@@ -9,13 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from const import CONF_SERIAL_PORT
+from custom_components.schellenberg_usb.const import CONF_SERIAL_PORT
 
 
 @pytest.fixture
