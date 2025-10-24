@@ -125,7 +125,7 @@ async def test_api_send_command(hass: HomeAssistant) -> None:
     api._protocol = mock_protocol
     api._is_connected = True
 
-    api.send_command("test_command")
+    await api.send_command("test_command")
 
     mock_protocol.send_command.assert_called_once_with("test_command")
 
@@ -152,12 +152,12 @@ async def test_api_send_command_not_connected(hass: HomeAssistant) -> None:
 
     # Should not raise but also not send
     with patch("serial_asyncio.create_serial_connection", new_callable=AsyncMock):
-        api.send_command("test_command")
+        await api.send_command("test_command")
         # This would not raise an error, but wouldn't send either
 
 
 @pytest.fixture
-def api_with_mock_transport(hass: HomeAssistant):
+def api_with_mock_transport(hass: HomeAssistant) -> SchellenbergUsbApi:
     """Create an API with mock transport."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
     mock_transport = MagicMock()
@@ -169,7 +169,9 @@ def api_with_mock_transport(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_api_handle_message(hass: HomeAssistant, api_with_mock_transport) -> None:
+async def test_api_handle_message(
+    hass: HomeAssistant, api_with_mock_transport: SchellenbergUsbApi
+) -> None:
     """Test handling incoming messages."""
     api = api_with_mock_transport
 

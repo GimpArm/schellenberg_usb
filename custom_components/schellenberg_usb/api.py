@@ -58,27 +58,31 @@ class SchellenbergUsbApi:
         """Initialize the Schellenberg USB API."""
         self.hass = hass
         self.port = port
-        self._transport = None
-        self._protocol = None
-        self._registered_devices = {}  # Dict[device_id, device_enum] for registered entities
+        self._transport: asyncio.Transport | None = None
+        self._protocol: SchellenbergProtocol | None = None
+        self._registered_devices: dict[
+            str, str
+        ] = {}  # Dict[device_id, device_enum] for registered entities
         self._is_connecting = False
-        self._pairing_future = None
-        self._stop_pairing_task = None  # Track task to stop pairing
+        self._pairing_future: asyncio.Future[str] | None = None
+        self._stop_pairing_task: asyncio.Task[None] | None = (
+            None  # Track task to stop pairing
+        )
         self._last_paired_device_enum: str | None = (
             None  # Store enum of last paired device
         )
 
         # USB stick status
         self._is_connected = False
-        self._device_version = None
-        self._device_mode = None  # boot, initial, or listening
-        self._verify_future = None
-        self._device_id_future = None
-        self._hub_id = None
+        self._device_version: str | None = None
+        self._device_mode: str | None = None  # boot, initial, or listening
+        self._verify_future: asyncio.Future[bool] | None = None
+        self._device_id_future: asyncio.Future[str] | None = None
+        self._hub_id: str | None = None
 
         # Retry queue for commands that failed with "stick busy"
         self._pending_retry_command: str | None = None
-        self._retry_task = None
+        self._retry_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         """Establish a connection to the serial port."""
@@ -108,7 +112,8 @@ class SchellenbergUsbApi:
                 _LOGGER.error(
                     "Device verification failed - not a Schellenberg USB stick"
                 )
-                self._transport.close()
+                if self._transport:
+                    self._transport.close()
                 self._transport = None
                 self._is_connected = False
                 return
@@ -732,11 +737,11 @@ class SchellenbergProtocol(asyncio.Protocol):
         self.message_callback = message_callback
         self.api = api
         self.buffer = ""
-        self.transport = None
+        self.transport: asyncio.Transport | None = None
 
-    def connection_made(self, transport: asyncio.Transport) -> None:
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
         """Called when a connection is made."""
-        self.transport = transport
+        self.transport = transport  # type: ignore[assignment]
 
     def data_received(self, data: bytes) -> None:
         """Called with new data from the serial port."""

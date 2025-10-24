@@ -95,6 +95,6 @@ class PairingFlowHandler:
                 }
             ),
             description_placeholders={
-                "device_id": self._device_id,
+                "device_id": self._device_id or "unknown",
             },
         )

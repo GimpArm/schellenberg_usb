@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,7 +24,7 @@ from custom_components.schellenberg_usb.const import (
 
 
 @pytest.fixture
-async def mock_config_entry(hass: HomeAssistant):
+async def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
     """Create a mock config entry."""
     entry = ConfigEntry(
         version=1,
@@ -34,8 +35,11 @@ async def mock_config_entry(hass: HomeAssistant):
         entry_id="test_entry_id",
         state=ConfigEntryState.LOADED,
         minor_version=1,
+        source="test",
+        unique_id=None,
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
     )
-    entry.add_to_hass(hass)
     return entry
 
 
@@ -102,7 +106,9 @@ async def test_async_setup_pair_service_success(
     mock_config_entry.runtime_data = mock_api
 
     # Mock handle_new_device
-    async def mock_handle_new_device(device_id: str, device_name: str | None = None):
+    async def mock_handle_new_device(
+        device_id: str, device_name: str | None = None
+    ) -> None:
         pass
 
     hass.data[DOMAIN]["handle_new_device"] = mock_handle_new_device

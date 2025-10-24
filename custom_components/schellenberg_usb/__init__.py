@@ -6,6 +6,7 @@ import logging
 
 import voluptuous as vol
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
@@ -42,9 +43,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         # Find the first loaded config entry for this integration
         entries = hass.config_entries.async_entries(DOMAIN)
         loaded_entries = [
-            entry
-            for entry in entries
-            if entry.state == hass.config_entries.ConfigEntryState.LOADED
+            entry for entry in entries if entry.state == ConfigEntryState.LOADED
         ]
 
         if not loaded_entries:
@@ -95,7 +94,7 @@ async def async_setup_entry(
     api = SchellenbergUsbApi(hass, port)
 
     # Load paired devices from storage
-    storage = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    storage: Store[dict[str, list[dict]]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     stored_data = await storage.async_load() or {"devices": []}
     devices = stored_data.get("devices", [])
 
@@ -188,7 +187,17 @@ async def async_setup_entry(
         if event.data["action"] != "remove":
             return
 
-        entity_entry = er.async_get(hass).deleted_entities.get(event.data["entity_id"])
+        entity_id = event.data["entity_id"]
+        entity_registry = er.async_get(hass)
+        # The deleted_entities registry expects a tuple key, so we iterate directly
+        entity_entry = None
+        for key, value in entity_registry.deleted_entities.items():
+            # The key is a tuple of (domain, platform, unique_id)
+            # but value should have the entity_id we're looking for
+            if hasattr(value, "entity_id") and value.entity_id == entity_id:
+                entity_entry = value
+                break
+
         if not entity_entry or entity_entry.config_entry_id != entry.entry_id:
             return
 
@@ -262,7 +271,7 @@ async def async_remove_config_entry_device(
         True if the device should be removed from the config entry, False otherwise
     """
     # Load storage to get list of known devices
-    storage = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    storage: Store[dict[str, list[dict]]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     current_data = await storage.async_load() or {"devices": []}
     devices = current_data.get("devices", [])
 

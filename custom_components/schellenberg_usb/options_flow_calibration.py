@@ -57,14 +57,14 @@ class CalibrationFlowHandler:
         confirmation for the device that was just paired.
         """
         # Get the device ID from the pairing handler
-        device_id = self.flow.pairing_handler.get_last_paired_device_id()
+        device_id = self.flow.pairing_handler.get_last_paired_device_id()  # type: ignore[attr-defined]
 
         if device_id is None:
             # Fallback to regular calibration if no device ID available
             return await self.async_step_calibration()
 
         # Load paired devices from storage to get device details
-        storage = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
+        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
         stored_data = await storage.async_load() or {"devices": []}
         devices = stored_data.get("devices", [])
 
@@ -83,7 +83,7 @@ class CalibrationFlowHandler:
     ) -> ConfigFlowResult:
         """Select a device to calibrate."""
         # Load paired devices from storage
-        storage = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
+        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
         stored_data = await storage.async_load() or {"devices": []}
         devices = stored_data.get("devices", [])
 
@@ -311,6 +311,8 @@ class CalibrationFlowHandler:
         Returns:
             True if movement start event received, False if timeout.
         """
+        if self._selected_device is None:
+            return False
         device_id = self._selected_device["id"]
         self._start_event = asyncio.Event()
         loop = asyncio.get_event_loop()
@@ -340,7 +342,7 @@ class CalibrationFlowHandler:
             return True
         finally:
             # Clean up listener
-            if self._event_listener_unsub:
+            if self._event_listener_unsub is not None:
                 self._event_listener_unsub()
                 self._event_listener_unsub = None
             self._start_event = None
@@ -351,6 +353,8 @@ class CalibrationFlowHandler:
         Returns:
             True if stop event received, False if timeout.
         """
+        if self._selected_device is None:
+            return False
         device_id = self._selected_device["id"]
         self._stop_event = asyncio.Event()
         loop = asyncio.get_event_loop()
@@ -378,30 +382,32 @@ class CalibrationFlowHandler:
             return True
         finally:
             # Clean up listener
-            if self._event_listener_unsub:
+            if self._event_listener_unsub is not None:
                 self._event_listener_unsub()
                 self._event_listener_unsub = None
             self._stop_event = None
 
     async def _save_calibration_data(self, open_time: float, close_time: float) -> None:
         """Save calibration times to device storage."""
-        storage = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
+        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
         stored_data = await storage.async_load() or {"devices": []}
 
         # Find and update the device
-        for device in stored_data.get("devices", []):
-            if device["id"] == self._selected_device["id"]:
-                device[CONF_OPEN_TIME] = round(open_time, 2)
-                device[CONF_CLOSE_TIME] = round(close_time, 2)
-                break
+        if self._selected_device is not None:
+            for device in stored_data.get("devices", []):
+                if device["id"] == self._selected_device["id"]:
+                    device[CONF_OPEN_TIME] = round(open_time, 2)
+                    device[CONF_CLOSE_TIME] = round(close_time, 2)
+                    break
 
         await storage.async_save(stored_data)
 
         # Send signal to notify entities that calibration has been completed
-        async_dispatcher_send(
-            self.flow.hass,
-            SIGNAL_CALIBRATION_COMPLETED,
-            self._selected_device["id"],
-            round(open_time, 2),
-            round(close_time, 2),
-        )
+        if self._selected_device is not None:
+            async_dispatcher_send(
+                self.flow.hass,
+                SIGNAL_CALIBRATION_COMPLETED,
+                self._selected_device["id"],
+                round(open_time, 2),
+                round(close_time, 2),
+            )

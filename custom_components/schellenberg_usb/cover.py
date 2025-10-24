@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from homeassistant.components.cover import (
     ATTR_POSITION,
@@ -50,7 +51,7 @@ async def async_setup_entry(
     api = entry.runtime_data
     device_registry = dr.async_get(hass)
 
-    storage = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+    storage: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     stored_data = await storage.async_load()
 
     if not stored_data or "devices" not in stored_data:
@@ -161,12 +162,22 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         # Position calculation attributes - use calibration times if available
         device_data = device_data or {}
-        self._travel_time_open = device_data.get(CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME)
-        self._travel_time_close = device_data.get(CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME)
-        self._move_start_time = None
-        self._move_start_position = None  # Starting position when movement began
-        self._position_update_task = None  # Task for real-time position updates
-        self._target_position = None  # Target position for set_cover_position
+        self._travel_time_open: float = device_data.get(
+            CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME
+        )
+        self._travel_time_close: float = device_data.get(
+            CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME
+        )
+        self._move_start_time: float | None = None
+        self._move_start_position: int | None = (
+            None  # Starting position when movement began
+        )
+        self._position_update_task: asyncio.Task[None] | None = (
+            None  # Task for real-time position updates
+        )
+        self._target_position: int | None = (
+            None  # Target position for set_cover_position
+        )
 
     @property
     def available(self) -> bool:
@@ -248,7 +259,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._stop_position_tracking()
 
     @callback
-    def _handle_event(self, event: str):
+    def _handle_event(self, event: str) -> None:
         """Handle events from the USB stick for this device."""
         _LOGGER.info(
             "Device %s (%s) received activity event: %s",
@@ -294,7 +305,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         self.async_write_ha_state()
 
-    def _start_position_tracking(self):
+    def _start_position_tracking(self) -> None:
         """Start tracking position updates every second."""
         # Cancel any existing tracking task
         self._stop_position_tracking()
@@ -304,13 +315,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._async_position_update_loop()
         )
 
-    def _stop_position_tracking(self):
+    def _stop_position_tracking(self) -> None:
         """Stop the position tracking task."""
         if self._position_update_task and not self._position_update_task.done():
             self._position_update_task.cancel()
         self._position_update_task = None
 
-    async def _async_position_update_loop(self):
+    async def _async_position_update_loop(self) -> None:
         """Update position every 200ms internally, report to HA every 1 second."""
         try:
             ha_update_counter = 0
@@ -328,9 +339,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 if self._target_position is not None:
                     position_reached = (
                         self._attr_is_opening
+                        and self._attr_current_cover_position is not None
                         and self._attr_current_cover_position >= self._target_position
                     ) or (
                         self._attr_is_closing
+                        and self._attr_current_cover_position is not None
                         and self._attr_current_cover_position <= self._target_position
                     )
 
@@ -354,7 +367,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         return
 
                 # Check if we've reached the limits
-                if self._attr_current_cover_position <= 0:
+                if (
+                    self._attr_current_cover_position is not None
+                    and self._attr_current_cover_position <= 0
+                ):
                     _LOGGER.info(
                         "Device %s reached fully closed position (0%%)",
                         self._attr_name,
@@ -368,7 +384,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     self._target_position = None
                     self.async_write_ha_state()
                     return
-                if self._attr_current_cover_position >= 100:
+                if (
+                    self._attr_current_cover_position is not None
+                    and self._attr_current_cover_position >= 100
+                ):
                     _LOGGER.info(
                         "Device %s reached fully open position (100%%)",
                         self._attr_name,
@@ -392,7 +411,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._position_update_task = None
             raise
 
-    def _update_position(self):
+    def _update_position(self) -> None:
         """Calculate and update the position based on travel time."""
         if self._move_start_time is None or self._move_start_position is None:
             return
@@ -428,22 +447,22 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             travel_time,
         )
 
-    async def async_open_cover(self, **kwargs) -> None:
+    async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
         _LOGGER.debug("Opening cover %s (enum=%s)", self._attr_name, self._device_enum)
         await self._api.control_blind(self._device_enum, CMD_UP)
 
-    async def async_close_cover(self, **kwargs) -> None:
+    async def async_close_cover(self, **kwargs: Any) -> None:
         """Close cover."""
         _LOGGER.debug("Closing cover %s (enum=%s)", self._attr_name, self._device_enum)
         await self._api.control_blind(self._device_enum, CMD_DOWN)
 
-    async def async_stop_cover(self, **kwargs) -> None:
+    async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         _LOGGER.debug("Stopping cover %s (enum=%s)", self._attr_name, self._device_enum)
         await self._api.control_blind(self._device_enum, CMD_STOP)
 
-    async def async_set_cover_position(self, **kwargs) -> None:
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""
         target_position = kwargs[ATTR_POSITION]
         current_position = self._attr_current_cover_position

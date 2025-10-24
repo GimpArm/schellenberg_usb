@@ -55,13 +55,13 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_on(user_input)
+        return await self.led_handler.async_step_led_commands(user_input)
 
     async def async_step_led_off(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_off(user_input)
+        return await self.led_handler.async_step_led_commands(user_input)
 
     async def async_step_led_blink(
         self, user_input: dict[str, Any] | None = None
@@ -80,13 +80,15 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_confirm(user_input)
+        return await self.calibration_handler.async_step_calibration(user_input)
 
     async def async_step_calibration_run(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_run(user_input)
+        return await self.calibration_handler.async_step_calibration_complete(
+            user_input
+        )
 
     async def async_step_calibration_after_pairing(
         self, user_input: dict[str, Any] | None = None

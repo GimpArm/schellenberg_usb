@@ -8,6 +8,7 @@ import serial  # NOTE: blocking open used only to sanity-check connectivity
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
@@ -40,7 +41,7 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # -------------------------
     # USER-INITIATED FLOW
     # -------------------------
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
         """Handle the initial step started by the user."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -70,7 +71,7 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # -------------------------
     # USB DISCOVERY FLOW
     # -------------------------
-    async def async_step_usb(self, discovery_info: UsbServiceInfo):
+    async def async_step_usb(self, discovery_info: UsbServiceInfo) -> ConfigFlowResult:
         """Handle discovery from the USB subsystem."""
         # Try to get the most stable unique identifier we can (serial number if present).
         unique = getattr(discovery_info, "serial_number", None) or (
@@ -98,7 +99,9 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Ask for confirmation (and allow editing the port if the host maps it differently)
         return await self.async_step_usb_confirm()
 
-    async def async_step_usb_confirm(self, user_input=None):
+    async def async_step_usb_confirm(
+        self, user_input: dict | None = None
+    ) -> ConfigFlowResult:
         """Confirm USB-discovered device and create the entry."""
         errors: dict[str, str] = {}
 
@@ -140,7 +143,7 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def _form_schema(
         self, errors: dict[str, str], default_port: str, step_id: str = "user"
-    ):
+    ) -> ConfigFlowResult:
         """Return a form with a (prefilled) serial port field."""
         return self.async_show_form(
             step_id=step_id,
