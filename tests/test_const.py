@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from custom_components.schellenberg_usb.const import (
     CALIBRATION_TIMEOUT,
     CMD_DOWN,

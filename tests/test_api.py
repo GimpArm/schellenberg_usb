@@ -9,7 +9,6 @@ import pytest
 from homeassistant.core import HomeAssistant
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
-from custom_components.schellenberg_usb.const import PAIRING_TIMEOUT
 
 
 @pytest.mark.asyncio
