@@ -42,7 +42,45 @@
     },
     "abort": {
       "already_configured": "Device is already configured",
-      "no_hub": "No USB hub found. Please set up the USB hub first."
+      "no_hub": "No USB hub found. Please set up the USB hub first.",
+      "reconfigure_successful": "Calibration completed successfully"
+    }
+  },
+  "reconfigure": {
+    "step": {
+      "reconfigure": {
+        "title": "Calibrate device",
+        "description": "Start calibration for this device. Calibration will measure how long it takes for your blind to fully open and close."
+      },
+      "calibration_close": {
+        "title": "Step 1: Close the blind",
+        "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+        "submit": "Next"
+      },
+      "calibration_open_instruction": {
+        "title": "Step 2: Open the blind",
+        "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
+        "submit": "Start"
+      },
+      "calibration_close_instruction": {
+        "title": "Step 3: Close the blind",
+        "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
+        "submit": "Start"
+      },
+      "calibration_complete": {
+        "title": "Calibration complete",
+        "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
+        "submit": "Done"
+      }
+    },
+    "error": {
+      "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+      "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
+      "unknown": "An unexpected error occurred during calibration. Please try again."
+    },
+    "abort": {
+      "device_not_found": "Device not found in storage.",
+      "reconfigure_successful": "Calibration completed successfully"
     }
   },
   "options": {

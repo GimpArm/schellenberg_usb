@@ -48,6 +48,17 @@ class CalibrationFlowHandler:
         self._open_time: float | None = None
         self._close_time: float | None = None
 
+    async def set_device_by_id(self, device_id: str) -> None:
+        """Set the device to calibrate by its ID.
+
+        Used by reconfigure flow to directly set the device without selection.
+        """
+        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
+        stored_data = await storage.async_load() or {"devices": []}
+        devices = stored_data.get("devices", [])
+
+        self._selected_device = next((d for d in devices if d["id"] == device_id), None)
+
     async def async_step_calibration_after_pairing(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:

@@ -16,6 +16,7 @@ from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
 from .const import CONF_DEVICE_NAME, CONF_SERIAL_PORT, DOMAIN
 from .options_flow import SchellenbergOptionsFlowHandler
+from .options_flow_calibration import CalibrationFlowHandler
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,14 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.OptionsFlow:
         """Get the options flow for this handler."""
         return SchellenbergOptionsFlowHandler()
+
+    @staticmethod
+    @callback
+    def async_get_reconfigure_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> SchellenbergReconfigureFlow:
+        """Get the reconfigure flow for device calibration."""
+        return SchellenbergReconfigureFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -288,3 +297,70 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "device_id": self._device_id or "unknown",
             },
         )
+
+
+class SchellenbergReconfigureFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle reconfiguration (calibration) of a paired device."""
+
+    VERSION = 1
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize the reconfigure flow."""
+        self.config_entry = config_entry
+        self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start the calibration flow for this device."""
+        # Set the device ID from the config entry so calibration knows which device
+        device_id = self.config_entry.data.get("device_id")
+        if not device_id:
+            return self.async_abort(reason="device_not_found")
+
+        # Set the selected device for the calibration handler
+        await self.calibration_handler.set_device_by_id(device_id)
+
+        # Start the calibration process
+        return await self.calibration_handler.async_step_calibration_close(user_input)
+
+    # Delegate all calibration steps to the handler
+    async def async_step_calibration_close(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_close(user_input)
+
+    async def async_step_calibration_open_instruction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_open_instruction(
+            user_input
+        )
+
+    async def async_step_calibration_close_instruction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_close_instruction(
+            user_input
+        )
+
+    async def async_step_calibration_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_complete(
+            user_input
+        )
+
+    def async_create_entry(
+        self,
+        *,
+        title: str | None = None,
+        data: dict[str, Any],
+    ) -> ConfigFlowResult:
+        """Override to use update_reload_and_abort for reconfigure flows."""
+        # For reconfigure flow, we don't create a new entry, we just end the flow
+        return self.async_abort(reason="reconfigure_successful")
