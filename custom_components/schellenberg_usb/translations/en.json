@@ -29,21 +29,9 @@
       "init": {
         "title": "Schellenberg USB options",
         "menu_options": {
-          "led_commands": "LED commands",
           "calibration": "Device calibration",
           "pairing": "Pair new device"
         }
-      },
-      "led_commands": {
-        "title": "LED commands",
-        "menu_options": {
-          "led_blink": "Blink LED"
-        }
-      },
-      "led_blink": {
-        "title": "Blink LED",
-        "description": "The LED on the USB stick will blink 5 times and then turn off.",
-        "submit": "Blink"
       },
       "calibration": {
         "title": "Device calibration",
@@ -58,9 +46,25 @@
         "description": "Calibration process for {device_name}:\n\n1. The blind will close all the way down\n2. Then we will time how long it takes to open (move up)\n3. Then we will time how long it takes to close (move down)\n\nThis process may take several minutes. Press 'Start' to begin.",
         "submit": "Start"
       },
-      "calibration_run": {
-        "title": "Calibrating...",
-        "description": "Calibration in progress. Please wait while we measure the open and close times for your blind."
+      "calibration_close": {
+        "title": "Step 1: Close the blind",
+        "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+        "submit": "Next"
+      },
+      "calibration_open_instruction": {
+        "title": "Step 2: Open the blind",
+        "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
+        "submit": "Start"
+      },
+      "calibration_close_instruction": {
+        "title": "Step 3: Close the blind",
+        "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
+        "submit": "Start"
+      },
+      "calibration_complete": {
+        "title": "Calibration complete",
+        "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
+        "submit": "Done"
       },
       "pairing": {
         "title": "Pair a new device",
@@ -78,6 +82,7 @@
     "error": {
       "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
       "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+      "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
       "unknown": "An unexpected error occurred during calibration. Please try again.",
       "submit": "Close"
     },

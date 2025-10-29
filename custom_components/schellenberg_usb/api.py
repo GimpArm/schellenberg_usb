@@ -68,9 +68,6 @@ class SchellenbergUsbApi:
         self._stop_pairing_task: asyncio.Task[None] | None = (
             None  # Track task to stop pairing
         )
-        self._last_paired_device_enum: str | None = (
-            None  # Store enum of last paired device
-        )
 
         # USB stick status
         self._is_connected = False
@@ -361,22 +358,23 @@ class SchellenbergUsbApi:
             pair_command,
         )
 
-        # Create a future to wait for pairing result
+        # Create a future to wait for device ID first
         self._pairing_future = self.hass.loop.create_future()
-        self._last_paired_device_enum = (
-            device_enum  # Store the enum for this pairing attempt
-        )
 
         try:
-            # Send the pairing command
-            await self.send_command(pair_command)
-
-            # Wait for pairing response with timeout
+            # Wait for device to send its ID first (with timeout)
             device_id = await asyncio.wait_for(
                 self._pairing_future, timeout=PAIRING_TIMEOUT
             )
+
+            # Once we have the device ID, send the pairing command
+            _LOGGER.debug(
+                "Received device ID %s, sending pairing command",
+                device_id,
+            )
+            await self.send_command(pair_command)
         except TimeoutError:
-            _LOGGER.warning("Pairing timeout - no device responded")
+            _LOGGER.warning("Pairing timeout - no device responded with ID")
             return None
         else:
             # Pairing successful - return the device ID and enum
@@ -493,13 +491,6 @@ class SchellenbergUsbApi:
         _LOGGER.debug(
             "Registered entity for device %s with enum %s", device_id, device_enum
         )
-
-    def get_last_device_enum(self) -> str:
-        """Get the last used device enumerator as a hex string."""
-        if self._last_paired_device_enum is not None:
-            return self._last_paired_device_enum
-        # Default to start enum if no device has been paired yet
-        return f"{PAIRING_DEVICE_ENUM_START:02X}"
 
     async def verify_device(self) -> bool:
         """Verify this is a Schellenberg USB stick by sending !? command.

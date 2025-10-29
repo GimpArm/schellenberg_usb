@@ -134,32 +134,24 @@ class CalibrationFlowHandler:
     async def async_step_calibration_open_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Instruct user to open the blinds."""
-        if user_input is not None:
-            # User has started opening the blinds - begin measurement
-            return await self.async_step_calibration_measure_open()
-
-        if self._selected_device is None:
-            return self.flow.async_abort(reason="device_not_found")
-
-        return self.flow.async_show_form(
-            step_id="calibration_open_instruction",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "device_name": self._selected_device["name"],
-            },
-            last_step=False,
-        )
-
-    async def async_step_calibration_measure_open(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Wait for device to open and measure the time."""
+        """Instruct user to open the blinds and wait for movement."""
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
 
         errors = {}
 
+        # Show instruction form first time
+        if user_input is None:
+            return self.flow.async_show_form(
+                step_id="calibration_open_instruction",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
+                last_step=False,
+            )
+
+        # User clicked Next - wait for movement start and measure timing
         try:
             # Wait for user to manually open the blinds
             # This will trigger EVENT_STARTED_MOVING_UP from the device
@@ -167,8 +159,11 @@ class CalibrationFlowHandler:
             if not start_ok:
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
-                    step_id="calibration_measure_open",
+                    step_id="calibration_open_instruction",
                     data_schema=vol.Schema({}),
+                    description_placeholders={
+                        "device_name": self._selected_device["name"],
+                    },
                     errors=errors,
                     last_step=False,
                 )
@@ -181,8 +176,11 @@ class CalibrationFlowHandler:
             if not stop_ok:
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
-                    step_id="calibration_measure_open",
+                    step_id="calibration_open_instruction",
                     data_schema=vol.Schema({}),
+                    description_placeholders={
+                        "device_name": self._selected_device["name"],
+                    },
                     errors=errors,
                     last_step=False,
                 )
@@ -197,8 +195,11 @@ class CalibrationFlowHandler:
         except Exception:  # noqa: BLE001
             errors["base"] = "unknown"
             return self.flow.async_show_form(
-                step_id="calibration_measure_open",
+                step_id="calibration_open_instruction",
                 data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
                 errors=errors,
                 last_step=False,
             )
@@ -206,32 +207,24 @@ class CalibrationFlowHandler:
     async def async_step_calibration_close_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Instruct user to close the blinds."""
-        if user_input is not None:
-            # User is ready to close the blinds - begin measurement
-            return await self.async_step_calibration_measure_close()
-
-        if self._selected_device is None:
-            return self.flow.async_abort(reason="device_not_found")
-
-        return self.flow.async_show_form(
-            step_id="calibration_close_instruction",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "device_name": self._selected_device["name"],
-            },
-            last_step=False,
-        )
-
-    async def async_step_calibration_measure_close(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Wait for device to close and measure the time."""
+        """Instruct user to close the blinds and wait for movement."""
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
 
         errors = {}
 
+        # Show instruction form first time
+        if user_input is None:
+            return self.flow.async_show_form(
+                step_id="calibration_close_instruction",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
+                last_step=False,
+            )
+
+        # User clicked Next - wait for movement start and measure timing
         try:
             # Wait for user to manually close the blinds
             # This will trigger EVENT_STARTED_MOVING_DOWN from the device
@@ -239,8 +232,11 @@ class CalibrationFlowHandler:
             if not start_ok:
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
-                    step_id="calibration_measure_close",
+                    step_id="calibration_close_instruction",
                     data_schema=vol.Schema({}),
+                    description_placeholders={
+                        "device_name": self._selected_device["name"],
+                    },
                     errors=errors,
                     last_step=False,
                 )
@@ -253,8 +249,11 @@ class CalibrationFlowHandler:
             if not stop_ok:
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
-                    step_id="calibration_measure_close",
+                    step_id="calibration_close_instruction",
                     data_schema=vol.Schema({}),
+                    description_placeholders={
+                        "device_name": self._selected_device["name"],
+                    },
                     errors=errors,
                     last_step=False,
                 )
@@ -269,8 +268,11 @@ class CalibrationFlowHandler:
         except Exception:  # noqa: BLE001
             errors["base"] = "unknown"
             return self.flow.async_show_form(
-                step_id="calibration_measure_close",
+                step_id="calibration_close_instruction",
                 data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
                 errors=errors,
                 last_step=False,
             )
@@ -287,7 +289,7 @@ class CalibrationFlowHandler:
             return self.flow.async_abort(reason="device_not_found")
 
         if user_input is not None:
-            # User confirmed completion - save calibration data
+            # User confirmed completion - save calibration data and set cover position
             await self._save_calibration_data(self._open_time, self._close_time)
             return self.flow.async_create_entry(title="", data={})
 
@@ -388,7 +390,11 @@ class CalibrationFlowHandler:
             self._stop_event = None
 
     async def _save_calibration_data(self, open_time: float, close_time: float) -> None:
-        """Save calibration times to device storage."""
+        """Save calibration times to device storage and set cover position.
+
+        After calibration completes, the device is in fully closed position,
+        so we update the cover entity position to 0.
+        """
         storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
         stored_data = await storage.async_load() or {"devices": []}
 

@@ -187,6 +187,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         """
         return self._api.is_connected
 
+    @property
+    def icon(self) -> str:
+        """Return the icon based on cover state."""
+        if self._attr_is_closed:
+            return "mdi:window-shutter"
+        return "mdi:window-shutter-open"
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        """Return if entity should be enabled by default."""
+        return True
+
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
         await super().async_added_to_hass()
@@ -245,12 +257,20 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._travel_time_open = open_time
         self._travel_time_close = close_time
 
+        # The device is fully closed after calibration, so set position to 0
+        self._attr_current_cover_position = 0
+        self._attr_is_closed = True
+
         _LOGGER.info(
-            "Device %s calibration updated: open_time=%.2fs, close_time=%.2fs",
+            "Device %s calibration updated: open_time=%.2fs, close_time=%.2fs. "
+            "Cover position set to fully closed (0%%)",
             self._attr_name,
             open_time,
             close_time,
         )
+
+        # Update entity state
+        self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up when entity is removed."""
@@ -355,8 +375,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._attr_name,
                             self._target_position,
                         )
-                        # Send stop command to the device
-                        await self._api.control_blind(self._device_enum, CMD_STOP)
+                        # If target is 0 or 100, let the device stop naturally at its limits
+                        if self._target_position not in (0, 100):
+                            # Send stop command to the device for intermediate positions
+                            await self._api.control_blind(self._device_enum, CMD_STOP)
                         self._position_update_task = None
                         self._attr_is_opening = False
                         self._attr_is_closing = False
@@ -366,41 +388,43 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self.async_write_ha_state()
                         return
 
-                # Check if we've reached the limits
-                if (
-                    self._attr_current_cover_position is not None
-                    and self._attr_current_cover_position <= 0
-                ):
-                    _LOGGER.info(
-                        "Device %s reached fully closed position (0%%)",
-                        self._attr_name,
-                    )
-                    self._attr_current_cover_position = 0
-                    self._position_update_task = None
-                    self._attr_is_opening = False
-                    self._attr_is_closing = False
-                    self._move_start_time = None
-                    self._move_start_position = None
-                    self._target_position = None
-                    self.async_write_ha_state()
-                    return
-                if (
-                    self._attr_current_cover_position is not None
-                    and self._attr_current_cover_position >= 100
-                ):
-                    _LOGGER.info(
-                        "Device %s reached fully open position (100%%)",
-                        self._attr_name,
-                    )
-                    self._attr_current_cover_position = 100
-                    self._position_update_task = None
-                    self._attr_is_opening = False
-                    self._attr_is_closing = False
-                    self._move_start_time = None
-                    self._move_start_position = None
-                    self._target_position = None
-                    self.async_write_ha_state()
-                    return
+                # Check if we've reached the limits (only if no specific target position)
+                # If a target position is set, let the target position check handle it
+                if self._target_position is None:
+                    if (
+                        self._attr_is_closing
+                        and self._attr_current_cover_position is not None
+                        and self._attr_current_cover_position <= 0
+                    ):
+                        _LOGGER.info(
+                            "Device %s reached fully closed position (0%%)",
+                            self._attr_name,
+                        )
+                        self._attr_current_cover_position = 0
+                        self._position_update_task = None
+                        self._attr_is_opening = False
+                        self._attr_is_closing = False
+                        self._move_start_time = None
+                        self._move_start_position = None
+                        self.async_write_ha_state()
+                        return
+                    if (
+                        self._attr_is_opening
+                        and self._attr_current_cover_position is not None
+                        and self._attr_current_cover_position >= 100
+                    ):
+                        _LOGGER.info(
+                            "Device %s reached fully open position (100%%)",
+                            self._attr_name,
+                        )
+                        self._attr_current_cover_position = 100
+                        self._position_update_task = None
+                        self._attr_is_opening = False
+                        self._attr_is_closing = False
+                        self._move_start_time = None
+                        self._move_start_position = None
+                        self.async_write_ha_state()
+                        return
 
                 # Update Home Assistant with new position every 1 second (5 cycles)
                 if ha_update_counter >= 5:
@@ -450,16 +474,36 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
         _LOGGER.debug("Opening cover %s (enum=%s)", self._attr_name, self._device_enum)
+        self._attr_is_opening = True
+        self._attr_is_closing = False
+        self._move_start_time = time.monotonic()
+        self._move_start_position = self._attr_current_cover_position
+        self._start_position_tracking()
+        self.async_write_ha_state()
         await self._api.control_blind(self._device_enum, CMD_UP)
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close cover."""
         _LOGGER.debug("Closing cover %s (enum=%s)", self._attr_name, self._device_enum)
+        self._attr_is_opening = False
+        self._attr_is_closing = True
+        self._move_start_time = time.monotonic()
+        self._move_start_position = self._attr_current_cover_position
+        self._start_position_tracking()
+        self.async_write_ha_state()
         await self._api.control_blind(self._device_enum, CMD_DOWN)
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         _LOGGER.debug("Stopping cover %s (enum=%s)", self._attr_name, self._device_enum)
+        self._stop_position_tracking()
+        self._update_position()
+        self._attr_is_opening = False
+        self._attr_is_closing = False
+        self._move_start_time = None
+        self._move_start_position = None
+        self._target_position = None
+        self.async_write_ha_state()
         await self._api.control_blind(self._device_enum, CMD_STOP)
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
@@ -476,10 +520,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         if target_position == current_position:
             _LOGGER.debug("Target position equals current position, no action needed")
-            return
-
-        if abs(target_position - current_position) < 2:  # Ignore very small changes
-            _LOGGER.debug("Position change too small (<%d%%), ignoring", 2)
             return
 
         # Set the target position for the tracking loop to monitor

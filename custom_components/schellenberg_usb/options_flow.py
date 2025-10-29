@@ -2,7 +2,6 @@
 
 This module provides the main options flow handler which delegates
 to specialized handlers for different functional areas:
-- LED commands (options_flow_led.py)
 - Calibration (options_flow_calibration.py)
 - Pairing (options_flow_pairing.py)
 """
@@ -14,7 +13,6 @@ from typing import Any
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlow
 
 from .options_flow_calibration import CalibrationFlowHandler
-from .options_flow_led import LedCommandsFlowHandler
 from .options_flow_pairing import PairingFlowHandler
 
 
@@ -27,7 +25,6 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
 
     def __init__(self) -> None:
         """Initialize the options flow."""
-        self.led_handler = LedCommandsFlowHandler(self)
         self.calibration_handler = CalibrationFlowHandler(self)
         self.pairing_handler = PairingFlowHandler(self)
 
@@ -38,36 +35,10 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
         return self.async_show_menu(
             step_id="init",
             menu_options={
-                "led_commands": "LED commands",
                 "calibration": "Device calibration",
                 "pairing": "Pair new device",
             },
         )
-
-    # LED Commands delegation
-    async def async_step_led_commands(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_commands(user_input)
-
-    async def async_step_led_on(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_commands(user_input)
-
-    async def async_step_led_off(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_commands(user_input)
-
-    async def async_step_led_blink(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Delegate to LED commands handler."""
-        return await self.led_handler.async_step_led_blink(user_input)
 
     # Calibration delegation
     async def async_step_calibration(
@@ -95,6 +66,36 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
     ) -> ConfigFlowResult:
         """Delegate to calibration handler for newly paired device."""
         return await self.calibration_handler.async_step_calibration_after_pairing(
+            user_input
+        )
+
+    async def async_step_calibration_close(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_close(user_input)
+
+    async def async_step_calibration_open_instruction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_open_instruction(
+            user_input
+        )
+
+    async def async_step_calibration_close_instruction(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_close_instruction(
+            user_input
+        )
+
+    async def async_step_calibration_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delegate to calibration handler."""
+        return await self.calibration_handler.async_step_calibration_complete(
             user_input
         )
 
