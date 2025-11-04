@@ -1,0 +1,10 @@
+{
+  "entity": {
+    "cover": {}
+  },
+  "services": {
+    "calibrate": {
+      "service": "mdi:tune"
+    }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "config": {
+    "step": {
+      "menu": {
+        "title": "Schellenberg USB setup",
+        "menu_options": {
+          "user": "Set up USB hub",
+          "pair_device_menu": "Pair new device"
+        }
+      },
+      "user": {
+        "title": "Set up Schellenberg USB Stick",
+        "description": "Enter the serial port path for your Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirm Schellenberg USB Stick",
+        "description": "Confirm the serial port path for your discovered Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the serial port",
+      "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_hub": "No USB hub found. Please set up the USB hub first.",
+      "reconfigure_successful": "Calibration completed successfully"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Blind",
+      "initiate_flow": {
+        "user": "Pair device"
+      },
+      "step": {
+        "user": {
+          "title": "Pair a new device",
+          "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
+          "submit": "Pair"
+        },
+        "name_device": {
+          "title": "Name your device",
+          "description": "Pairing successful! Device ID: {device_id}\n\nPlease provide a friendly name for this blind.",
+          "data": {
+            "device_name": "Device name"
+          }
+        },
+        "calibration_close": {
+          "title": "Step 1: Close the blind",
+          "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+          "submit": "Next"
+        },
+        "calibration_open_instruction": {
+          "title": "Step 2: Open the blind",
+          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving up message from the blinds.",
+          "submit": "Start"
+        },
+        "calibration_close_instruction": {
+          "title": "Step 3: Close the blind",
+          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving down message from the blinds.",
+          "submit": "Start"
+        },
+        "calibration_complete": {
+          "title": "Calibration complete",
+          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
+          "submit": "Done"
+        }
+      },
+      "error": {
+        "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
+        "pairing_failed": "Pairing failed.",
+        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
+        "unknown": "An unexpected error occurred during calibration. Please try again."
+      },
+      "abort": {
+        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+        "pairing_failed": "Pairing failed.",
+        "reconfigure_successful": "Calibration completed successfully"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Edit the serial port path for the Schellenberg USB hub.",
+        "data": {
+          "serial_port": "Serial port"
+        },
+        "submit": "Save"
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the serial port",
+      "unknown": "Unexpected error occurred"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Connection status"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "operating_mode": {
+        "name": "Operating mode"
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "pair": {
+      "name": "Pair device",
+      "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
+    }
+  }
+}
