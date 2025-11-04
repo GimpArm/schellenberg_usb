@@ -83,20 +83,27 @@ async def async_setup_entry(
             device_name = subentry.title
 
             if not device_id or not device_enum:
-                _LOGGER.warning(
-                    "Subentry %s is missing device_id or device_enum, skipping",
+                # This subentry lacks motor identification info; it's likely a non-motor type
+                # or pairing is incomplete. Downgrade to debug to avoid user confusion.
+                _LOGGER.debug(
+                    "Skipping subentry %s (type=%s) missing device_id/device_enum",
                     subentry.subentry_id,
+                    getattr(subentry, "subentry_type", "unknown"),
                 )
                 continue
 
-            # Check if entity already exists to avoid duplicates
-            entity_unique_id = f"{device_id}_cover"
+            # Check if entity already exists to avoid duplicates.
+            # NOTE: The cover entity sets its unique_id to f"schellenberg_{device_id}" in the entity class.
+            # We must use the same pattern here; previously this used f"{device_id}_cover" which never matched
+            # and caused a new entity to be created on every reload, losing the restored position (defaulting to 0).
+            entity_unique_id = f"schellenberg_{device_id}"
             existing_entity_id = entity_registry.async_get_entity_id(
                 "cover", DOMAIN, entity_unique_id
             )
             if existing_entity_id:
+                # Entity registry entry already exists (e.g. after reload). We still need
+                # to create a new entity object so Home Assistant can manage runtime state.
                 entry_entity = entity_registry.entities[existing_entity_id]
-                # If the entity exists but is not yet attached to this subentry, update it
                 if entry_entity.config_subentry_id != subentry.subentry_id:
                     _LOGGER.info(
                         "Updating existing cover entity %s to subentry %s",
@@ -107,7 +114,10 @@ async def async_setup_entry(
                         existing_entity_id,
                         config_subentry_id=subentry.subentry_id,
                     )
-                continue
+                _LOGGER.debug(
+                    "Re-instantiating cover entity object for existing registry entry %s",
+                    existing_entity_id,
+                )
 
             # Create or get device in device registry
             # Link device to both hub entry AND subentry
@@ -219,6 +229,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._target_position: int | None = (
             None  # Target position for set_cover_position
         )
+        # NOTE: Debug/troubleshooting instrumentation removed now that persistence works reliably.
 
     @property
     def available(self) -> bool:
@@ -300,6 +311,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_name,
                 self._device_id,
             )
+
+        # IMPORTANT: We must write the restored (or default) position to the state machine now.
+        # add_to_platform_finish() already wrote an initial state before restoration ran, so without
+        # this call the restored position would not be visible until the first movement/event.
+        # Initial write after restoration (debug instrumentation removed).
+        self.async_write_ha_state()
 
         # Register listeners for events and status updates
         self.async_on_remove(
@@ -401,9 +418,24 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
             # Stop real-time position tracking
             self._stop_position_tracking()
-            self._update_position()
+            # If we had a target position, keep it exactly; avoid recalculating which could overshoot.
+            if self._target_position is not None:
+                self._attr_current_cover_position = self._target_position
+            else:
+                # Final update based on elapsed time only if no explicit target
+                self._update_position()
+            # Clamp extremes explicitly (defensive)
+            if self._attr_current_cover_position is not None:
+                if self._attr_current_cover_position <= 0:
+                    self._attr_current_cover_position = 0
+                elif self._attr_current_cover_position >= 100:
+                    self._attr_current_cover_position = 100
+            # Update closed flag after clamping
+            if self._attr_current_cover_position is not None:
+                self._attr_is_closed = self._attr_current_cover_position == 0
             self._attr_is_opening = False
             self._attr_is_closing = False
+            # Clear movement tracking variables
             self._move_start_time = None
             self._move_start_position = None
             self._target_position = None  # Clear target position on stop
@@ -455,25 +487,24 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         and self._attr_current_cover_position is not None
                         and self._attr_current_cover_position <= self._target_position
                     )
-
                     if position_reached:
-                        # Clamp to exact target position
+                        # Clamp to exact target position (do not clear _target_position yet)
                         self._attr_current_cover_position = self._target_position
                         _LOGGER.info(
                             "Device %s reached target position (%d%%)",
                             self._attr_name,
                             self._target_position,
                         )
-                        # If target is 0 or 100, let the device stop naturally at its limits
+                        # If target is 0 or 100, let the device stop naturally at its limits.
+                        # For intermediate, send STOP and wait for STOP event to finalize & clear target.
                         if self._target_position not in (0, 100):
-                            # Send stop command to the device for intermediate positions
                             await self._api.control_blind(self._device_enum, CMD_STOP)
+                        # Stop tracking loop
                         self._position_update_task = None
-                        self._attr_is_opening = False
-                        self._attr_is_closing = False
+                        # Leave opening/closing flags as-is until STOP to aid debugging
                         self._move_start_time = None
                         self._move_start_position = None
-                        self._target_position = None
+                        # Write state immediately (target preserved)
                         self.async_write_ha_state()
                         return
 
