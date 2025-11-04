@@ -18,6 +18,11 @@ type SchellenbergConfigEntry = ConfigEntry[SchellenbergUsbApi]
 # Platform for the cover entities
 PLATFORMS = ["cover", "sensor", "switch"]
 
+# Subentry types
+SUBENTRY_TYPE_LED = "led"
+SUBENTRY_TYPE_HUB = "hub"
+SUBENTRY_TYPE_BLIND = "blind"
+
 # Configuration keys
 CONF_SERIAL_PORT = "serial_port"
 CONF_DEVICE_NAME = "device_name"

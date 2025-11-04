@@ -14,10 +14,10 @@ from homeassistant.components.cover import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.storage import Store
 
 from .api import SchellenbergUsbApi
 from .const import (
@@ -26,6 +26,7 @@ from .const import (
     CMD_UP,
     CONF_CLOSE_TIME,
     CONF_OPEN_TIME,
+    CONF_SERIAL_PORT,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
@@ -33,76 +34,116 @@ from .const import (
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_STICK_STATUS_UPDATED,
+    SUBENTRY_TYPE_LED,
     SchellenbergConfigEntry,
 )
 
 _LOGGER = logging.getLogger(__name__)
-STORAGE_VERSION = 1
-STORAGE_KEY = f"{DOMAIN}_devices"
 DEFAULT_TRAVEL_TIME = 60.0  # seconds, a sensible default
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: SchellenbergConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the Schellenberg cover entities."""
-    api = entry.runtime_data
-    device_registry = dr.async_get(hass)
+    try:
+        _LOGGER.info("Cover platform async_setup_entry called for: %s", entry.entry_id)
+        _LOGGER.debug("Entry data: %s", entry.data)
 
-    storage: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-    stored_data = await storage.async_load()
-
-    if not stored_data or "devices" not in stored_data:
-        _LOGGER.info("No saved Schellenberg devices found")
-        return
-
-    devices = stored_data["devices"]
-    _LOGGER.info("Loading %d saved Schellenberg devices", len(devices))
-
-    if not devices:
-        _LOGGER.warning("Devices list is empty despite 'devices' key existing")
-        return
-
-    entities = []
-    for device in devices:
-        device_id = device["id"]
-        device_name = device.get("name", f"Blind {device_id}")
-        device_enum = device.get("enum")
-
-        if not device_enum:
+        # Only hub entries should reach here
+        if CONF_SERIAL_PORT not in entry.data:
             _LOGGER.warning(
-                "Device %s is missing enum value, skipping entity creation", device_id
+                "Cover platform called for non-hub entry %s, ignoring", entry.entry_id
             )
-            continue
+            return
+        # This is a hub entry - set up all paired device covers from subentries
+        _LOGGER.info("Setting up cover for hub entry: %s", entry.title)
+        device_registry = dr.async_get(hass)
+        entity_registry = er.async_get(hass)
+        api = entry.runtime_data
 
-        # Create or get device in device registry
-        device_registry.async_get_or_create(
-            config_entry_id=entry.entry_id,
-            identifiers={(DOMAIN, device_id)},
-            name=device_name,
-            manufacturer="Schellenberg",
-            model=f"USB Stick Motor ({device_id}/{device_enum})",
-        )
+        # Get paired devices from subentries
+        subentries = entry.subentries.values()
+        _LOGGER.info("Hub has %d subentries (paired devices)", len(entry.subentries))
 
-        # Create cover entity linked to this device
-        # Note: We create entities for ALL devices every time, not checking if they
-        # already exist. Home Assistant's entity platform will handle deduplication
-        # and updating existing entities with the same unique_id.
-        entities.append(
-            SchellenbergCover(
-                api=api,
-                device_id=device_id,
-                device_enum=device_enum,
-                device_name=device_name,
-                device_data=device,
+        if not entry.subentries:
+            _LOGGER.info("No subentries (paired devices) found for hub")
+            return
+
+        _LOGGER.info("Loading %d paired Schellenberg devices", len(entry.subentries))
+
+        for subentry in subentries:
+            # Skip LED subentry; handled by switch platform
+            if subentry.subentry_type == SUBENTRY_TYPE_LED:
+                continue
+            device_id = subentry.data.get("device_id")
+            device_enum = subentry.data.get("device_enum")
+            device_name = subentry.title
+
+            if not device_id or not device_enum:
+                _LOGGER.warning(
+                    "Subentry %s is missing device_id or device_enum, skipping",
+                    subentry.subentry_id,
+                )
+                continue
+
+            # Check if entity already exists to avoid duplicates
+            entity_unique_id = f"{device_id}_cover"
+            existing_entity_id = entity_registry.async_get_entity_id(
+                "cover", DOMAIN, entity_unique_id
+            )
+            if existing_entity_id:
+                entry_entity = entity_registry.entities[existing_entity_id]
+                # If the entity exists but is not yet attached to this subentry, update it
+                if entry_entity.config_subentry_id != subentry.subentry_id:
+                    _LOGGER.info(
+                        "Updating existing cover entity %s to subentry %s",
+                        existing_entity_id,
+                        subentry.subentry_id,
+                    )
+                    entity_registry.async_update_entity(
+                        existing_entity_id,
+                        config_subentry_id=subentry.subentry_id,
+                    )
+                continue
+
+            # Create or get device in device registry
+            # Link device to both hub entry AND subentry
+            device = device_registry.async_get_or_create(
                 config_entry_id=entry.entry_id,
+                config_subentry_id=subentry.subentry_id,
+                identifiers={(DOMAIN, device_id)},
+                name=device_name,
+                manufacturer="Schellenberg",
+                model=f"USB Stick Motor ({device_id}/{device_enum})",
             )
-        )
+            _LOGGER.debug(
+                "Created/updated device %s for paired device %s",
+                device.id,
+                device_id,
+            )
 
-    _LOGGER.debug("Setting up %d cover entities", len(entities))
-    async_add_entities(entities)
+            # Create cover entity linked to this device
+            # Create and add the new cover entity attached to the subentry
+            _LOGGER.debug("Creating cover entity for device %s", device_id)
+            async_add_entities(
+                [
+                    SchellenbergCover(
+                        api=api,
+                        device_id=device_id,
+                        device_enum=device_enum,
+                        device_name=device_name,
+                        device_data=subentry.data,
+                        config_entry_id=entry.entry_id,
+                    )
+                ],
+                config_subentry_id=subentry.subentry_id,
+            )
+    except Exception:
+        _LOGGER.exception("Error setting up cover platform")
+        raise
 
 
 class SchellenbergCover(CoverEntity, RestoreEntity):
@@ -150,14 +191,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._attr_is_closed = None
         self._attr_is_opening = False
         self._attr_is_closing = False
-        self._attr_current_cover_position = 50  # Assume 50% on startup until restored
+        # Position will be restored from last state in async_added_to_hass. Use None until then.
+        self._attr_current_cover_position: int | None = None
 
-        # Link this entity to the device
+        # Link this entity to the device using identifiers
+        # The device is created separately in async_setup_entry with config_subentry_id
+        # So we only set the identifiers here to link the entity to that device
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, device_id)},
-            name=device_name,
-            manufacturer="Schellenberg",
-            model=f"USB Stick Motor ({device_id}/{device_enum})",
         )
 
         # Position calculation attributes - use calibration times if available
@@ -190,6 +231,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
     @property
     def icon(self) -> str:
         """Return the icon based on cover state."""
+        # Show movement direction icons when actively moving
+        if self._attr_is_opening:
+            return "mdi:arrow-up-box"
+        if self._attr_is_closing:
+            return "mdi:arrow-down-box"
+        # Fallback to open/closed state icons
         if self._attr_is_closed:
             return "mdi:window-shutter"
         return "mdi:window-shutter-open"
@@ -208,9 +255,26 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         # Restore the last known state
         last_state = await self.async_get_last_state()
-        if last_state and last_state.attributes.get(ATTR_POSITION) is not None:
-            self._attr_current_cover_position = last_state.attributes[ATTR_POSITION]
-            self._attr_is_closed = self._attr_current_cover_position == 0
+        if last_state:
+            restored_position = last_state.attributes.get(ATTR_POSITION)
+            if isinstance(restored_position, (int, float)):
+                self._attr_current_cover_position = int(restored_position)
+                self._attr_is_closed = self._attr_current_cover_position == 0
+                _LOGGER.debug(
+                    "Restored position for %s (%s) to %d%%",
+                    self._attr_name,
+                    self._device_id,
+                    self._attr_current_cover_position,
+                )
+        # If we still don't have a position, assume fully closed (0) as a conservative default.
+        if self._attr_current_cover_position is None:
+            self._attr_current_cover_position = 0
+            self._attr_is_closed = True
+            _LOGGER.debug(
+                "No previous state for %s (%s); defaulting position to 0%% (closed)",
+                self._attr_name,
+                self._device_id,
+            )
 
         # Register listeners for events and status updates
         self.async_on_remove(
@@ -477,6 +541,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._attr_is_opening = True
         self._attr_is_closing = False
         self._move_start_time = time.monotonic()
+        # Guard against None (shouldn't happen after added_to_hass, but be safe)
+        if self._attr_current_cover_position is None:
+            self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
         self._start_position_tracking()
         self.async_write_ha_state()
@@ -488,6 +555,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._attr_is_opening = False
         self._attr_is_closing = True
         self._move_start_time = time.monotonic()
+        if self._attr_current_cover_position is None:
+            self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
         self._start_position_tracking()
         self.async_write_ha_state()
@@ -509,6 +578,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""
         target_position = kwargs[ATTR_POSITION]
+        # If position unknown, treat as 0 (closed) for movement logic
+        if self._attr_current_cover_position is None:
+            self._attr_current_cover_position = 0
         current_position = self._attr_current_cover_position
 
         _LOGGER.info(

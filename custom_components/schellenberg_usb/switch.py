@@ -9,11 +9,16 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .api import SchellenbergUsbApi
-from .const import DOMAIN, SIGNAL_STICK_STATUS_UPDATED, SchellenbergConfigEntry
+from .const import (
+    DOMAIN,
+    SIGNAL_STICK_STATUS_UPDATED,
+    SUBENTRY_TYPE_HUB,
+    SchellenbergConfigEntry,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,15 +26,23 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: SchellenbergConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Schellenberg USB switch entities."""
     api: SchellenbergUsbApi = entry.runtime_data
-
-    # Create switch entity for USB stick LED
-    switches = [SchellenbergLedSwitch(api, entry)]
-
-    async_add_entities(switches)
+    # Find hub subentry to attach LED switch so it does not appear as ungrouped
+    hub_subentry_id = next(
+        (
+            s.subentry_id
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_HUB
+        ),
+        None,
+    )
+    async_add_entities(
+        [SchellenbergLedSwitch(api, entry)],
+        config_subentry_id=hub_subentry_id,
+    )
 
 
 class SchellenbergLedSwitch(RestoreEntity, SwitchEntity):
@@ -43,7 +56,7 @@ class SchellenbergLedSwitch(RestoreEntity, SwitchEntity):
         self.api = api
         self._attr_unique_id = f"{entry.entry_id}_led"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
+            identifiers={(DOMAIN, entry.entry_id)},  # Hub device identifier
             name="Schellenberg USB Stick",
             manufacturer="Schellenberg",
             model="USB Stick",

@@ -8,10 +8,15 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import SchellenbergUsbApi
-from .const import DOMAIN, SIGNAL_STICK_STATUS_UPDATED, SchellenbergConfigEntry
+from .const import (
+    DOMAIN,
+    SIGNAL_STICK_STATUS_UPDATED,
+    SUBENTRY_TYPE_HUB,
+    SchellenbergConfigEntry,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: SchellenbergConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Schellenberg USB sensor entities."""
     api: SchellenbergUsbApi = entry.runtime_data
@@ -31,7 +36,16 @@ async def async_setup_entry(
         SchellenbergModeSensor(api, entry),
     ]
 
-    async_add_entities(sensors)
+    # Find hub subentry id to group sensors
+    hub_subentry_id = next(
+        (
+            s.subentry_id
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_HUB
+        ),
+        None,
+    )
+    async_add_entities(sensors, config_subentry_id=hub_subentry_id)
 
 
 class SchellenbergBaseSensor(SensorEntity):

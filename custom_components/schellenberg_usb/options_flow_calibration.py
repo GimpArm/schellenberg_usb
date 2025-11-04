@@ -9,7 +9,12 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -33,11 +38,14 @@ _LOGGER = logging.getLogger(__name__)
 STORAGE_VERSION = 1
 STORAGE_KEY = "schellenberg_usb_devices"  # Must match __init__.py
 
+# Type alias for flow results that work with both OptionsFlow and ConfigSubentryFlow
+FlowResult = ConfigFlowResult | SubentryFlowResult
+
 
 class CalibrationFlowHandler:
     """Handle calibration options flow steps."""
 
-    def __init__(self, flow: OptionsFlow) -> None:
+    def __init__(self, flow: OptionsFlow | ConfigSubentryFlow) -> None:
         """Initialize the calibration flow handler."""
         self.flow = flow
         self._selected_device: dict[str, Any] | None = None
@@ -56,8 +64,39 @@ class CalibrationFlowHandler:
         storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
         stored_data = await storage.async_load() or {"devices": []}
         devices = stored_data.get("devices", [])
-
         self._selected_device = next((d for d in devices if d["id"] == device_id), None)
+
+        # Fallback: if device not present in storage yet, build minimal record
+        if self._selected_device is None:
+            # Attempt to derive name from subentry (OptionsFlow context has config_entry)
+            # We access the config entry via flow.config_entry and search its subentries.
+            try:
+                entry = self.flow.config_entry  # type: ignore[attr-defined]
+                subentry = next(
+                    (
+                        s
+                        for s in entry.subentries.values()
+                        if s.data.get("device_id") == device_id
+                    ),
+                    None,
+                )
+                if subentry is not None:
+                    self._selected_device = {
+                        "id": device_id,
+                        "name": subentry.title or f"Blind {device_id}",
+                        # Calibration times unknown at this point
+                        CONF_OPEN_TIME: None,
+                        CONF_CLOSE_TIME: None,
+                    }
+            except Exception:  # noqa: BLE001
+                # Leave _selected_device as None; caller will abort appropriately
+                _LOGGER.debug(
+                    "Fallback subentry lookup failed for device %s", device_id
+                )
+
+    def set_selected_device(self, device: dict[str, Any]) -> None:
+        """Public setter to assign selected device without storage lookup."""
+        self._selected_device = device
 
     async def async_step_calibration_after_pairing(
         self, user_input: dict[str, Any] | None = None
@@ -300,9 +339,41 @@ class CalibrationFlowHandler:
             return self.flow.async_abort(reason="device_not_found")
 
         if user_input is not None:
-            # User confirmed completion - save calibration data and set cover position
+            # User confirmed completion - save calibration data
             await self._save_calibration_data(self._open_time, self._close_time)
-            return self.flow.async_create_entry(title="", data={})
+
+            # If pairing flow requested creation after calibration, create subentry entry now.
+            create_after = getattr(self.flow, "context", {}).get(
+                "create_after_calibration"
+            )  # type: ignore[attr-defined]
+            device_id = getattr(self.flow, "context", {}).get("device_id")  # type: ignore[attr-defined]
+            device_enum = getattr(self.flow, "context", {}).get("device_enum")  # type: ignore[attr-defined]
+            device_name = getattr(self.flow, "context", {}).get("device_name") or (  # type: ignore[attr-defined]
+                self._selected_device.get("name") if self._selected_device else None
+            )
+
+            if (
+                not isinstance(self.flow, OptionsFlow)
+                and create_after
+                and device_id
+                and device_enum
+                and device_name
+            ):
+                return self.flow.async_create_entry(  # type: ignore[attr-defined]
+                    title=device_name,
+                    data={
+                        "device_id": device_id,
+                        "device_enum": device_enum,
+                    },
+                    unique_id=device_id,
+                )
+
+            # Options flow: create empty entry to finish
+            if isinstance(self.flow, OptionsFlow):
+                return self.flow.async_create_entry(title="", data={})
+
+            # Fallback: abort with success if no creation path triggered
+            return self.flow.async_abort(reason="reconfigure_successful")
 
         return self.flow.async_show_form(
             step_id="calibration_complete",

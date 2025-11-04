@@ -9,12 +9,22 @@ import serial  # NOTE: blocking open used only to sanity-check connectivity
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    SubentryFlowResult,
+)
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
-from .const import CONF_DEVICE_NAME, CONF_SERIAL_PORT, DOMAIN
+from .const import (
+    CONF_CLOSE_TIME,
+    CONF_OPEN_TIME,
+    CONF_SERIAL_PORT,
+    DOMAIN,
+    SUBENTRY_TYPE_BLIND,
+)
 from .options_flow import SchellenbergOptionsFlowHandler
 from .options_flow_calibration import CalibrationFlowHandler
 
@@ -34,44 +44,31 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Get the options flow for this handler."""
         return SchellenbergOptionsFlowHandler()
 
-    @staticmethod
+    @classmethod
     @callback
-    def async_get_reconfigure_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> SchellenbergReconfigureFlow:
-        """Get the reconfigure flow for device calibration."""
-        return SchellenbergReconfigureFlow(config_entry)
+    def async_get_supported_subentry_types(
+        cls, config_entry: config_entries.ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return subentries supported by this integration."""
+        # Use constant for subentry type so strings/json and code stay in sync
+        return {SUBENTRY_TYPE_BLIND: SchellenbergPairingSubentryFlow}
 
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._discovered_port: str | None = None
         self._discovered_title: str | None = None
         self._discovered_unique: str | None = None
-        self._device_id: str | None = None
-        self._device_enum: str | None = None
 
     # -------------------------
-    # MENU FLOW (Hub or Device)
+    # MENU FLOW (Hub only)
     # -------------------------
     async def async_step_menu(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show menu to set up hub or pair device."""
-        # Check if there's already a hub configured
-        existing_entries = self._async_current_entries()
-        hub_exists = any(
-            entry.data.get(CONF_SERIAL_PORT) is not None for entry in existing_entries
-        )
-
-        if hub_exists:
-            # Hub exists, only show pairing option
-            return await self.async_step_pair_device_menu()
-
-        # No hub, show setup hub option
-        return self.async_show_menu(
-            step_id="menu",
-            menu_options=["user", "pair_device_menu"],
-        )
+        """Show menu to set up hub."""
+        # For now, only allow setting up the hub through the user flow
+        # Device pairing is handled through the subentry flow
+        return await self.async_step_user()
 
     # -------------------------
     # USER-INITIATED FLOW
@@ -192,175 +189,163 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # -------------------------
-    # PAIRING FLOW
-    # -------------------------
-    async def async_step_pair_device_menu(
+
+class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+    """Flow for adding new blind devices as subentries."""
+
+    VERSION = 1
+
+    def __init__(self) -> None:
+        """Initialize the subentry flow."""
+        super().__init__()
+        self.calibration_handler: CalibrationFlowHandler | None = None
+
+    async def async_step_blind(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show pairing menu."""
-        if user_input is not None:
-            return await self.async_step_pair_device()
+    ) -> SubentryFlowResult:
+        """Entry point when the user clicks the 'Pair device' button.
 
-        return self.async_show_form(
-            step_id="pair_device_menu",
-            data_schema=vol.Schema({}),
-        )
+        Home Assistant calls async_step_{subentry_type}() where subentry_type is
+        the key returned by async_get_supported_subentry_types. Since our type is
+        'blind', we implement async_step_blind(). Previously this was named
+        async_step_pairing, which caused the flow to fall back and the
+        translation key for the initiate button to be missing.
+        """
+        _LOGGER.debug("Subentry blind flow initiated (pairing new device)")
+        return await self.async_step_user(user_input)
 
-    async def async_step_pair_device(
+    async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Pair a new device and wait for response."""
-        errors = {}
+    ) -> SubentryFlowResult:
+        """Handle pairing initialization."""
+        _LOGGER.debug("Pairing step user input: %s", user_input)
+        if user_input is None:
+            _LOGGER.info("Showing pairing form")
+            return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
 
-        # Find the hub entry to get the API
-        existing_entries = self._async_current_entries()
-        hub_entry = None
-        for entry in existing_entries:
-            if entry.data.get(CONF_SERIAL_PORT) is not None:
-                hub_entry = entry
-                break
-
-        if not hub_entry or not hub_entry.runtime_data:
-            return self.async_abort(reason="no_hub")
-
-        # Get the API from the hub entry
+        # Get the hub entry (parent config entry)
+        hub_entry = self._get_entry()
         api = hub_entry.runtime_data
 
         # Initiate pairing and wait for response (up to 10 seconds)
         pairing_result = await api.pair_device_and_wait()
 
         if pairing_result is None:
-            # Pairing timeout - show error
-            errors["base"] = "pairing_timeout"
-            return self.async_show_form(
-                step_id="pair_device_menu",
-                data_schema=vol.Schema({}),
-                errors=errors,
-            )
+            # Pairing timeout
+            return self.async_abort(reason="pairing_timeout")
 
-        # Pairing successful! Store device_id and device_enum, then ask for friendly name
-        self._device_id, self._device_enum = pairing_result
+        # Pairing successful! Store device_id and device_enum in context
+        device_id, device_enum = pairing_result
+        self.context["device_id"] = device_id
+        self.context["device_enum"] = device_enum
         return await self.async_step_name_device()
 
     async def async_step_name_device(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         """Ask user to provide a friendly name for the paired device."""
-        if user_input is not None:
-            # User provided a name or left it empty
-            device_name = user_input.get(CONF_DEVICE_NAME) or f"Blind {self._device_id}"
+        device_id = self.context.get("device_id")
+        device_enum = self.context.get("device_enum")
 
-            # Find the hub entry
-            existing_entries = self._async_current_entries()
-            hub_entry = None
-            for entry in existing_entries:
-                if entry.data.get(CONF_SERIAL_PORT) is not None:
-                    hub_entry = entry
-                    break
+        if user_input is None:
+            # Initial call - show form
+            if not device_id:
+                return self.async_abort(reason="pairing_failed")
 
-            if not hub_entry:
-                return self.async_abort(reason="no_hub")
-
-            # Call the handle_new_device_no_reload function to save without reloading
-            handle_new_device_no_reload = self.hass.data.get(
-                "schellenberg_usb", {}
-            ).get("handle_new_device_no_reload")
-            if handle_new_device_no_reload:
-                await handle_new_device_no_reload(
-                    self._device_id, device_name, self._device_enum
-                )
-                # Reload hub entry to create the entity
-                await self.hass.config_entries.async_reload(hub_entry.entry_id)
-
-            # Create entry for this device
-            await self.async_set_unique_id(f"{hub_entry.entry_id}_{self._device_id}")
-            self._abort_if_unique_id_configured()
-
-            return self.async_create_entry(
-                title=device_name,
-                data={
-                    "device_id": self._device_id,
-                    "device_enum": self._device_enum,
-                    "hub_entry_id": hub_entry.entry_id,
+            return self.async_show_form(
+                step_id="name_device",
+                data_schema=vol.Schema(
+                    {
+                        vol.Optional("device_name"): selector.TextSelector(),
+                    }
+                ),
+                description_placeholders={
+                    "device_id": device_id,
                 },
             )
 
-        return self.async_show_form(
-            step_id="name_device",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_DEVICE_NAME): selector.TextSelector(),
-                }
-            ),
-            description_placeholders={
-                "device_id": self._device_id or "unknown",
-            },
+        # User provided a name – begin calibration prior to creating subentry
+        device_name = user_input.get("device_name") or f"Blind {device_id}"
+        self.context["device_name"] = device_name
+        self.context["create_after_calibration"] = True
+
+        if self.calibration_handler is None:
+            self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+
+        # Provide minimal device to handler
+        self.calibration_handler.set_selected_device(  # type: ignore[attr-defined]
+            {
+                "id": device_id,
+                "name": device_name,
+                "enum": device_enum,
+            }
         )
-
-
-class SchellenbergReconfigureFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle reconfiguration (calibration) of a paired device."""
-
-    VERSION = 1
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize the reconfigure flow."""
-        self.config_entry = config_entry
-        self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+        _LOGGER.debug(
+            "Starting calibration for paired device %s (%s) before creating subentry",
+            device_id,
+            device_name,
+        )
+        return await self.calibration_handler.async_step_calibration_close(None)  # type: ignore[union-attr]
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Start the calibration flow for this device."""
-        # Set the device ID from the config entry so calibration knows which device
-        device_id = self.config_entry.data.get("device_id")
+    ) -> SubentryFlowResult:
+        """Configure a blind: run calibration for the single device under this subentry.
+
+        We bypass storage lookup and set the calibration handler's selected device
+        directly from the subentry data to avoid device_not_found errors before
+        calibration has ever run.
+        """
+        if self.calibration_handler is None:
+            self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+
+        subentry = self._get_reconfigure_subentry()
+        device_id = subentry.data.get("device_id")
+        device_enum = subentry.data.get("device_enum")
         if not device_id:
             return self.async_abort(reason="device_not_found")
 
-        # Set the selected device for the calibration handler
-        await self.calibration_handler.set_device_by_id(device_id)
+        # Build a minimal device record; calibration handler will enrich after timing
+        device_name = subentry.title or f"Blind {device_id}"
+        self.calibration_handler.set_selected_device(  # type: ignore[attr-defined]
+            {
+                "id": device_id,
+                "name": device_name,
+                CONF_OPEN_TIME: subentry.data.get(CONF_OPEN_TIME),
+                CONF_CLOSE_TIME: subentry.data.get(CONF_CLOSE_TIME),
+                "enum": device_enum,
+            }
+        )
 
-        # Start the calibration process
         return await self.calibration_handler.async_step_calibration_close(user_input)
 
     # Delegate all calibration steps to the handler
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_close(user_input)
+        return await self.calibration_handler.async_step_calibration_close(user_input)  # type: ignore[union-attr]
 
     async def async_step_calibration_open_instruction(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
         return await self.calibration_handler.async_step_calibration_open_instruction(
             user_input
-        )
+        )  # type: ignore[union-attr]
 
     async def async_step_calibration_close_instruction(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
         return await self.calibration_handler.async_step_calibration_close_instruction(
             user_input
-        )
+        )  # type: ignore[union-attr]
 
     async def async_step_calibration_complete(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_complete(
+    ) -> SubentryFlowResult:
+        """Delegate to calibration handler (handler now creates entry)."""
+        return await self.calibration_handler.async_step_calibration_complete(  # type: ignore[union-attr]
             user_input
         )
-
-    def async_create_entry(
-        self,
-        *,
-        title: str | None = None,
-        data: dict[str, Any],
-    ) -> ConfigFlowResult:
-        """Override to use update_reload_and_abort for reconfigure flows."""
-        # For reconfigure flow, we don't create a new entry, we just end the flow
-        return self.async_abort(reason="reconfigure_successful")
