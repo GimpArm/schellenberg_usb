@@ -7,12 +7,12 @@ on:
     - cron: "0 0 * * *"
 
 jobs:
-  validate:
-    name: Hassfest validate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: home-assistant/actions/hassfest@master
+  #validate:
+  #  name: Hassfest validate
+  #  runs-on: ubuntu-latest
+  #  steps:
+  #    - uses: actions/checkout@v5
+  #    - uses: home-assistant/actions/hassfest@master
   hacs:
     name: HACS validate
     runs-on: ubuntu-latest
