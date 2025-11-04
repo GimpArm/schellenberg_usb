@@ -19,22 +19,29 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 
 ## Installation
 
-### HACS
+### Step 1: Download files
 
-1. [Install HACS](https://hacs.xyz/docs/setup/download)
-2. Search for the Schellenerg USB integration in HACS and install it
-3. Restart Home Assistant
-4. [Add Schellenberg USB integration](https://my.home-assistant.io/redirect/config_flow_start/?domain=schellenberg_usb)
-5. Set the device input of the USB stick like `/dev/ttyUSB0` or `/dev/TTY/ACM0`
-6. Use the integration options to initiate the pairing process and calibration
+#### Option 1: Via HACS
 
-### Manual
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gimparm&repository=schellenberg_usb&category=integration)
 
-1. Download [the latest release](https://github.com/GimpArm/schellenberg_usb/releases)
-2. Extract the `custom_components` folder to your Home Assistant's config folder, the resulting folder structure should
-   be `config/custom_components/schellenber_usb`
-3. Restart Home Assistant
-4. [Add Schellenberg USB integration](https://my.home-assistant.io/redirect/config_flow_start/?domain=schellenberg_usb), or go to
-   Settings > Integrations and add Schellenberg USB
-5. Set the device input of the USB stick like `/dev/ttyUSB0` or `/dev/TTY/ACM0`
-6. Use the integration options to initiate the pairing process and calibration
+Make sure you have HACS installed. If you don't, run `wget -O - https://get.hacs.xyz | bash -` in HA.  
+Choose Integrations under HACS. Click the '+' button on the bottom of the page, search for "schellenberg usb", choose it, and click install in HACS.
+
+#### Option 2: Manual
+Clone this repository or download the source code as a zip file and add/merge the `custom_components/` folder with its contents in your configuration directory.
+
+
+### Step 2: Restart HA
+In order for the newly added integration to be loaded, HA needs to be restarted.
+
+### Step 3: Add integration to HA (<--- this is a step that a lot of people forget)
+In HA, go to Configuration > Integrations.
+In the bottom right corner, click on the big button with a '+'.
+
+If the component is properly installed, you should be able to find 'Schellenberg USB' in the list. You might need to clear you browser cache for the integration to show up.
+
+Select it, and the schellenberg usb integration is ready for use.
+
+### Step 4: Add the devices
+Follow instructions on [Schellenberg USB](https://github.com/gimparm/schellenberg_usb) to pair and calibrate blinds.
