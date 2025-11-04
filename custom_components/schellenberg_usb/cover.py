@@ -256,15 +256,40 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # Restore the last known state
         last_state = await self.async_get_last_state()
         if last_state:
-            restored_position = last_state.attributes.get(ATTR_POSITION)
-            if isinstance(restored_position, (int, float)):
-                self._attr_current_cover_position = int(restored_position)
+            # HA stores cover position attribute as 'current_position'. Some code historically
+            # used 'position'. We try both, then infer from the last state if still missing.
+            restored_position: int | None = None
+            raw_position = (
+                last_state.attributes.get("current_position")
+                if "current_position" in last_state.attributes
+                else last_state.attributes.get(ATTR_POSITION)
+            )
+            if isinstance(raw_position, (int, float)):
+                restored_position = int(raw_position)
+            elif raw_position is not None:
+                # Attempt to coerce string digits
+                try:
+                    restored_position = int(str(raw_position))
+                except ValueError:
+                    restored_position = None
+
+            # Fallback: infer from last_state.state if attribute absent
+            if restored_position is None:
+                if last_state.state == "open":
+                    restored_position = 100
+                elif last_state.state == "closed":
+                    restored_position = 0
+
+            if restored_position is not None:
+                # Use exact restored value without inferring 100 from 'open' state; allows partial positions.
+                self._attr_current_cover_position = max(0, min(100, restored_position))
                 self._attr_is_closed = self._attr_current_cover_position == 0
                 _LOGGER.debug(
-                    "Restored position for %s (%s) to %d%%",
+                    "Restored position for %s (%s) to %d%% (raw=%s)",
                     self._attr_name,
                     self._device_id,
                     self._attr_current_cover_position,
+                    raw_position,
                 )
         # If we still don't have a position, assume fully closed (0) as a conservative default.
         if self._attr_current_cover_position is None:
