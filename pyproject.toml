@@ -17,7 +17,7 @@ test = [
     "croniter~=6.0.0",
     "watchdog~=6.0.0",
     "mock-open~=1.4.0",
-    "polyfactory~=2.22.3",
+    "polyfactory~=3.0.0",
     "PyYAML~=6.0.2",
     # Need specific versions
     "pytest-homeassistant-custom-component==0.13.292",
