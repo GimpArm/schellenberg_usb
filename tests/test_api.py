@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
@@ -56,15 +55,18 @@ async def test_api_remove_known_device(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_get_last_device_enum(hass: HomeAssistant) -> None:
-    """Test getting the last device enum."""
+async def test_api_initialize_next_device_enum(hass: HomeAssistant) -> None:
+    """Test getting the next available device enum."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
-    api._last_paired_device_enum = "0x15"
+    # With no devices, should return the starting enum
+    result = api.initialize_next_device_enum()
+    assert result == "10"  # PAIRING_DEVICE_ENUM_START is 0x10
 
-    result = api.get_last_device_enum()
-
-    assert result == "0x15"
+    # Register a device and check next enum
+    api.register_entity("device_1", "10")
+    result = api.initialize_next_device_enum()
+    assert result == "11"
 
 
 @pytest.mark.asyncio
@@ -119,14 +121,15 @@ async def test_api_send_command(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
     mock_protocol = MagicMock()
     api._transport = mock_transport
     api._protocol = mock_protocol
-    api._is_connected = True
 
     await api.send_command("test_command")
 
-    mock_protocol.send_command.assert_called_once_with("test_command")
+    # Verify that write was called on transport with the command
+    mock_transport.write.assert_called_once_with(b"test_command\r\n")
 
 
 @pytest.mark.asyncio

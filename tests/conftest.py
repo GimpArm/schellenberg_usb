@@ -6,7 +6,6 @@ from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
@@ -35,7 +34,7 @@ async def mock_api() -> MagicMock:
     api.pair_device_and_wait = AsyncMock()
     api.register_existing_devices = MagicMock()
     api.remove_known_device = MagicMock()
-    api.get_last_device_enum = MagicMock(return_value="0x10")
+    api.initialize_next_device_enum = MagicMock(return_value="10")
     return api
 
 
