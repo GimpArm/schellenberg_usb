@@ -269,9 +269,7 @@ async def test_async_setup_entry_starts_connection(hass: HomeAssistant) -> None:
     hass.config_entries._entries[entry.entry_id] = entry
 
     with (
-        patch.object(
-            SchellenbergUsbApi, "connect", new_callable=AsyncMock
-        ) as mock_connect,
+        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
         patch.object(
             hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
         ),

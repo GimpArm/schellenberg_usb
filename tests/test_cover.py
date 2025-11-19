@@ -84,7 +84,7 @@ async def test_async_setup_entry_creates_covers(
     dev_reg = dr.async_get(hass)
 
     # Create a hub device
-    hub_device = dev_reg.async_get_or_create(
+    dev_reg.async_get_or_create(
         config_entry_id=mock_config_entry.entry_id,
         identifiers={(DOMAIN, mock_config_entry.entry_id)},
         name="Schellenberg USB Stick",

@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.storage import Store
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
     CONF_SERIAL_PORT,
-    DATA_API_INSTANCE,
-    DATA_UNSUB_DISPATCHER,
     DOMAIN,
     PLATFORMS,
 )
