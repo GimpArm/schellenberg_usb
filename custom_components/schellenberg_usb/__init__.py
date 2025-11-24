@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
+from types import MappingProxyType
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 
 from .api import SchellenbergUsbApi
 from .const import (
@@ -67,7 +66,7 @@ async def async_setup_entry(
     if hub_subentry is None:
         _LOGGER.debug("Creating hub subentry for entry %s", entry.entry_id)
         hub_subentry = ConfigSubentry(
-            data={},
+            data=MappingProxyType({}),
             subentry_type=SUBENTRY_TYPE_HUB,
             title="Hub",
             unique_id=None,

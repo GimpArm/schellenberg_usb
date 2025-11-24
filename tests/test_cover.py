@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,14 +29,26 @@ from custom_components.schellenberg_usb.cover import (
 )
 
 
+def _async_mock(value: Any) -> AsyncMock:
+    """Cast helper for AsyncMock assertions."""
+    return cast(AsyncMock, value)
+
+
+def _magic_mock(value: Any) -> MagicMock:
+    """Cast helper for MagicMock assertions."""
+    return cast(MagicMock, value)
+
+
 @pytest.fixture
 def mock_api(hass: HomeAssistant) -> SchellenbergUsbApi:
     """Create a mock API."""
-    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._is_connected = True
-    api.control_blind = AsyncMock()  # type: ignore[method-assign]
-    api.register_entity = MagicMock()  # type: ignore[method-assign]
-    return api
+    api_mock = MagicMock(spec=SchellenbergUsbApi)
+    api_mock.hass = hass
+    api_mock.is_connected = True
+    api_mock.device_version = "RFTU_V20"
+    api_mock.control_blind = AsyncMock()
+    api_mock.register_entity = MagicMock()
+    return cast(SchellenbergUsbApi, api_mock)
 
 
 @pytest.fixture
@@ -66,7 +79,7 @@ def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
         subentries_data=None,
     )
     # Mock the subentries property
-    entry.subentries = {"sub1": subentry}  # type: ignore[misc]
+    entry.subentries = MappingProxyType({"sub1": subentry})  # type: ignore[misc]
     hass.config_entries._entries[entry.entry_id] = entry
     return entry
 
@@ -166,7 +179,7 @@ async def test_cover_availability(
 
     assert cover.available is True
 
-    mock_api._is_connected = False
+    cast(Any, mock_api).is_connected = False
     assert cover.available is False
 
 
@@ -222,7 +235,7 @@ async def test_cover_async_open_cover(
 
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
-    mock_api.control_blind.assert_called_once_with("01", "01")
+    _async_mock(mock_api.control_blind).assert_called_once_with("01", "01")
 
 
 @pytest.mark.asyncio
@@ -246,7 +259,7 @@ async def test_cover_async_close_cover(
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is True
-    mock_api.control_blind.assert_called_once_with("01", "02")
+    _async_mock(mock_api.control_blind).assert_called_once_with("01", "02")
 
 
 @pytest.mark.asyncio
@@ -271,7 +284,7 @@ async def test_cover_async_stop_cover(
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
-    mock_api.control_blind.assert_called_once_with("01", "00")
+    _async_mock(mock_api.control_blind).assert_called_once_with("01", "00")
 
 
 @pytest.mark.asyncio
@@ -612,7 +625,7 @@ async def test_cover_registers_with_api(
             with patch.object(cover, "async_write_ha_state"):
                 await cover.async_added_to_hass()
 
-    mock_api.register_entity.assert_called_once_with("ABC123", "01")
+    _magic_mock(mock_api.register_entity).assert_called_once_with("ABC123", "01")
 
 
 @pytest.mark.asyncio

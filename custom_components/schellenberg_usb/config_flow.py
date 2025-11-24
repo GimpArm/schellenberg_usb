@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Awaitable, cast
 
 import serial  # NOTE: blocking open used only to sanity-check connectivity
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.config_entries import (
     ConfigFlowResult,
@@ -199,6 +198,22 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         """Initialize the subentry flow."""
         super().__init__()
         self.calibration_handler: CalibrationFlowHandler | None = None
+        self._pending_device_id: str | None = None
+        self._pending_device_enum: str | None = None
+        self._pending_device_name: str | None = None
+
+    def _get_calibration_handler(self) -> CalibrationFlowHandler:
+        """Return (and lazily create) the calibration flow handler."""
+        if self.calibration_handler is None:
+            self.calibration_handler = CalibrationFlowHandler(self)
+        return self.calibration_handler
+
+    async def _await_subentry_result(
+        self,
+        step_coro: Awaitable[ConfigFlowResult | SubentryFlowResult],
+    ) -> SubentryFlowResult:
+        """Await a calibration step and cast to SubentryFlowResult for mypy."""
+        return cast(SubentryFlowResult, await step_coro)
 
     async def async_step_blind(
         self, user_input: dict[str, Any] | None = None
@@ -236,16 +251,17 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         # Pairing successful! Store device_id and device_enum in context
         device_id, device_enum = pairing_result
-        self.context["device_id"] = device_id
-        self.context["device_enum"] = device_enum
+        self._pending_device_id = device_id
+        self._pending_device_enum = device_enum
+        self._pending_device_name = None
         return await self.async_step_name_device()
 
     async def async_step_name_device(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Ask user to provide a friendly name for the paired device."""
-        device_id = self.context.get("device_id")
-        device_enum = self.context.get("device_enum")
+        device_id = self._pending_device_id
+        device_enum = self._pending_device_enum
 
         if user_input is None:
             # Initial call - show form
@@ -265,27 +281,35 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             )
 
         # User provided a name – begin calibration prior to creating subentry
-        device_name = user_input.get("device_name") or f"Blind {device_id}"
-        self.context["device_name"] = device_name
-        self.context["create_after_calibration"] = True
+        if not device_id or not device_enum:
+            return self.async_abort(reason="pairing_failed")
 
-        if self.calibration_handler is None:
-            self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+        device_name = user_input.get("device_name") or f"Blind {device_id}"
+        self._pending_device_name = device_name
+
+        handler = self._get_calibration_handler()
 
         # Provide minimal device to handler
-        self.calibration_handler.set_selected_device(  # type: ignore[attr-defined]
+        handler.set_selected_device(
             {
                 "id": device_id,
                 "name": device_name,
                 "enum": device_enum,
             }
         )
+        handler.enable_subentry_creation(
+            device_id=device_id,
+            device_enum=device_enum,
+            device_name=device_name,
+        )
         _LOGGER.debug(
             "Starting calibration for paired device %s (%s) before creating subentry",
             device_id,
             device_name,
         )
-        return await self.calibration_handler.async_step_calibration_close(None)  # type: ignore[union-attr]
+        return await self._await_subentry_result(
+            handler.async_step_calibration_close(None)
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -296,8 +320,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         directly from the subentry data to avoid device_not_found errors before
         calibration has ever run.
         """
-        if self.calibration_handler is None:
-            self.calibration_handler = CalibrationFlowHandler(self)  # type: ignore[arg-type]
+        handler = self._get_calibration_handler()
+        handler.disable_subentry_creation()
 
         subentry = self._get_reconfigure_subentry()
         device_id = subentry.data.get("device_id")
@@ -307,7 +331,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         # Build a minimal device record; calibration handler will enrich after timing
         device_name = subentry.title or f"Blind {device_id}"
-        self.calibration_handler.set_selected_device(  # type: ignore[attr-defined]
+        handler.set_selected_device(
             {
                 "id": device_id,
                 "name": device_name,
@@ -317,35 +341,43 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             }
         )
 
-        return await self.calibration_handler.async_step_calibration_close(user_input)
+        return await self._await_subentry_result(
+            handler.async_step_calibration_close(user_input)
+        )
 
     # Delegate all calibration steps to the handler
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_close(user_input)  # type: ignore[union-attr]
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_close(user_input)
+        )
 
     async def async_step_calibration_open_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_open_instruction(
-            user_input
-        )  # type: ignore[union-attr]
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_open_instruction(user_input)
+        )
 
     async def async_step_calibration_close_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
-        return await self.calibration_handler.async_step_calibration_close_instruction(
-            user_input
-        )  # type: ignore[union-attr]
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_close_instruction(user_input)
+        )
 
     async def async_step_calibration_complete(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Delegate to calibration handler (handler now creates entry)."""
-        return await self.calibration_handler.async_step_calibration_complete(  # type: ignore[union-attr]
-            user_input
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_complete(user_input)
         )

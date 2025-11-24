@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from homeassistant.components.cover import (
     ATTR_POSITION,
@@ -176,7 +176,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         device_id: str,
         device_enum: str,
         device_name: str,
-        device_data: dict | None = None,
+        device_data: Mapping[str, Any] | None = None,
         config_entry_id: str | None = None,
     ) -> None:
         """Initialize the Schellenberg cover entity.
@@ -212,11 +212,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         # Position calculation attributes - use calibration times if available
-        device_data = device_data or {}
-        self._travel_time_open: float = device_data.get(
+        device_data_dict = dict(device_data) if device_data is not None else {}
+        self._travel_time_open: float = device_data_dict.get(
             CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME
         )
-        self._travel_time_close: float = device_data.get(
+        self._travel_time_close: float = device_data_dict.get(
             CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME
         )
         self._move_start_time: float | None = None

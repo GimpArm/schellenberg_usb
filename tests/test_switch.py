@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,15 +21,21 @@ from custom_components.schellenberg_usb.switch import (
 )
 
 
+def _async_mock(value: Any) -> AsyncMock:
+    """Cast helper for AsyncMock assertions."""
+    return cast(AsyncMock, value)
+
+
 @pytest.fixture
 def mock_api(hass: HomeAssistant) -> SchellenbergUsbApi:
     """Create a mock API."""
-    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._is_connected = True
-    api._device_version = "RFTU_V20"
-    api.led_on = AsyncMock()
-    api.led_off = AsyncMock()
-    return api
+    api_mock = MagicMock(spec=SchellenbergUsbApi)
+    api_mock.hass = hass
+    api_mock.is_connected = True
+    api_mock.device_version = "RFTU_V20"
+    api_mock.led_on = AsyncMock()
+    api_mock.led_off = AsyncMock()
+    return cast(SchellenbergUsbApi, api_mock)
 
 
 @pytest.fixture
@@ -99,7 +106,7 @@ async def test_led_switch_turn_on(
     with patch.object(switch, "async_write_ha_state") as mock_write:
         await switch.async_turn_on()
 
-    mock_api.led_on.assert_called_once()
+    _async_mock(mock_api.led_on).assert_called_once()
     assert switch.is_on is True
     mock_write.assert_called_once()
 
@@ -118,7 +125,7 @@ async def test_led_switch_turn_off(
     with patch.object(switch, "async_write_ha_state") as mock_write:
         await switch.async_turn_off()
 
-    mock_api.led_off.assert_called_once()
+    _async_mock(mock_api.led_off).assert_called_once()
     assert switch.is_on is False
     mock_write.assert_called_once()
 
@@ -149,7 +156,7 @@ async def test_led_switch_availability(
 
     assert switch.available is True
 
-    mock_api._is_connected = False
+    cast(Any, mock_api).is_connected = False
     assert switch.available is False
 
 
@@ -169,7 +176,7 @@ async def test_led_switch_restore_state_on(
         await switch.async_added_to_hass()
 
     assert switch._is_on is True
-    mock_api.led_on.assert_called_once()
+    _async_mock(mock_api.led_on).assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -188,7 +195,7 @@ async def test_led_switch_restore_state_off(
         await switch.async_added_to_hass()
 
     assert switch._is_on is False
-    mock_api.led_off.assert_called_once()
+    _async_mock(mock_api.led_off).assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -206,8 +213,8 @@ async def test_led_switch_no_previous_state(
 
     assert switch._is_on is False
     # Should not call led_on or led_off when no previous state
-    mock_api.led_on.assert_not_called()
-    mock_api.led_off.assert_not_called()
+    _async_mock(mock_api.led_on).assert_not_called()
+    _async_mock(mock_api.led_off).assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -239,13 +246,13 @@ async def test_led_switch_reconnection_restores_state(
 
     with patch.object(switch, "async_write_ha_state"):
         # Simulate reconnection
-        mock_api._is_connected = True
+        cast(Any, mock_api).is_connected = True
         switch._handle_status_update()
 
     # Should have queued task to restore hardware state
     await hass.async_block_till_done()
     # led_on should be called as part of restore
-    assert mock_api.led_on.call_count >= 1
+    assert _async_mock(mock_api.led_on).call_count >= 1
 
 
 @pytest.mark.asyncio
@@ -260,17 +267,17 @@ async def test_led_switch_no_restore_when_already_connected(
     switch._is_on = True
     switch._was_available = True  # Already was available
 
-    mock_api.led_on.reset_mock()
+    _async_mock(mock_api.led_on).reset_mock()
 
     with patch.object(switch, "async_write_ha_state"):
         # Connection status unchanged
-        mock_api._is_connected = True
+        cast(Any, mock_api).is_connected = True
         switch._handle_status_update()
 
     # Should not create restore task
     await hass.async_block_till_done()
     # led_on should not be called since we didn't transition from unavailable
-    mock_api.led_on.assert_not_called()
+    _async_mock(mock_api.led_on).assert_not_called()
 
 
 @pytest.mark.asyncio

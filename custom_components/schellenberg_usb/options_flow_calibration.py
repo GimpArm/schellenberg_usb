@@ -8,7 +8,6 @@ import time
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigFlowResult,
     ConfigSubentryFlow,
@@ -55,6 +54,10 @@ class CalibrationFlowHandler:
         self._event_listener_unsub: Any | None = None
         self._open_time: float | None = None
         self._close_time: float | None = None
+        self._create_subentry_after_calibration = False
+        self._pending_device_id: str | None = None
+        self._pending_device_enum: str | None = None
+        self._pending_device_name: str | None = None
 
     async def set_device_by_id(self, device_id: str) -> None:
         """Set the device to calibrate by its ID.
@@ -71,23 +74,24 @@ class CalibrationFlowHandler:
             # Attempt to derive name from subentry (OptionsFlow context has config_entry)
             # We access the config entry via flow.config_entry and search its subentries.
             try:
-                entry = self.flow.config_entry  # type: ignore[attr-defined]
-                subentry = next(
-                    (
-                        s
-                        for s in entry.subentries.values()
-                        if s.data.get("device_id") == device_id
-                    ),
-                    None,
-                )
-                if subentry is not None:
-                    self._selected_device = {
-                        "id": device_id,
-                        "name": subentry.title or f"Blind {device_id}",
-                        # Calibration times unknown at this point
-                        CONF_OPEN_TIME: None,
-                        CONF_CLOSE_TIME: None,
-                    }
+                entry = getattr(self.flow, "config_entry", None)
+                if entry is not None:
+                    subentry = next(
+                        (
+                            s
+                            for s in entry.subentries.values()
+                            if s.data.get("device_id") == device_id
+                        ),
+                        None,
+                    )
+                    if subentry is not None:
+                        self._selected_device = {
+                            "id": device_id,
+                            "name": subentry.title or f"Blind {device_id}",
+                            # Calibration times unknown at this point
+                            CONF_OPEN_TIME: None,
+                            CONF_CLOSE_TIME: None,
+                        }
             except Exception:  # noqa: BLE001
                 # Leave _selected_device as None; caller will abort appropriately
                 _LOGGER.debug(
@@ -100,14 +104,17 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration_after_pairing(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Start calibration for a newly paired device.
 
         This step bypasses device selection and goes straight to calibration
         confirmation for the device that was just paired.
         """
-        # Get the device ID from the pairing handler
-        device_id = self.flow.pairing_handler.get_last_paired_device_id()  # type: ignore[attr-defined]
+        pairing_handler = getattr(self.flow, "pairing_handler", None)
+        if pairing_handler is None:
+            return await self.async_step_calibration()
+
+        device_id = pairing_handler.get_last_paired_device_id()
 
         if device_id is None:
             # Fallback to regular calibration if no device ID available
@@ -130,7 +137,7 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Select a device to calibrate."""
         # Load paired devices from storage
         storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
@@ -163,7 +170,7 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Instruct user to close the blinds and press next."""
         if user_input is not None:
             # User has closed the blinds and is ready to proceed
@@ -183,7 +190,7 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration_open_instruction(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Instruct user to open the blinds and wait for movement."""
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
@@ -256,7 +263,7 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration_close_instruction(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Instruct user to close the blinds and wait for movement."""
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
@@ -329,7 +336,7 @@ class CalibrationFlowHandler:
 
     async def async_step_calibration_complete(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Display calibration complete with recorded times."""
         if (
             self._selected_device is None
@@ -343,29 +350,20 @@ class CalibrationFlowHandler:
             await self._save_calibration_data(self._open_time, self._close_time)
 
             # If pairing flow requested creation after calibration, create subentry entry now.
-            create_after = getattr(self.flow, "context", {}).get(
-                "create_after_calibration"
-            )  # type: ignore[attr-defined]
-            device_id = getattr(self.flow, "context", {}).get("device_id")  # type: ignore[attr-defined]
-            device_enum = getattr(self.flow, "context", {}).get("device_enum")  # type: ignore[attr-defined]
-            device_name = getattr(self.flow, "context", {}).get("device_name") or (  # type: ignore[attr-defined]
-                self._selected_device.get("name") if self._selected_device else None
-            )
-
             if (
                 not isinstance(self.flow, OptionsFlow)
-                and create_after
-                and device_id
-                and device_enum
-                and device_name
+                and self._create_subentry_after_calibration
+                and self._pending_device_id
+                and self._pending_device_enum
+                and self._pending_device_name
             ):
                 return self.flow.async_create_entry(  # type: ignore[attr-defined]
-                    title=device_name,
+                    title=self._pending_device_name,
                     data={
-                        "device_id": device_id,
-                        "device_enum": device_enum,
+                        "device_id": self._pending_device_id,
+                        "device_enum": self._pending_device_enum,
                     },
-                    unique_id=device_id,
+                    unique_id=self._pending_device_id,
                 )
 
             # Options flow: create empty entry to finish
@@ -499,3 +497,23 @@ class CalibrationFlowHandler:
                 round(open_time, 2),
                 round(close_time, 2),
             )
+
+    def enable_subentry_creation(
+        self,
+        *,
+        device_id: str,
+        device_enum: str,
+        device_name: str,
+    ) -> None:
+        """Enable creating a subentry after calibration completes."""
+        self._create_subentry_after_calibration = True
+        self._pending_device_id = device_id
+        self._pending_device_enum = device_enum
+        self._pending_device_name = device_name
+
+    def disable_subentry_creation(self) -> None:
+        """Disable subentry creation (used for reconfigure flows)."""
+        self._create_subentry_after_calibration = False
+        self._pending_device_id = None
+        self._pending_device_enum = None
+        self._pending_device_name = None
