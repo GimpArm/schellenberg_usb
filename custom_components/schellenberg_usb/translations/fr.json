@@ -1,0 +1,132 @@
+{
+  "config": {
+    "step": {
+      "menu": {
+        "title": "Configuration Schellenberg USB",
+        "menu_options": {
+          "user": "Configurer le hub USB",
+          "pair_device_menu": "Appairer un nouvel appareil"
+        }
+      },
+      "user": {
+        "title": "Configurer la clé USB Schellenberg",
+        "description": "Entrez le chemin du port série pour votre clé USB Schellenberg.",
+        "data": {
+          "serial_port": "Port série"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirmer la clé USB Schellenberg",
+        "description": "Confirmez le chemin du port série pour votre clé USB Schellenberg détectée.",
+        "data": {
+          "serial_port": "Port série"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Échec de la connexion au port série",
+      "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer et vous assurer d'appuyer sur le bouton d'appairage de votre moteur de volet.",
+      "unknown": "Une erreur inattendue s'est produite"
+    },
+    "abort": {
+      "already_configured": "L'appareil est déjà configuré",
+      "no_hub": "Aucun hub USB trouvé. Veuillez d'abord configurer le hub USB.",
+      "reconfigure_successful": "Calibration terminée avec succès"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Volet",
+      "initiate_flow": {
+        "user": "Appairer l'appareil",
+        "reconfigure": "Calibrer"
+      },
+      "step": {
+        "user": {
+          "title": "Appairer un nouvel appareil",
+          "description": "Appuyez sur le bouton d'appairage pour activer le mode d'appairage sur votre clé USB Schellenberg. Ensuite, appuyez sur le bouton d'appairage de votre moteur de volet dans les 2 minutes.",
+          "submit": "Appairer"
+        },
+        "name_device": {
+          "title": "Nommer votre appareil",
+          "description": "Appairage réussi ! ID de l'appareil : {device_id}\n\nVeuillez donner un nom à ce volet.",
+          "data": {
+            "device_name": "Nom de l'appareil"
+          }
+        },
+        "calibration_close": {
+          "title": "Étape 1 : Fermer le volet",
+          "description": "Tout d'abord, assurez-vous que {device_name} est complètement fermé (tout en bas). Appuyez sur 'Suivant' lorsque vous êtes prêt.",
+          "submit": "Suivant"
+        },
+        "calibration_open_instruction": {
+          "title": "Étape 2 : Ouvrir le volet",
+          "description": "Nous allons maintenant mesurer le temps nécessaire pour ouvrir {device_name}. Appuyez sur Démarrer **puis** appuyez sur le bouton d'ouverture de la commande pour commencer la mesure. Pas besoin de vous précipiter, le chronomètre ne démarre que lorsque nous recevons un message de montée du volet.",
+          "submit": "Démarrer"
+        },
+        "calibration_close_instruction": {
+          "title": "Étape 3 : Fermer le volet",
+          "description": "Nous allons maintenant mesurer le temps nécessaire pour fermer {device_name}. Appuyez sur Démarrer **puis** appuyez sur le bouton de fermeture de la commande pour commencer la mesure. Pas besoin de vous précipiter, le chronomètre ne démarre que lorsque nous recevons un message de descente du volet.",
+          "submit": "Démarrer"
+        },
+        "calibration_complete": {
+          "title": "Calibration terminée",
+          "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps seront utilisés pour suivre précisément la position du volet.",
+          "submit": "Terminé"
+        }
+      },
+      "error": {
+        "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer et vous assurer d'appuyer sur le bouton d'appairage de votre moteur de volet.",
+        "pairing_failed": "Échec de l'appairage.",
+        "calibration_timeout": "Délai de calibration dépassé. Le volet a mis plus de 5 minutes pour terminer le mouvement. Veuillez vérifier l'appareil et réessayer.",
+        "calibration_start_timeout": "Délai d'attente dépassé pour le début du mouvement du volet. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
+        "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer."
+      },
+      "abort": {
+        "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",
+        "pairing_failed": "Échec de l'appairage.",
+        "reconfigure_successful": "Calibration terminée avec succès"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Modifiez le chemin du port série pour le hub USB Schellenberg.",
+        "data": {
+          "serial_port": "Port série"
+        },
+        "submit": "Enregistrer"
+      }
+    },
+    "error": {
+      "cannot_connect": "Échec de la connexion au port série",
+      "unknown": "Une erreur inattendue s'est produite"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "État de connexion"
+      },
+      "firmware_version": {
+        "name": "Version du firmware"
+      },
+      "operating_mode": {
+        "name": "Mode de fonctionnement"
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "pair": {
+      "name": "Appairer l'appareil",
+      "description": "Activez le mode d'appairage sur la clé USB Schellenberg pour appairer un nouveau moteur de volet. Après avoir appelé ce service, appuyez sur le bouton d'appairage de votre moteur de volet dans les 10 secondes."
+    }
+  }
+}

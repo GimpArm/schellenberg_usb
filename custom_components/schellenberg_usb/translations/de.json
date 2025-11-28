@@ -1,0 +1,132 @@
+{
+  "config": {
+    "step": {
+      "menu": {
+        "title": "Schellenberg USB Einrichtung",
+        "menu_options": {
+          "user": "USB-Hub einrichten",
+          "pair_device_menu": "Neues Gerät koppeln"
+        }
+      },
+      "user": {
+        "title": "Schellenberg USB-Stick einrichten",
+        "description": "Geben Sie den seriellen Anschlusspfad für Ihren Schellenberg USB-Stick ein.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        }
+      },
+      "usb_confirm": {
+        "title": "Schellenberg USB-Stick bestätigen",
+        "description": "Bestätigen Sie den seriellen Anschlusspfad für Ihren erkannten Schellenberg USB-Stick.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum seriellen Anschluss fehlgeschlagen",
+      "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut und stellen Sie sicher, dass Sie die Kopplungstaste an Ihrem Rollladenmotor drücken.",
+      "unknown": "Unerwarteter Fehler aufgetreten"
+    },
+    "abort": {
+      "already_configured": "Gerät ist bereits konfiguriert",
+      "no_hub": "Kein USB-Hub gefunden. Bitte richten Sie zuerst den USB-Hub ein.",
+      "reconfigure_successful": "Kalibrierung erfolgreich abgeschlossen"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Rollladen",
+      "initiate_flow": {
+        "user": "Gerät koppeln",
+        "reconfigure": "Kalibrieren"
+      },
+      "step": {
+        "user": {
+          "title": "Neues Gerät koppeln",
+          "description": "Drücken Sie die Kopplungstaste, um den Kopplungsmodus an Ihrem Schellenberg USB-Stick zu aktivieren. Drücken Sie dann innerhalb von 2 Minuten die Kopplungstaste an Ihrem Rollladenmotor.",
+          "submit": "Koppeln"
+        },
+        "name_device": {
+          "title": "Gerät benennen",
+          "description": "Kopplung erfolgreich! Geräte-ID: {device_id}\n\nBitte geben Sie einen Namen für diesen Rollladen ein.",
+          "data": {
+            "device_name": "Gerätename"
+          }
+        },
+        "calibration_close": {
+          "title": "Schritt 1: Rollladen schließen",
+          "description": "Stellen Sie zunächst sicher, dass {device_name} vollständig geschlossen ist (ganz unten). Drücken Sie 'Weiter', wenn Sie bereit sind.",
+          "submit": "Weiter"
+        },
+        "calibration_open_instruction": {
+          "title": "Schritt 2: Rollladen öffnen",
+          "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu öffnen. Drücken Sie Start **und dann** die Öffnen-Taste an der Steuerung, um die Messung zu starten. Sie müssen sich nicht beeilen, der Timer startet erst, wenn wir eine Aufwärtsbewegungsnachricht vom Rollladen erhalten.",
+          "submit": "Start"
+        },
+        "calibration_close_instruction": {
+          "title": "Schritt 3: Rollladen schließen",
+          "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu schließen. Drücken Sie Start **und dann** die Schließen-Taste an der Steuerung, um die Messung zu starten. Sie müssen sich nicht beeilen, der Timer startet erst, wenn wir eine Abwärtsbewegungsnachricht vom Rollladen erhalten.",
+          "submit": "Start"
+        },
+        "calibration_complete": {
+          "title": "Kalibrierung abgeschlossen",
+          "description": "Kalibrierung für {device_name} abgeschlossen!\n\nGemessene Zeiten:\n- Öffnungszeit: {open_time} Sekunden\n- Schließzeit: {close_time} Sekunden\n\nDiese Zeiten werden verwendet, um die Rollladenposition genau zu verfolgen.",
+          "submit": "Fertig"
+        }
+      },
+      "error": {
+        "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut und stellen Sie sicher, dass Sie die Kopplungstaste an Ihrem Rollladenmotor drücken.",
+        "pairing_failed": "Kopplung fehlgeschlagen.",
+        "calibration_timeout": "Kalibrierung abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
+        "calibration_start_timeout": "Zeitüberschreitung beim Warten auf die Bewegung des Rollladens. Bitte stellen Sie sicher, dass das Gerät ordnungsgemäß angeschlossen ist, und versuchen Sie es erneut.",
+        "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut."
+      },
+      "abort": {
+        "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
+        "pairing_failed": "Kopplung fehlgeschlagen.",
+        "reconfigure_successful": "Kalibrierung erfolgreich abgeschlossen"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Bearbeiten Sie den seriellen Anschlusspfad für den Schellenberg USB-Hub.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        },
+        "submit": "Speichern"
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum seriellen Anschluss fehlgeschlagen",
+      "unknown": "Unerwarteter Fehler aufgetreten"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Verbindungsstatus"
+      },
+      "firmware_version": {
+        "name": "Firmware-Version"
+      },
+      "operating_mode": {
+        "name": "Betriebsmodus"
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "pair": {
+      "name": "Gerät koppeln",
+      "description": "Aktivieren Sie den Kopplungsmodus am Schellenberg USB-Stick, um einen neuen Rollladenmotor zu koppeln. Drücken Sie nach dem Aufrufen dieses Dienstes innerhalb von 10 Sekunden die Kopplungstaste an Ihrem Rollladenmotor."
+    }
+  }
+}

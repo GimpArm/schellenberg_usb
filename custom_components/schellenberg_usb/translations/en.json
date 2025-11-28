@@ -38,7 +38,8 @@
     "blind": {
       "entry_type": "Blind",
       "initiate_flow": {
-        "user": "Pair device"
+        "user": "Pair device",
+        "reconfigure": "Calibrate"
       },
       "step": {
         "user": {

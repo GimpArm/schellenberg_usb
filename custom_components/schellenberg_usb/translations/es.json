@@ -1,0 +1,132 @@
+{
+  "config": {
+    "step": {
+      "menu": {
+        "title": "Configuración de Schellenberg USB",
+        "menu_options": {
+          "user": "Configurar hub USB",
+          "pair_device_menu": "Emparejar nuevo dispositivo"
+        }
+      },
+      "user": {
+        "title": "Configurar memoria USB Schellenberg",
+        "description": "Introduzca la ruta del puerto serie para su memoria USB Schellenberg.",
+        "data": {
+          "serial_port": "Puerto serie"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirmar memoria USB Schellenberg",
+        "description": "Confirme la ruta del puerto serie para su memoria USB Schellenberg detectada.",
+        "data": {
+          "serial_port": "Puerto serie"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Error al conectar con el puerto serie",
+      "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo y asegúrese de presionar el botón de emparejamiento en su motor de persiana.",
+      "unknown": "Se produjo un error inesperado"
+    },
+    "abort": {
+      "already_configured": "El dispositivo ya está configurado",
+      "no_hub": "No se encontró ningún hub USB. Por favor, configure primero el hub USB.",
+      "reconfigure_successful": "Calibración completada con éxito"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Persiana",
+      "initiate_flow": {
+        "user": "Emparejar dispositivo",
+        "reconfigure": "Calibrar"
+      },
+      "step": {
+        "user": {
+          "title": "Emparejar un nuevo dispositivo",
+          "description": "Presione el botón de emparejamiento para activar el modo de emparejamiento en su memoria USB Schellenberg. Luego presione el botón de emparejamiento en su motor de persiana en los próximos 2 minutos.",
+          "submit": "Emparejar"
+        },
+        "name_device": {
+          "title": "Nombre su dispositivo",
+          "description": "¡Emparejamiento exitoso! ID del dispositivo: {device_id}\n\nPor favor, proporcione un nombre para esta persiana.",
+          "data": {
+            "device_name": "Nombre del dispositivo"
+          }
+        },
+        "calibration_close": {
+          "title": "Paso 1: Cerrar la persiana",
+          "description": "Primero, asegúrese de que {device_name} esté completamente cerrada (totalmente abajo). Presione 'Siguiente' cuando esté listo.",
+          "submit": "Siguiente"
+        },
+        "calibration_open_instruction": {
+          "title": "Paso 2: Abrir la persiana",
+          "description": "Ahora mediremos cuánto tiempo tarda en abrirse {device_name}. Presione Iniciar **y luego** presione el botón de abrir en el control para comenzar a medir. No hay prisa, el temporizador no comienza hasta que recibamos un mensaje de subida de la persiana.",
+          "submit": "Iniciar"
+        },
+        "calibration_close_instruction": {
+          "title": "Paso 3: Cerrar la persiana",
+          "description": "Ahora mediremos cuánto tiempo tarda en cerrarse {device_name}. Presione Iniciar **y luego** presione el botón de cerrar en el control para comenzar a medir. No hay prisa, el temporizador no comienza hasta que recibamos un mensaje de bajada de la persiana.",
+          "submit": "Iniciar"
+        },
+        "calibration_complete": {
+          "title": "Calibración completada",
+          "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.",
+          "submit": "Hecho"
+        }
+      },
+      "error": {
+        "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo y asegúrese de presionar el botón de emparejamiento en su motor de persiana.",
+        "pairing_failed": "Error en el emparejamiento.",
+        "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",
+        "calibration_start_timeout": "Tiempo de espera agotado para que la persiana comience a moverse. Por favor, asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
+        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo."
+      },
+      "abort": {
+        "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
+        "pairing_failed": "Error en el emparejamiento.",
+        "reconfigure_successful": "Calibración completada con éxito"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Edite la ruta del puerto serie para el hub USB Schellenberg.",
+        "data": {
+          "serial_port": "Puerto serie"
+        },
+        "submit": "Guardar"
+      }
+    },
+    "error": {
+      "cannot_connect": "Error al conectar con el puerto serie",
+      "unknown": "Se produjo un error inesperado"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Estado de conexión"
+      },
+      "firmware_version": {
+        "name": "Versión del firmware"
+      },
+      "operating_mode": {
+        "name": "Modo de operación"
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "pair": {
+      "name": "Emparejar dispositivo",
+      "description": "Active el modo de emparejamiento en la memoria USB Schellenberg para emparejar un nuevo motor de persiana. Después de llamar a este servicio, presione el botón de emparejamiento en su motor de persiana en los próximos 10 segundos."
+    }
+  }
+}
