@@ -26,9 +26,9 @@ from custom_components.schellenberg_usb.sensor import (
 def mock_api(hass: HomeAssistant) -> SchellenbergUsbApi:
     """Create a mock API."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._is_connected = True
-    api._device_version = "RFTU_V20"
-    api._device_mode = "listening"
+    api._stick._is_connected = True
+    api._stick._device_version = "RFTU_V20"
+    api._stick._device_mode = "listening"
     return api
 
 
@@ -96,7 +96,7 @@ async def test_connection_sensor_disconnected(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test connection sensor when disconnected."""
-    mock_api._is_connected = False
+    mock_api._stick._is_connected = False
     sensor = SchellenbergConnectionSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value == "Disconnected"
@@ -125,7 +125,7 @@ async def test_version_sensor_no_version(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test version sensor when version is None."""
-    mock_api._device_version = None
+    mock_api._stick._device_version = None
     sensor = SchellenbergVersionSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value is None
@@ -152,7 +152,7 @@ async def test_mode_sensor_bootloader(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test mode sensor in bootloader mode."""
-    mock_api._device_mode = "bootloader"
+    mock_api._stick._device_mode = "bootloader"
     sensor = SchellenbergModeSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value == "Bootloader"
@@ -166,7 +166,7 @@ async def test_mode_sensor_initial(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test mode sensor in initial mode."""
-    mock_api._device_mode = "initial"
+    mock_api._stick._device_mode = "initial"
     sensor = SchellenbergModeSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value == "Initial"
@@ -180,7 +180,7 @@ async def test_mode_sensor_unknown(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test mode sensor in unknown mode."""
-    mock_api._device_mode = "unknown"
+    mock_api._stick._device_mode = "unknown"
     sensor = SchellenbergModeSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value == "Unknown"
@@ -194,7 +194,7 @@ async def test_mode_sensor_none(
     mock_api: SchellenbergUsbApi,
 ) -> None:
     """Test mode sensor when mode is None."""
-    mock_api._device_mode = None
+    mock_api._stick._device_mode = None
     sensor = SchellenbergModeSensor(mock_api, mock_config_entry)
 
     assert sensor.native_value is None

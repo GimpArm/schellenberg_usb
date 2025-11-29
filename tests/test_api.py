@@ -18,7 +18,7 @@ async def test_api_initialization(hass: HomeAssistant) -> None:
     assert api.hass == hass
     assert api.port == "/dev/ttyUSB0"
     assert api.is_connected is False
-    assert api._registered_devices == {}
+    assert api._stick._registered_devices == {}
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_api_register_existing_devices(hass: HomeAssistant) -> None:
 
     api.register_existing_devices(devices)
 
-    assert api._registered_devices == {
+    assert api._stick._registered_devices == {
         "device_1": "0x10",
         "device_2": "0x11",
     }
@@ -44,14 +44,14 @@ async def test_api_remove_known_device(hass: HomeAssistant) -> None:
     """Test removing a known device."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
-    api._registered_devices = {
+    api._stick._registered_devices = {
         "device_1": "0x10",
         "device_2": "0x11",
     }
 
     api.remove_known_device("device_1")
 
-    assert api._registered_devices == {"device_2": "0x11"}
+    assert api._stick._registered_devices == {"device_2": "0x11"}
 
 
 @pytest.mark.asyncio
@@ -108,7 +108,7 @@ async def test_api_disconnect(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     mock_transport = MagicMock()
-    api._transport = mock_transport
+    api._stick._transport = mock_transport
 
     await api.disconnect()
 
@@ -123,10 +123,10 @@ async def test_api_send_command(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     mock_protocol = MagicMock()
-    api._transport = mock_transport
-    api._protocol = mock_protocol
+    api._stick._transport = mock_transport
+    api._stick._protocol = mock_protocol
 
-    await api.send_command("test_command")
+    await api._stick.send_command("test_command")
 
     # Verify that write was called on transport with the command
     mock_transport.write.assert_called_once_with(b"test_command\r\n")
@@ -136,7 +136,7 @@ async def test_api_send_command(hass: HomeAssistant) -> None:
 async def test_api_pair_device_and_wait_timeout(hass: HomeAssistant) -> None:
     """Test pairing with timeout."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._is_connected = True
+    api._stick._is_connected = True
 
     with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
         mock_wait.side_effect = TimeoutError()
@@ -150,11 +150,11 @@ async def test_api_pair_device_and_wait_timeout(hass: HomeAssistant) -> None:
 async def test_api_send_command_not_connected(hass: HomeAssistant) -> None:
     """Test sending command when not connected."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._is_connected = False
+    api._stick._is_connected = False
 
     # Should not raise but also not send
     with patch("serial_asyncio.create_serial_connection", new_callable=AsyncMock):
-        await api.send_command("test_command")
+        await api._stick.send_command("test_command")
         # This would not raise an error, but wouldn't send either
 
 
@@ -164,9 +164,9 @@ def api_with_mock_transport(hass: HomeAssistant) -> SchellenbergUsbApi:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
     mock_transport = MagicMock()
     mock_protocol = MagicMock()
-    api._transport = mock_transport
-    api._protocol = mock_protocol
-    api._is_connected = True
+    api._stick._transport = mock_transport
+    api._stick._protocol = mock_protocol
+    api._stick._is_connected = True
     return api
 
 
@@ -179,4 +179,4 @@ async def test_api_handle_message(
 
     # This would typically be called by the protocol when data arrives
     # Just verify the API can be initialized and has the method
-    assert hasattr(api, "_handle_message")
+    assert hasattr(api._stick, "_handle_message")
