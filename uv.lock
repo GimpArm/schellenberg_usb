@@ -2185,6 +2185,17 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/08/64/a99f27d3b4347486c7bfc0aa516016c46dc4c0f380ffccbd742a61af1eda/PyRIC-0.1.6.3.tar.gz", hash = "sha256:b539b01cafebd2406c00097f94525ea0f8ecd1dd92f7731f43eac0ef16c2ccc9", size = 870401, upload-time = "2016-12-04T07:54:48.374Z" }
 
 [[package]]
+name = "pyschellenberg"
+version = "0.1.0"
+source = { editable = "pyschellenberg" }
+dependencies = [
+    { name = "pyserial-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyserial-asyncio", specifier = ">=0.6" }]
+
+[[package]]
 name = "pyserial"
 version = "3.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2571,11 +2582,11 @@ wheels = [
 ]
 
 [[package]]
-name = "schellenber-usb"
+name = "schellenberg-usb"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "pyserial-asyncio" },
+    { name = "pyschellenberg" },
 ]
 
 [package.dev-dependencies]
@@ -2615,7 +2626,7 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyserial-asyncio", specifier = "==0.6" }]
+requires-dist = [{ name = "pyschellenberg", editable = "pyschellenberg" }]
 
 [package.metadata.requires-dev]
 dev = [

@@ -14,16 +14,16 @@ from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 async def test_handle_message_device_verification_response(hass: HomeAssistant) -> None:
     """Test handling device verification response."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._verify_future = hass.loop.create_future()
+    api._stick._verify_future = hass.loop.create_future()
 
     with patch(
         "custom_components.schellenberg_usb.api.async_dispatcher_send"
     ) as mock_send:
-        api._handle_message("RFTU_V20 F:20180510_DFBD B:1")
+        api._stick._handle_message("RFTU_V20 F:20180510_DFBD B:1")
 
-    assert api._device_version == "RFTU_V20"
-    assert api._device_mode == "initial"
-    assert api._verify_future.result() is True
+    assert api._stick._device_version == "RFTU_V20"
+    assert api._stick._device_mode == "initial"
+    assert api._stick._verify_future.result() is True
     mock_send.assert_called_once()
 
 
@@ -33,13 +33,13 @@ async def test_handle_message_device_verification_bootloader_mode(
 ) -> None:
     """Test handling device verification with bootloader mode."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._verify_future = hass.loop.create_future()
+    api._stick._verify_future = hass.loop.create_future()
 
     with patch("custom_components.schellenberg_usb.api.async_dispatcher_send"):
-        api._handle_message("RFTU_V20 F:20180510_DFBD B:0")
+        api._stick._handle_message("RFTU_V20 F:20180510_DFBD B:0")
 
-    assert api._device_version == "RFTU_V20"
-    assert api._device_mode == "bootloader"
+    assert api._stick._device_version == "RFTU_V20"
+    assert api._stick._device_mode == "bootloader"
 
 
 @pytest.mark.asyncio
@@ -48,13 +48,13 @@ async def test_handle_message_device_verification_unknown_mode(
 ) -> None:
     """Test handling device verification with unknown boot mode."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._verify_future = hass.loop.create_future()
+    api._stick._verify_future = hass.loop.create_future()
 
     with patch("custom_components.schellenberg_usb.api.async_dispatcher_send"):
-        api._handle_message("RFTU_V20 F:20180510_DFBD B:99")
+        api._stick._handle_message("RFTU_V20 F:20180510_DFBD B:99")
 
-    assert api._device_version == "RFTU_V20"
-    assert api._device_mode == "unknown"
+    assert api._stick._device_version == "RFTU_V20"
+    assert api._stick._device_mode == "unknown"
 
 
 @pytest.mark.asyncio
@@ -63,13 +63,13 @@ async def test_handle_message_device_verification_no_boot_mode(
 ) -> None:
     """Test handling device verification without boot mode."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._verify_future = hass.loop.create_future()
+    api._stick._verify_future = hass.loop.create_future()
 
     with patch("custom_components.schellenberg_usb.api.async_dispatcher_send"):
-        api._handle_message("RFTU_V20 F:20180510_DFBD")
+        api._stick._handle_message("RFTU_V20 F:20180510_DFBD")
 
-    assert api._device_version == "RFTU_V20"
-    assert api._device_mode == "initial"
+    assert api._stick._device_version == "RFTU_V20"
+    assert api._stick._device_mode == "initial"
 
 
 @pytest.mark.asyncio
@@ -78,7 +78,7 @@ async def test_handle_message_transmit_ack_t1(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     # Should not raise any errors
-    api._handle_message("t1")
+    api._stick._handle_message("t1")
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_handle_message_transmit_ack_t0(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     # Should not raise any errors
-    api._handle_message("t0")
+    api._stick._handle_message("t0")
 
 
 @pytest.mark.asyncio
@@ -96,14 +96,14 @@ async def test_handle_message_transmit_error_with_pending_retry(
 ) -> None:
     """Test handling transmit error with pending retry command."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._pending_retry_command = "test_command"
+    api._stick._pending_retry_command = "test_command"
 
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
-    api._transport = mock_transport
+    api._stick._transport = mock_transport
 
     with patch("asyncio.create_task") as mock_create_task:
-        api._handle_message("tE")
+        api._stick._handle_message("tE")
 
         # Should schedule a retry task
         mock_create_task.assert_called_once()
@@ -113,24 +113,24 @@ async def test_handle_message_transmit_error_with_pending_retry(
 async def test_handle_message_device_id_response(hass: HomeAssistant) -> None:
     """Test handling device ID response."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._device_id_future = hass.loop.create_future()
+    api._stick._device_id_future = hass.loop.create_future()
 
     # Format: srXXXXXX where XXXXXX is the device ID
-    api._handle_message("srABC123")
+    api._stick._handle_message("srABC123")
 
-    assert api._device_id_future.result() == "ABC123"
+    assert api._stick._device_id_future.result() == "ABC123"
 
 
 @pytest.mark.asyncio
 async def test_handle_message_pairing_device_id(hass: HomeAssistant) -> None:
     """Test handling pairing device ID message (sl format)."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._pairing_future = hass.loop.create_future()
+    api._stick._pairing_future = hass.loop.create_future()
 
     # Format: sl00BEXXXXXX where XXXXXX is the device ID
-    api._handle_message("sl00BEDEV789")
+    api._stick._handle_message("sl00BEDEV789")
 
-    assert api._pairing_future.result() == "DEV789"
+    assert api._stick._pairing_future.result() == "DEV789"
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,7 @@ async def test_handle_message_device_event_registered_device(
         "custom_components.schellenberg_usb.api.async_dispatcher_send"
     ) as mock_send:
         # Format: ssXXYYYYYYZZZZCCPPRR where XX=enum, YYYYYY=device_id, CC=command
-        api._handle_message("ss10ABC123ZZZZ01PP00")
+        api._stick._handle_message("ss10ABC123ZZZZ01PP00")
 
         # Should dispatch event to device
         mock_send.assert_called_once()
@@ -165,7 +165,7 @@ async def test_handle_message_device_event_unregistered_device(
         "custom_components.schellenberg_usb.api.async_dispatcher_send"
     ) as mock_send:
         # Message with unknown device - should still dispatch
-        api._handle_message("ss99UNKNOWNZZZZ01PP00")
+        api._stick._handle_message("ss99UNKNOWNZZZZ01PP00")
 
         # Should dispatch event even for unknown devices
         mock_send.assert_called_once()
@@ -177,9 +177,9 @@ async def test_handle_message_malformed_device_event(hass: HomeAssistant) -> Non
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     # Should not crash on malformed message
-    api._handle_message("ss")
-    api._handle_message("ss1")
-    api._handle_message("invalid")
+    api._stick._handle_message("ss")
+    api._stick._handle_message("ss1")
+    api._stick._handle_message("invalid")
 
 
 @pytest.mark.asyncio
@@ -188,7 +188,7 @@ async def test_handle_message_empty_string(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     # Should not crash
-    api._handle_message("")
+    api._stick._handle_message("")
 
 
 @pytest.mark.asyncio
@@ -197,8 +197,8 @@ async def test_handle_message_unknown_format(hass: HomeAssistant) -> None:
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     # Should not crash on unknown message types
-    api._handle_message("unknown_message_format")
-    api._handle_message("xyz123")
+    api._stick._handle_message("unknown_message_format")
+    api._stick._handle_message("xyz123")
 
 
 @pytest.mark.asyncio
@@ -208,9 +208,9 @@ async def test_api_stop_pairing_mode_without_delay(hass: HomeAssistant) -> None:
 
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
-    api._transport = mock_transport
+    api._stick._transport = mock_transport
 
-    await api._stop_pairing_mode(delay=False)
+    await api._stick._stop_pairing_mode(delay=False)
 
     mock_transport.write.assert_called_once()
 
@@ -222,12 +222,12 @@ async def test_api_stop_pairing_mode_with_delay(hass: HomeAssistant) -> None:
 
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
-    api._transport = mock_transport
+    api._stick._transport = mock_transport
 
     with patch("asyncio.sleep") as mock_sleep:
         # Make asyncio.sleep awaitable
         mock_sleep.return_value = None
-        await api._stop_pairing_mode(delay=True)
+        await api._stick._stop_pairing_mode(delay=True)
 
         # Should wait 2 seconds before stopping
         mock_sleep.assert_called_once_with(2)
@@ -242,7 +242,7 @@ async def test_api_stop_pairing_mode_oserror(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     mock_transport.write.side_effect = OSError("Connection error")
-    api._transport = mock_transport
+    api._stick._transport = mock_transport
 
     # Should not raise error
-    await api._stop_pairing_mode(delay=False)
+    await api._stick._stop_pairing_mode(delay=False)
