@@ -455,6 +455,7 @@ async def test_api_connection_status_property(hass: HomeAssistant) -> None:
     api._stick._is_connected = False
     assert api.is_connected is False
 
+
 @pytest.mark.asyncio
 async def test_api_initialize_next_device_enum_wrap_around(hass: HomeAssistant) -> None:
     """Test enum wraps around at 0xFF."""
