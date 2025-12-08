@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 import logging
+from collections.abc import Callable
 
 import serial_asyncio
-
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
@@ -348,9 +347,13 @@ class SchellenbergUsbApi:
         # Get the next available device enumerator
         device_enum = self.initialize_next_device_enum()
 
-        # Format: ssXX9400000
-        # XX = device enumerator, 94 = pair command, 00000 = padding
-        pair_command = f"{CMD_TRANSMIT}{device_enum}{CMD_PAIR}00000"
+        # Format: ssXX9CCPPPP
+        # ss = transmit prefix
+        # XX = device enumerator (2 hex chars)
+        # 9 = number of messages to send
+        # CC = command (60 = pair)
+        # PPPP = padding (4 chars)
+        pair_command = f"{CMD_TRANSMIT}{device_enum}9{CMD_PAIR}0000"
 
         _LOGGER.info(
             "Initiating pairing with device enum %s. Command: %s",
@@ -362,6 +365,10 @@ class SchellenbergUsbApi:
         self._pairing_future = self.hass.loop.create_future()
 
         try:
+            # Send sp command to enter pairing/listening mode (like C# does)
+            _LOGGER.debug("Entering pairing mode with command: sp")
+            await self.send_command(CMD_GET_PARAM_P)
+
             # Wait for device to send its ID first (with timeout)
             device_id = await asyncio.wait_for(
                 self._pairing_future, timeout=PAIRING_TIMEOUT
@@ -369,8 +376,9 @@ class SchellenbergUsbApi:
 
             # Once we have the device ID, send the pairing command
             _LOGGER.debug(
-                "Received device ID %s, sending pairing command",
+                "Received device ID %s, sending pairing command: %s",
                 device_id,
+                pair_command,
             )
             await self.send_command(pair_command)
         except TimeoutError:
