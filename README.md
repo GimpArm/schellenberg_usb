@@ -61,8 +61,7 @@ Calibration is essential for accurate position tracking. The integration measure
 #### Starting Calibration
 
 You can calibrate a blind:
-- **During initial pairing**: After naming your device, you'll be prompted to calibrate
-- **Later from the device page**: Go to the device and click the **Calibrate** gear icon (⚙️) as shown below
+- **After pairing from the device page**: Go to the device and click the **Calibrate** gear icon (⚙️) as shown below
 
 ![Calibrate button location](images/calibrate-button.png)
 
