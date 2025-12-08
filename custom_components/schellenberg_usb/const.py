@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # Re-export protocol constants from pyschellenberg for convenience
-# pylint: disable=unused-import
 from pyschellenberg import (
     CMD_DOWN,
     CMD_LED_BLINK_1,
@@ -20,6 +19,22 @@ from pyschellenberg import (
     PAIRING_TIMEOUT,
     VERIFY_TIMEOUT,
 )
+
+# Explicitly declare re-exports so ruff doesn't remove them
+__all__ = [
+    "CMD_DOWN",
+    "CMD_LED_BLINK_1",
+    "CMD_LED_OFF",
+    "CMD_LED_ON",
+    "CMD_PAIR",
+    "CMD_STOP",
+    "CMD_UP",
+    "EVENT_STARTED_MOVING_DOWN",
+    "EVENT_STARTED_MOVING_UP",
+    "EVENT_STOPPED",
+    "PAIRING_TIMEOUT",
+    "VERIFY_TIMEOUT",
+]
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
