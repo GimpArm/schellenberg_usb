@@ -147,11 +147,49 @@ async def test_handle_message_device_event_registered_device(
         # Format: ssXXYYYYYYZZZZCCPPRR where XX=enum, YYYYYY=device_id, CC=command
         api._handle_message("ss10ABC123ZZZZ01PP00")
 
-        # Should dispatch event to device
-        mock_send.assert_called_once()
-        call_args = mock_send.call_args[0]
-        assert "schellenberg_usb_device_event_ABC123" in call_args[1]
-        assert call_args[2] == "01"  # command
+        # Calibration receives the ID-only signal and the cover receives an exact signal.
+        assert mock_send.call_count == 2
+        assert mock_send.call_args_list[0].args == (
+            hass,
+            "schellenberg_usb_device_event_ABC123",
+            "01",
+        )
+        assert mock_send.call_args_list[1].args == (
+            hass,
+            "schellenberg_usb_device_event_ABC123_10",
+            "01",
+        )
+
+
+@pytest.mark.asyncio
+async def test_handle_message_requires_exact_status_pair(
+    hass: HomeAssistant,
+) -> None:
+    """Test a matching ID with another enum does not reach the cover."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.register_entity(
+        "3720B8",
+        "08",
+        "Sitting room",
+        command_device_id="F2B8D5",
+        command_enum="23",
+    )
+
+    with patch(
+        "custom_components.schellenberg_usb.api.async_dispatcher_send"
+    ) as mock_send:
+        api._handle_message("ss133720B8ZZZZ01PP00")
+
+    mock_send.assert_called_once_with(
+        hass,
+        "schellenberg_usb_device_event_3720B8",
+        "01",
+    )
+    last_received = api.get_last_received("3720B8", "13")
+    assert last_received is not None
+    assert last_received["device_id"] == "3720B8"
+    assert last_received["enum"] == "13"
+    assert last_received["command"] == "01"
 
 
 @pytest.mark.asyncio

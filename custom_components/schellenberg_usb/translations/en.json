@@ -39,32 +39,48 @@
       "entry_type": "Blind",
       "initiate_flow": {
         "user": "Add blind",
-        "reconfigure": "Calibrate"
+        "reconfigure": "Configure"
       },
       "step": {
         "user": {
           "title": "Add a blind",
           "menu_options": {
-            "pair_device": "Pair and calibrate",
+            "pair_test": "Pair and test (recommended)",
+            "pair_device": "Pair and calibrate (legacy)",
             "manual": "Add manually"
           }
         },
         "pair_device": {
-          "title": "Pair a new device",
-          "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
+          "title": "Pair and calibrate",
+          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes.",
+          "submit": "Pair"
+        },
+        "pair_test": {
+          "title": "Pair and test",
+          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
           "submit": "Pair"
         },
         "manual": {
-          "title": "Add a blind manually",
-          "description": "Enter the device ID and enum shown in the logs, plus the measured full travel times. Calibration can be run later if needed.",
+          "title": "Configure blind identities",
+          "description": "The command identity is used for outgoing control. The optional status identity is matched against received movement messages; leave it blank to use the command identity.",
           "data": {
             "device_name": "Name",
-            "device_id": "Device ID",
-            "device_enum": "Enum",
+            "device_id": "Command device ID",
+            "device_enum": "Command enum",
+            "status_device_id": "Status device ID (optional)",
+            "status_enum": "Status enum (optional)",
             "open_time_seconds": "Open time",
-            "close_time_seconds": "Close time"
+            "close_time_seconds": "Close time",
+            "invert_direction": "Invert open/close direction"
           },
-          "submit": "Add"
+          "submit": "Continue"
+        },
+        "manual_next": {
+          "title": "Manual blind ready",
+          "menu_options": {
+            "test_motor": "Test motor command",
+            "save_manual": "Save without testing"
+          }
         },
         "name_device": {
           "title": "Name your device",
@@ -73,6 +89,77 @@
             "device_name": "Device name"
           }
         },
+        "test_motor": {
+          "title": "Test motor command",
+          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
+          "submit": "Test"
+        },
+        "did_motor_move": {
+          "title": "Did the motor move?",
+          "description": "Tested command identity {device_id}/{device_enum}.",
+          "data": {
+            "motor_moved": "The motor moved"
+          },
+          "submit": "Continue"
+        },
+        "test_success": {
+          "title": "Command test successful",
+          "menu_options": {
+            "calibration_close": "Continue to calibration",
+            "manual_times": "Save with manual travel times"
+          }
+        },
+        "manual_times": {
+          "title": "Enter travel times",
+          "description": "Enter the measured full opening and closing times.",
+          "data": {
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time"
+          },
+          "submit": "Save"
+        },
+        "reconfigure": {
+          "title": "Configure blind",
+          "menu_options": {
+            "edit": "Edit identities and travel times",
+            "test_existing": "Test motor command",
+            "developer_tools": "Developer tools",
+            "calibrate": "Calibrate"
+          }
+        },
+        "developer_tools": {
+          "title": "Developer tools",
+          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
+          "menu_options": {
+            "test_open": "Test Open",
+            "test_close": "Test Close",
+            "test_stop": "Test Stop",
+            "copy_diagnostics": "Copy diagnostics"
+          }
+        },
+        "copy_diagnostics": {
+          "title": "Copy diagnostics",
+          "description": "Select and copy the diagnostic text below. Press Submit to return.",
+          "data": {
+            "diagnostics": "Diagnostics"
+          },
+          "submit": "Return"
+        },
+        "edit": {
+          "title": "Edit blind settings",
+          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Command device ID",
+            "device_enum": "Command enum",
+            "status_device_id": "Status device ID (optional)",
+            "status_enum": "Status enum (optional)",
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time",
+            "invert_direction": "Invert open/close direction"
+          },
+          "submit": "Save"
+        },
         "calibration_close": {
           "title": "Step 1: Close the blind",
           "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
@@ -80,17 +167,17 @@
         },
         "calibration_open_instruction": {
           "title": "Step 2: Open the blind",
-          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving up message from the blinds.",
+          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
           "submit": "Start"
         },
         "calibration_close_instruction": {
           "title": "Step 3: Close the blind",
-          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving down message from the blinds.",
+          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
           "submit": "Start"
         },
         "calibration_complete": {
           "title": "Calibration complete",
-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
+          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds",
           "submit": "Done"
         }
       },
@@ -99,17 +186,19 @@
         "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
         "invalid_device_enum": "Enum must contain exactly 2 hexadecimal characters.",
         "invalid_travel_time": "Travel time must be greater than zero.",
-        "already_configured": "This device is already configured.",
-        "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
+        "already_configured": "This command device ID is already configured.",
+        "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
+        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
         "pairing_failed": "Pairing failed.",
-        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
-        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
-        "unknown": "An unexpected error occurred during calibration. Please try again."
+        "calibration_timeout": "Calibration timed out. Please check the device and try again.",
+        "calibration_start_timeout": "Timeout waiting for the blind to start moving.",
+        "unknown": "An unexpected error occurred."
       },
       "abort": {
         "pairing_timeout": "No device responded within 2 minutes. Please try again.",
         "pairing_failed": "Pairing failed.",
-        "reconfigure_successful": "Calibration completed successfully"
+        "command_test_successful": "The motor command test succeeded.",
+        "reconfigure_successful": "Blind configuration updated successfully"
       }
     }
   },
@@ -151,6 +240,10 @@
     "pair": {
       "name": "Pair device",
       "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
+    },
+    "test_command": {
+      "name": "Test blind command",
+      "description": "Send open, close, or stop to a device enum without creating a cover."
     }
   }
 }

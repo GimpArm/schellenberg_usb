@@ -23,8 +23,14 @@ from homeassistant.helpers.storage import Store
 from .const import (
     CALIBRATION_TIMEOUT,
     CONF_CLOSE_TIME,
+    CONF_COMMAND_DEVICE_ID,
+    CONF_COMMAND_ENUM,
+    CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
+    CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
+    CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_ENUM,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
@@ -58,6 +64,9 @@ class CalibrationFlowHandler:
         self._pending_device_id: str | None = None
         self._pending_device_enum: str | None = None
         self._pending_device_name: str | None = None
+        self._pending_status_device_id: str | None = None
+        self._pending_status_enum: str | None = None
+        self._pending_invert_direction = False
 
     async def set_device_by_id(self, device_id: str) -> None:
         """Set the device to calibrate by its ID.
@@ -210,9 +219,13 @@ class CalibrationFlowHandler:
 
         # User clicked Next - wait for movement start and measure timing
         try:
-            # Wait for user to manually open the blinds
-            # This will trigger EVENT_STARTED_MOVING_UP from the device
-            start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_UP)
+            # Wait for the physical direction that corresponds to logical opening.
+            open_event = (
+                EVENT_STARTED_MOVING_DOWN
+                if self._selected_device.get(CONF_INVERT_DIRECTION, False)
+                else EVENT_STARTED_MOVING_UP
+            )
+            start_ok = await self._wait_for_movement_start(open_event)
             if not start_ok:
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
@@ -283,9 +296,13 @@ class CalibrationFlowHandler:
 
         # User clicked Next - wait for movement start and measure timing
         try:
-            # Wait for user to manually close the blinds
-            # This will trigger EVENT_STARTED_MOVING_DOWN from the device
-            start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_DOWN)
+            # Wait for the physical direction that corresponds to logical closing.
+            close_event = (
+                EVENT_STARTED_MOVING_UP
+                if self._selected_device.get(CONF_INVERT_DIRECTION, False)
+                else EVENT_STARTED_MOVING_DOWN
+            )
+            start_ok = await self._wait_for_movement_start(close_event)
             if not start_ok:
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
@@ -360,10 +377,15 @@ class CalibrationFlowHandler:
                 return self.flow.async_create_entry(  # type: ignore[attr-defined]
                     title=self._pending_device_name,
                     data={
-                        "device_id": self._pending_device_id,
-                        "device_enum": self._pending_device_enum,
+                        CONF_DEVICE_ID: self._pending_device_id,
+                        CONF_DEVICE_ENUM: self._pending_device_enum,
+                        CONF_COMMAND_DEVICE_ID: self._pending_device_id,
+                        CONF_COMMAND_ENUM: self._pending_device_enum,
+                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
+                        CONF_STATUS_ENUM: self._pending_status_enum,
                         CONF_OPEN_TIME: round(self._open_time, 2),
                         CONF_CLOSE_TIME: round(self._close_time, 2),
+                        CONF_INVERT_DIRECTION: self._pending_invert_direction,
                     },
                     unique_id=self._pending_device_id,
                 )
@@ -505,7 +527,7 @@ class CalibrationFlowHandler:
             async_dispatcher_send(
                 self.flow.hass,
                 SIGNAL_CALIBRATION_COMPLETED,
-                self._selected_device["id"],
+                self._selected_device.get("entity_id", self._selected_device["id"]),
                 round(open_time, 2),
                 round(close_time, 2),
             )
@@ -516,12 +538,18 @@ class CalibrationFlowHandler:
         device_id: str,
         device_enum: str,
         device_name: str,
+        status_device_id: str | None = None,
+        status_enum: str | None = None,
+        invert_direction: bool = False,
     ) -> None:
         """Enable creating a subentry after calibration completes."""
         self._create_subentry_after_calibration = True
         self._pending_device_id = device_id
         self._pending_device_enum = device_enum
         self._pending_device_name = device_name
+        self._pending_status_device_id = status_device_id or device_id
+        self._pending_status_enum = status_enum or device_enum
+        self._pending_invert_direction = invert_direction
 
     def disable_subentry_creation(self) -> None:
         """Disable subentry creation (used for reconfigure flows)."""
@@ -529,3 +557,6 @@ class CalibrationFlowHandler:
         self._pending_device_id = None
         self._pending_device_enum = None
         self._pending_device_name = None
+        self._pending_status_device_id = None
+        self._pending_status_enum = None
+        self._pending_invert_direction = False

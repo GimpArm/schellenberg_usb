@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from homeassistant.config_entries import ConfigSubentryFlow, SOURCE_USER
@@ -13,13 +13,21 @@ from custom_components.schellenberg_usb.config_flow import (
     SchellenbergPairingSubentryFlow,
 )
 from custom_components.schellenberg_usb.const import (
+    CMD_DOWN,
+    CMD_STOP,
+    CMD_UP,
     CONF_CLOSE_TIME,
     CONF_CLOSE_TIME_SECONDS,
+    CONF_COMMAND_DEVICE_ID,
+    CONF_COMMAND_ENUM,
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
+    CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
+    CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_ENUM,
 )
 from custom_components.schellenberg_usb.options_flow_calibration import (
     CalibrationFlowHandler,
@@ -35,67 +43,94 @@ def _create_flow() -> SchellenbergPairingSubentryFlow:
 
 @pytest.mark.asyncio
 async def test_blind_subentry_flow_shows_setup_method_menu() -> None:
-    """Test that users can choose pairing or manual setup."""
-    flow = _create_flow()
-
-    result = await flow.async_step_user()
+    """Test that legacy, hybrid, and manual setup remain available."""
+    result = await _create_flow().async_step_user()
 
     assert result["type"] is FlowResultType.MENU
-    assert result["step_id"] == "user"
-    assert result["menu_options"] == ["pair_device", "manual"]
+    assert result["menu_options"] == ["pair_test", "pair_device", "manual"]
 
 
 @pytest.mark.asyncio
-async def test_pairing_path_is_unchanged() -> None:
-    """Test that selecting pairing still starts the existing pairing flow."""
+async def test_legacy_pairing_path_is_unchanged() -> None:
+    """Test selecting legacy pairing still reaches naming and calibration."""
     flow = _create_flow()
     api = MagicMock()
     api.pair_device_and_wait = AsyncMock(return_value=("3720B8", "08"))
     hub_entry = MagicMock(runtime_data=api)
 
     form = await flow.async_step_pair_device()
-    assert form["type"] is FlowResultType.FORM
     assert form["step_id"] == "pair_device"
 
     with patch.object(flow, "_get_entry", return_value=hub_entry):
         result = await flow.async_step_pair_device({})
 
-    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "name_device"
-    assert result["description_placeholders"] == {"device_id": "3720B8"}
+    assert flow._pairing_workflow == "legacy"
 
 
 @pytest.mark.asyncio
-async def test_manual_setup_creates_normalized_blind_subentry() -> None:
-    """Test creating a calibrated blind without running calibration."""
+async def test_hybrid_pairing_reaches_command_test() -> None:
+    """Test hybrid pairing names the device before command testing."""
+    flow = _create_flow()
+    api = MagicMock()
+    api.pair_device_and_wait = AsyncMock(return_value=("F2B8D5", "23"))
+    hub_entry = MagicMock(runtime_data=api)
+
+    with patch.object(flow, "_get_entry", return_value=hub_entry):
+        await flow.async_step_pair_test({})
+        result = await flow.async_step_name_device({CONF_DEVICE_NAME: "Sitting room"})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "test_motor"
+    assert result["description_placeholders"] == {
+        "device_id": "F2B8D5",
+        "device_enum": "23",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_setup_stores_separate_command_and_status_identity() -> None:
+    """Test manual setup stores split identities while retaining legacy keys."""
     flow = _create_flow()
     hub_entry = MagicMock(subentries=MappingProxyType({}))
 
     with patch.object(flow, "_get_entry", return_value=hub_entry):
         result = await flow.async_step_manual(
             {
-                CONF_DEVICE_NAME: "Living room",
-                CONF_DEVICE_ID: "3720b8",
-                CONF_DEVICE_ENUM: "08",
-                CONF_OPEN_TIME_SECONDS: 24.5,
-                CONF_CLOSE_TIME_SECONDS: 22,
+                CONF_DEVICE_NAME: "Sitting room",
+                CONF_DEVICE_ID: "f2b8d5",
+                CONF_DEVICE_ENUM: "23",
+                CONF_STATUS_DEVICE_ID: "3720b8",
+                CONF_STATUS_ENUM: "08",
+                CONF_OPEN_TIME_SECONDS: 25.06,
+                CONF_CLOSE_TIME_SECONDS: 23.05,
+                CONF_INVERT_DIRECTION: False,
             }
         )
 
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "manual_next"
+
+    result = await flow.async_step_save_manual()
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Living room"
+    assert result["title"] == "Sitting room"
     assert result["data"] == {
-        CONF_DEVICE_ID: "3720B8",
-        CONF_DEVICE_ENUM: "08",
-        CONF_OPEN_TIME: 24.5,
-        CONF_CLOSE_TIME: 22.0,
+        CONF_DEVICE_ID: "F2B8D5",
+        CONF_DEVICE_ENUM: "23",
+        CONF_COMMAND_DEVICE_ID: "F2B8D5",
+        CONF_COMMAND_ENUM: "23",
+        CONF_STATUS_DEVICE_ID: "3720B8",
+        CONF_STATUS_ENUM: "08",
+        CONF_OPEN_TIME: 25.06,
+        CONF_CLOSE_TIME: 23.05,
+        CONF_INVERT_DIRECTION: False,
     }
-    assert result["unique_id"] == "3720B8"
+    assert result["unique_id"] == "F2B8D5"
 
 
 @pytest.mark.asyncio
 async def test_manual_setup_validates_protocol_values() -> None:
-    """Test validation of IDs and positive travel times."""
+    """Test validation of command/status identities and travel times."""
     flow = _create_flow()
     hub_entry = MagicMock(subentries=MappingProxyType({}))
 
@@ -105,6 +140,8 @@ async def test_manual_setup_validates_protocol_values() -> None:
                 CONF_DEVICE_NAME: " ",
                 CONF_DEVICE_ID: "not-hex",
                 CONF_DEVICE_ENUM: "123",
+                CONF_STATUS_DEVICE_ID: "also-bad",
+                CONF_STATUS_ENUM: "x",
                 CONF_OPEN_TIME_SECONDS: 0,
                 CONF_CLOSE_TIME_SECONDS: -1,
             }
@@ -115,71 +152,186 @@ async def test_manual_setup_validates_protocol_values() -> None:
         CONF_DEVICE_NAME: "required",
         CONF_DEVICE_ID: "invalid_device_id",
         CONF_DEVICE_ENUM: "invalid_device_enum",
+        CONF_STATUS_DEVICE_ID: "invalid_device_id",
+        CONF_STATUS_ENUM: "invalid_device_enum",
         CONF_OPEN_TIME_SECONDS: "invalid_travel_time",
         CONF_CLOSE_TIME_SECONDS: "invalid_travel_time",
     }
 
 
 @pytest.mark.asyncio
-async def test_manual_setup_rejects_existing_device_id() -> None:
-    """Test that manual setup cannot duplicate a blind subentry."""
+async def test_short_motor_command_sends_open_then_stop() -> None:
+    """Test the hybrid command sequence and its diagnostic context."""
     flow = _create_flow()
-    existing_subentry = MagicMock(data={CONF_DEVICE_ID: "3720B8"})
-    hub_entry = MagicMock(subentries=MappingProxyType({"existing": existing_subentry}))
+    flow._pending_device_id = "F2B8D5"
+    flow._pending_device_enum = "23"
+    api = MagicMock()
+    api.control_blind = AsyncMock(return_value=True)
+    hub_entry = MagicMock(runtime_data=api)
 
-    with patch.object(flow, "_get_entry", return_value=hub_entry):
-        result = await flow.async_step_manual(
-            {
-                CONF_DEVICE_NAME: "Duplicate",
-                CONF_DEVICE_ID: "3720b8",
-                CONF_DEVICE_ENUM: "08",
-                CONF_OPEN_TIME_SECONDS: 24,
-                CONF_CLOSE_TIME_SECONDS: 22,
-            }
-        )
+    with (
+        patch.object(flow, "_get_entry", return_value=hub_entry),
+        patch("custom_components.schellenberg_usb.config_flow.asyncio.sleep") as sleep,
+    ):
+        result = await flow.async_step_test_motor({})
 
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_DEVICE_ID: "already_configured"}
+    assert result["step_id"] == "did_motor_move"
+    api.control_blind.assert_has_awaits(
+        [
+            call("23", CMD_UP, device_id="F2B8D5"),
+            call("23", CMD_STOP, device_id="F2B8D5"),
+        ]
+    )
+    sleep.assert_awaited_once_with(0.75)
 
 
 @pytest.mark.asyncio
-async def test_pairing_persists_calibrated_travel_times() -> None:
-    """Test that paired subentries retain measured times across restarts."""
+async def test_edit_updates_protocol_data_without_unique_id_change() -> None:
+    """Test editing updates subentry data without replacing the subentry."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        subentry_id="sub1",
+        title="Sitting room",
+        unique_id="F2B8D5",
+        data={
+            CONF_DEVICE_ID: "F2B8D5",
+            CONF_DEVICE_ENUM: "23",
+            CONF_OPEN_TIME: 25.06,
+            CONF_CLOSE_TIME: 23.05,
+        },
+    )
+    entry = MagicMock(subentries=MappingProxyType({"sub1": subentry}))
+    expected_result = {"type": FlowResultType.ABORT}
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+        patch.object(
+            flow, "async_update_and_abort", return_value=expected_result
+        ) as update,
+    ):
+        result = await flow.async_step_edit(
+            {
+                CONF_DEVICE_NAME: "Door",
+                CONF_DEVICE_ID: "f2b8d5",
+                CONF_DEVICE_ENUM: "13",
+                CONF_STATUS_DEVICE_ID: "3720b8",
+                CONF_STATUS_ENUM: "08",
+                CONF_OPEN_TIME_SECONDS: 25.06,
+                CONF_CLOSE_TIME_SECONDS: 23.05,
+                CONF_INVERT_DIRECTION: True,
+            }
+        )
+
+    assert result is expected_result
+    _, kwargs = update.call_args
+    assert kwargs["title"] == "Door"
+    assert kwargs["data"][CONF_COMMAND_DEVICE_ID] == "F2B8D5"
+    assert kwargs["data"][CONF_COMMAND_ENUM] == "13"
+    assert kwargs["data"][CONF_STATUS_DEVICE_ID] == "3720B8"
+    assert kwargs["data"][CONF_STATUS_ENUM] == "08"
+    assert kwargs["data"][CONF_INVERT_DIRECTION] is True
+    assert "unique_id" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_developer_tools_show_last_frame_and_send_selected_target() -> None:
+    """Test the native diagnostic view and its direct command actions."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting room door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "23",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "08",
+            CONF_OPEN_TIME: 25.06,
+            CONF_CLOSE_TIME: 23.05,
+            CONF_INVERT_DIRECTION: True,
+        },
+    )
+    api = MagicMock()
+    api.get_last_received.return_value = {
+        "device_id": "3720B8",
+        "enum": "08",
+        "command": "01",
+        "time": "17:32:14",
+    }
+    api.control_blind = AsyncMock(return_value=True)
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        result = await flow.async_step_developer_tools()
+        command_result = await flow.async_step_test_open()
+        copy_result = await flow.async_step_copy_diagnostics()
+
+    placeholders = result["description_placeholders"]
+    assert placeholders is not None
+    assert placeholders["selected_blind"] == "Sitting room door"
+    assert placeholders["last_device_id"] == "3720B8"
+    assert placeholders["command_device_id"] == "F2B8D5"
+    assert placeholders["command_enum"] == "23"
+    api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
+    command_placeholders = command_result["description_placeholders"]
+    assert command_placeholders is not None
+    assert "queued successfully" in command_placeholders["result"]
+    schema = copy_result["data_schema"]
+    assert schema is not None
+    diagnostics = schema({})["diagnostics"]
+    assert "Selected blind: Sitting room door" in diagnostics
+    assert "Device ID: 3720B8" in diagnostics
+    assert "Device ID: F2B8D5" in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_pairing_persists_calibrated_protocol_data() -> None:
+    """Test paired subentries retain identities and measured times."""
     flow = MagicMock(spec=ConfigSubentryFlow)
     handler = CalibrationFlowHandler(flow)
     handler.set_selected_device(
         {
             "id": "3720B8",
-            "name": "Living room",
+            "entity_id": "F2B8D5",
+            "name": "Sitting room",
             "enum": "08",
         }
     )
     handler.enable_subentry_creation(
-        device_id="3720B8",
-        device_enum="08",
-        device_name="Living room",
+        device_id="F2B8D5",
+        device_enum="23",
+        device_name="Sitting room",
+        status_device_id="3720B8",
+        status_enum="08",
     )
-    handler._open_time = 24.567
-    handler._close_time = 22.345
+    handler._open_time = 25.064
+    handler._close_time = 23.054
 
     with patch.object(handler, "_save_calibration_data", new=AsyncMock()):
         await handler.async_step_calibration_complete({})
 
     flow.async_create_entry.assert_called_once_with(
-        title="Living room",
+        title="Sitting room",
         data={
-            CONF_DEVICE_ID: "3720B8",
-            CONF_DEVICE_ENUM: "08",
-            CONF_OPEN_TIME: 24.57,
-            CONF_CLOSE_TIME: 22.34,
+            CONF_DEVICE_ID: "F2B8D5",
+            CONF_DEVICE_ENUM: "23",
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "23",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "08",
+            CONF_OPEN_TIME: 25.06,
+            CONF_CLOSE_TIME: 23.05,
+            CONF_INVERT_DIRECTION: False,
         },
-        unique_id="3720B8",
+        unique_id="F2B8D5",
     )
 
 
 @pytest.mark.asyncio
 async def test_reconfigure_persists_calibrated_travel_times() -> None:
-    """Test that recalibration updates the existing blind subentry."""
+    """Test recalibration updates the existing blind subentry."""
     flow = MagicMock(spec=ConfigSubentryFlow)
     entry = MagicMock()
     subentry = MagicMock()
@@ -189,11 +341,7 @@ async def test_reconfigure_persists_calibrated_travel_times() -> None:
     flow.async_update_and_abort.return_value = expected_result
     handler = CalibrationFlowHandler(flow)
     handler.set_selected_device(
-        {
-            "id": "3720B8",
-            "name": "Living room",
-            "enum": "08",
-        }
+        {"id": "3720B8", "entity_id": "F2B8D5", "name": "Door", "enum": "08"}
     )
     handler._open_time = 25.678
     handler._close_time = 23.456

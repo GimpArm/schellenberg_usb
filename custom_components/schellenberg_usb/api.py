@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 import serial_asyncio
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CMD_ALLOW_PAIRING,
@@ -40,6 +42,10 @@ from .const import (
     CMD_TRANSMIT,
     CMD_UP,
     CMD_VERIFY,
+    CONF_COMMAND_DEVICE_ID,
+    CONF_COMMAND_ENUM,
+    CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_ENUM,
     PAIRING_DEVICE_ENUM_START,
     PAIRING_TIMEOUT,
     SIGNAL_DEVICE_EVENT,
@@ -62,6 +68,9 @@ class SchellenbergUsbApi:
         self._registered_devices: dict[
             str, str
         ] = {}  # Dict[device_id, device_enum] for registered entities
+        self._registered_entity_keys: dict[tuple[str, str], str] = {}
+        # Exact (status_device_id, status_enum) -> entity name for event matching.
+        self._last_received_messages: dict[tuple[str, str], dict[str, str]] = {}
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
         self._stop_pairing_task: asyncio.Task[None] | None = (
@@ -266,10 +275,27 @@ class SchellenbergUsbApi:
                 _LOGGER.debug(
                     "Parsed: enum=%s, id=%s, cmd=%s", device_enum, device_id, command
                 )
+                normalized_device_id = device_id.upper()
+                normalized_device_enum = device_enum.upper()
+                self._last_received_messages[
+                    (normalized_device_id, normalized_device_enum)
+                ] = {
+                    "device_id": normalized_device_id,
+                    "enum": normalized_device_enum,
+                    "command": command.upper(),
+                    "time": dt_util.now().strftime("%H:%M:%S"),
+                }
 
                 # If we're in pairing mode and this is a new device
                 if self._pairing_future and not self._pairing_future.done():
-                    if device_id not in self._registered_devices:
+                    known_status_id = any(
+                        key[0] == device_id.upper()
+                        for key in self._registered_entity_keys
+                    )
+                    if (
+                        device_id not in self._registered_devices
+                        and not known_status_id
+                    ):
                         _LOGGER.info("Pairing successful! New device ID: %s", device_id)
                         self._pairing_future.set_result(device_id)
                         # Stop pairing mode after a 2 second delay to ensure device has fully paired
@@ -282,45 +308,60 @@ class SchellenbergUsbApi:
                         # Don't send dispatcher signal here - let the caller handle persistence
                         return
 
-                # If this is the first time we see this device (auto-discovery mode)
-                if device_id not in self._registered_devices:
+                entity_name = self._registered_entity_keys.get(
+                    (normalized_device_id, normalized_device_enum)
+                )
+                if entity_name is None:
                     _LOGGER.warning(
-                        "Received message for device %s (enum=%s, cmd=%s) but no "
-                        "corresponding entity found. The device may need to be added "
-                        "to Home Assistant",
+                        "Received device_id=%s enum=%s cmd=%s matched=False; no "
+                        "cover has this status identity",
                         device_id,
                         device_enum,
                         command,
                     )
                 else:
-                    # The entity will handle the event via the dispatcher
                     _LOGGER.debug(
-                        "Forwarding event to device %s (enum=%s): command=%s",
+                        "Received device_id=%s enum=%s cmd=%s matched=True entity=%s",
                         device_id,
                         device_enum,
                         command,
+                        entity_name,
                     )
 
-                # Forward the event to the correct entity (if it exists)
+                # Retain the ID-only signal for calibration before an entity exists.
                 async_dispatcher_send(
-                    self.hass, f"{SIGNAL_DEVICE_EVENT}_{device_id}", command
+                    self.hass,
+                    f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}",
+                    command,
                 )
+                if entity_name is not None:
+                    async_dispatcher_send(
+                        self.hass,
+                        f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
+                        f"{normalized_device_enum}",
+                        command,
+                    )
             except (IndexError, ValueError) as err:
                 _LOGGER.debug("Failed to parse message %s: %s", message, err)
 
-    async def send_command(self, command: str) -> None:
-        """Send a command to the USB stick."""
+    async def send_command(self, command: str) -> bool:
+        """Queue a raw command on the serial transport."""
         if self._transport is None or self._transport.is_closing():
             _LOGGER.warning("Serial port not connected. Command dropped: %s", command)
-            return
+            return False
 
         # Store command for potential retry on "stick busy" error
         self._pending_retry_command = command
 
         full_command = f"{command}\r\n".encode("ascii")
         _LOGGER.debug("Sending to serial device: %s", full_command.strip())
-        self._transport.write(full_command)
+        try:
+            self._transport.write(full_command)
+        except (OSError, RuntimeError):
+            _LOGGER.exception("Serial transmit failed for payload=%s", command)
+            return False
         _LOGGER.debug("Command sent to serial device: %s", full_command.strip())
+        return True
 
     async def _retry_command_after_delay(self) -> None:
         """Retry sending the pending command after a 100ms delay."""
@@ -411,23 +452,42 @@ class SchellenbergUsbApi:
         except OSError as err:
             _LOGGER.debug("Error stopping pairing mode (communication error): %s", err)
 
-    async def control_blind(self, device_enum: str, action: str) -> None:
+    async def control_blind(
+        self,
+        device_enum: str,
+        action: str,
+        *,
+        device_id: str | None = None,
+    ) -> bool:
         """Send a control command to a specific blind.
 
         Args:
             device_enum: The device enumerator (hex string like "10")
             action: Command (CMD_UP, CMD_DOWN, CMD_STOP)
+            device_id: Optional command device ID for diagnostic logging
 
         """
         if action not in (CMD_UP, CMD_DOWN, CMD_STOP):
             _LOGGER.error("Invalid blind action: %s", action)
-            return
+            return False
 
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{action}0000"
-        _LOGGER.debug("Sending blind control: %s", command)
-        await self.send_command(command)
+        raw_payload = f"{CMD_TRANSMIT}{device_enum.upper()}9{action}0000"
+        action_name = {CMD_UP: "open", CMD_DOWN: "close", CMD_STOP: "stop"}[action]
+        _LOGGER.info(
+            "Sending blind command=%s device_id=%s enum=%s payload=%s",
+            action_name,
+            device_id or "unknown",
+            device_enum,
+            raw_payload,
+        )
+        sent = await self.send_command(raw_payload)
+        if sent:
+            _LOGGER.info("Serial transmit queued successfully: %s", raw_payload)
+        else:
+            _LOGGER.error("Serial transmit failed: %s", raw_payload)
+        return sent
 
     def initialize_next_device_enum(self) -> str:
         """Get the next available device enum based on registered devices.
@@ -470,20 +530,46 @@ class SchellenbergUsbApi:
         )
         return result
 
-    def register_existing_devices(self, devices: list[dict]) -> None:
+    def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
         """Register existing devices from storage.
 
         Args:
             devices: List of device dicts with 'id' and 'enum' keys
         """
         for device in devices:
-            device_id = device.get("id")
-            device_enum = device.get("enum")
-            if device_id and device_enum:
-                self._registered_devices[device_id] = device_enum
-                _LOGGER.debug(
-                    "Registered existing device %s with enum %s", device_id, device_enum
-                )
+            command_device_id = (
+                device.get(CONF_COMMAND_DEVICE_ID)
+                or device.get("id")
+                or device.get(CONF_STATUS_DEVICE_ID)
+            )
+            command_enum = (
+                device.get(CONF_COMMAND_ENUM)
+                or device.get("enum")
+                or device.get(CONF_STATUS_ENUM)
+            )
+            status_device_id = (
+                device.get(CONF_STATUS_DEVICE_ID)
+                or device.get("id")
+                or command_device_id
+            )
+            status_enum = (
+                device.get(CONF_STATUS_ENUM) or device.get("enum") or command_enum
+            )
+            entity_name = str(device.get("name") or status_device_id)
+            if command_device_id and command_enum:
+                self._registered_devices[str(command_device_id)] = str(command_enum)
+            if status_device_id and status_enum:
+                self._registered_entity_keys[
+                    (str(status_device_id).upper(), str(status_enum).upper())
+                ] = entity_name
+            _LOGGER.debug(
+                "Registered existing entity=%s command=%s/%s status=%s/%s",
+                entity_name,
+                command_device_id,
+                command_enum,
+                status_device_id,
+                status_enum,
+            )
 
     def remove_known_device(self, device_id: str) -> None:
         """Remove a device from the registered entities.
@@ -491,14 +577,48 @@ class SchellenbergUsbApi:
         After removal, messages from this device will be treated as unknown.
         """
         self._registered_devices.pop(device_id, None)
+        normalized_id = device_id.upper()
+        self._registered_entity_keys = {
+            key: name
+            for key, name in self._registered_entity_keys.items()
+            if key[0] != normalized_id
+        }
         _LOGGER.debug("Removed device %s from registered entities", device_id)
 
-    def register_entity(self, device_id: str, device_enum: str) -> None:
-        """Register that an entity exists for this device ID with its enum."""
-        self._registered_devices[device_id] = device_enum
+    def register_entity(
+        self,
+        status_device_id: str,
+        status_enum: str,
+        entity_name: str | None = None,
+        *,
+        command_device_id: str | None = None,
+        command_enum: str | None = None,
+    ) -> None:
+        """Register command and exact incoming status identities for an entity."""
+        command_id = command_device_id or status_device_id
+        command_slot = command_enum or status_enum
+        self._registered_devices[command_id] = command_slot
+        self._registered_entity_keys[
+            (status_device_id.upper(), status_enum.upper())
+        ] = entity_name or status_device_id
         _LOGGER.debug(
-            "Registered entity for device %s with enum %s", device_id, device_enum
+            "Registered entity=%s command=%s/%s status=%s/%s",
+            entity_name or status_device_id,
+            command_id,
+            command_slot,
+            status_device_id,
+            status_enum,
         )
+
+    @callback
+    def get_last_received(
+        self, status_device_id: str, status_enum: str
+    ) -> dict[str, str] | None:
+        """Return a copy of the latest frame for an exact status identity."""
+        message = self._last_received_messages.get(
+            (status_device_id.upper(), status_enum.upper())
+        )
+        return dict(message) if message is not None else None
 
     async def verify_device(self) -> bool:
         """Verify this is a Schellenberg USB stick by sending !? command.

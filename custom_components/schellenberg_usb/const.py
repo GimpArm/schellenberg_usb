@@ -27,6 +27,14 @@ SUBENTRY_TYPE_BLIND = "blind"
 CONF_SERIAL_PORT = "serial_port"
 CONF_DEVICE_NAME = "device_name"
 CONF_DEVICE_ENUM = "device_enum"
+CONF_COMMAND_DEVICE_ID = "command_device_id"
+CONF_COMMAND_ENUM = "command_enum"
+CONF_STATUS_DEVICE_ID = "status_device_id"
+CONF_STATUS_ENUM = "status_enum"
+CONF_INVERT_DIRECTION = "invert_direction"
+CONF_COMMAND = "command"
+CONF_ENUM = "enum"
+CONF_CONFIG_ENTRY_ID = "config_entry_id"
 CONF_OPEN_TIME_SECONDS = "open_time_seconds"
 CONF_CLOSE_TIME_SECONDS = "close_time_seconds"
 
@@ -93,6 +101,10 @@ SIGNAL_PAIRING_STARTED = f"{DOMAIN}_pairing_started"
 SIGNAL_PAIRING_TIMEOUT = f"{DOMAIN}_pairing_timeout"
 SIGNAL_STICK_STATUS_UPDATED = f"{DOMAIN}_stick_status_updated"
 SIGNAL_CALIBRATION_COMPLETED = f"{DOMAIN}_calibration_completed"
+
+# Services
+SERVICE_TEST_COMMAND = "test_command"
+TEST_COMMAND_DELAY = 0.75
 
 # Device verification
 VERIFY_TIMEOUT = 5  # seconds to wait for verification response

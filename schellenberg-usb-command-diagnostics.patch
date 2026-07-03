@@ -1,0 +1,2851 @@
+diff --git a/README.md b/README.md
+index 3f1d42e..6cc6c4f 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,9 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
+ ## Features
+ 
+ * Supports blind movement Up, Down, and Stop
+-* After calibation, position tracking is possible.
++* Tracks estimated position from measured or manually supplied travel times
++* Supports manual command/status identities when calibration cannot create a blind
++* Can test a paired command before calibration and edit a blind after creation
+ 
+ ## Installation
+ 
+@@ -28,9 +30,20 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
+ Make sure you have HACS installed. If you don't, run `wget -O - https://get.hacs.xyz | bash -` in HA.  
+ Choose Integrations under HACS. Click the '+' button on the bottom of the page, search for "schellenberg usb", choose it, and click install in HACS.
+ 
++
+ #### Option 2: Manual
+ Clone this repository or download the source code as a zip file and add/merge the `custom_components/` folder with its contents in your configuration directory.
+ 
++To test a local checkout on Home Assistant OS, use the Samba Share or Studio Code
++Server add-on and copy the repository's `custom_components/schellenberg_usb`
++directory to `/config/custom_components/schellenberg_usb`. The resulting directory
++must contain `manifest.json` directly. Replace the integration files, restart Home
++Assistant (a configuration reload is not sufficient), then check **Settings > System
++> Logs** for `schellenberg_usb` messages.
++
++Back up an existing copy first. HACS may overwrite these test files during an update,
++so restore or reinstall the released version after testing if necessary.
++
+ 
+ ### Step 2: Restart HA
+ In order for the newly added integration to be loaded, HA needs to be restarted.
+@@ -49,11 +62,44 @@ Select it, and the schellenberg usb integration is ready for use.
+ 2. Find the **Schellenberg USB** integration and click on it
+ 3. Click the **+** button or select **Add blind** from the menu
+ 4. Choose one of the setup methods:
+-   - **Pair and calibrate** keeps the existing guided setup. Put the blind motor
+-     into pairing mode, provide a friendly name, and complete calibration.
+-   - **Add manually** creates the cover immediately from its name, six-character
+-     device ID, two-character enum, and measured open/close travel times. The ID
+-     and enum can be copied from the integration's received-message log entries.
++   - **Pair and test (recommended)** pairs the motor, sends Open for 0.75 seconds
++     followed by Stop, and asks whether it moved. A successful test can continue to
++     calibration or save with manual travel times. A failed test opens the detected
++     values for editing.
++   - **Pair and calibrate (legacy)** keeps the original guided setup unchanged.
++   - **Add manually** creates a cover from a name, command ID/enum, optional separate
++     status ID/enum, and measured open/close travel times. Calibration is optional.
++
++
++The command enum selects the paired slot in the USB stick and is inserted into the
++outgoing serial packet. The command device ID is retained for identification and
++diagnostic logging. The status ID and enum are matched exactly against incoming
++movement messages.
++
++To edit an existing blind, open its configuration action from the Schellenberg USB
++integration and choose **Edit identities and travel times**. The same menu also
++offers a short motor command test and recalibration. Editing protocol values keeps
++the existing Home Assistant entity unique ID.
++Choose **Developer tools** in the same blind configuration menu to see the last
++frame matching its status identity, the current transmit target, direct Open,
++Close, and Stop actions, and a copyable diagnostics snapshot.
++
++
++### Diagnostic command service
++
++Before creating or changing a blind, use **Developer Tools > Actions** and run
++`schellenberg_usb.test_command`:
++
++```yaml
++device_id: F2B8D5
++enum: "23"
++command: open
++```
++
++Valid commands are `open`, `close`, and `stop`. Open and close are direct commands,
++so send `stop` yourself when performing a short test. If more than one Schellenberg
++USB hub is loaded, also supply its `config_entry_id`. Sending logs the command,
++device ID, enum, raw serial payload, and whether it was queued successfully.
+ 
+ ### Step 5: Calibrate your blinds
+ 
+diff --git a/custom_components/schellenberg_usb/__init__.py b/custom_components/schellenberg_usb/__init__.py
+index e223568..0549a63 100644
+--- a/custom_components/schellenberg_usb/__init__.py
++++ b/custom_components/schellenberg_usb/__init__.py
+@@ -7,15 +7,24 @@ from types import MappingProxyType
+ 
+ import voluptuous as vol
+ from homeassistant.config_entries import ConfigSubentry
+-from homeassistant.core import HomeAssistant
++from homeassistant.core import HomeAssistant, ServiceCall
++from homeassistant.exceptions import ServiceValidationError
+ from homeassistant.helpers import config_validation as cv
+ from homeassistant.helpers import device_registry as dr
+ 
+ from .api import SchellenbergUsbApi
+ from .const import (
++    CMD_DOWN,
++    CMD_STOP,
++    CMD_UP,
++    CONF_COMMAND,
++    CONF_CONFIG_ENTRY_ID,
++    CONF_DEVICE_ID,
++    CONF_ENUM,
+     CONF_SERIAL_PORT,
+     DOMAIN,
+     PLATFORMS,
++    SERVICE_TEST_COMMAND,
+     SUBENTRY_TYPE_HUB,
+     SchellenbergConfigEntry,
+ )
+@@ -31,6 +40,89 @@ CONFIG_SCHEMA = vol.Schema(
+ _SETUP_CALLBACKS: dict[str, dict] = {}
+ 
+ 
++def _validate_device_id(value: str) -> str:
++    """Validate and normalize a six-character protocol device ID."""
++    normalized = cv.string(value).strip().upper()
++    if len(normalized) != 6 or any(
++        character not in "0123456789ABCDEF" for character in normalized
++    ):
++        raise vol.Invalid("device ID must be six hexadecimal characters")
++    return normalized
++
++
++def _validate_device_enum(value: str) -> str:
++    """Validate and normalize a two-character protocol enum."""
++    normalized = cv.string(value).strip().upper()
++    if len(normalized) != 2 or any(
++        character not in "0123456789ABCDEF" for character in normalized
++    ):
++        raise vol.Invalid("enum must be two hexadecimal characters")
++    return normalized
++
++
++TEST_COMMAND_SCHEMA = vol.Schema(
++    {
++        vol.Required(CONF_DEVICE_ID): _validate_device_id,
++        vol.Required(CONF_ENUM): _validate_device_enum,
++        vol.Required(CONF_COMMAND): vol.In({"open", "close", "stop"}),
++        vol.Optional(CONF_CONFIG_ENTRY_ID): cv.string,
++    }
++)
++
++
++async def async_setup(hass: HomeAssistant, config: dict) -> bool:
++    """Set up integration-level diagnostic services."""
++
++    async def _handle_test_command(call: ServiceCall) -> None:
++        requested_entry_id = call.data.get(CONF_CONFIG_ENTRY_ID)
++        loaded_entries: list[tuple[SchellenbergConfigEntry, SchellenbergUsbApi]] = []
++        for candidate in hass.config_entries.async_entries(DOMAIN):
++            api = getattr(candidate, "runtime_data", None)
++            if isinstance(api, SchellenbergUsbApi):
++                loaded_entries.append((candidate, api))
++
++        if requested_entry_id:
++            api = next(
++                (
++                    candidate_api
++                    for candidate, candidate_api in loaded_entries
++                    if candidate.entry_id == requested_entry_id
++                ),
++                None,
++            )
++            if api is None:
++                raise ServiceValidationError(
++                    f"No loaded Schellenberg USB entry {requested_entry_id}"
++                )
++        elif len(loaded_entries) == 1:
++            api = loaded_entries[0][1]
++        else:
++            raise ServiceValidationError(
++                "Exactly one Schellenberg USB hub must be loaded, or config_entry_id "
++                "must be supplied"
++            )
++
++        action = {
++            "open": CMD_UP,
++            "close": CMD_DOWN,
++            "stop": CMD_STOP,
++        }[call.data[CONF_COMMAND]]
++        if not await api.control_blind(
++            call.data[CONF_ENUM],
++            action,
++            device_id=call.data[CONF_DEVICE_ID],
++        ):
++            raise ServiceValidationError("The serial command could not be queued")
++
++    hass.services.async_register(
++        DOMAIN,
++        SERVICE_TEST_COMMAND,
++        _handle_test_command,
++        schema=TEST_COMMAND_SCHEMA,
++    )
++    return True
++
++
+ async def async_setup_entry(
+     hass: HomeAssistant, entry: SchellenbergConfigEntry
+ ) -> bool:
+@@ -107,14 +199,17 @@ async def async_setup_entry(
+     # Forward setup to the hub's platforms (cover, sensor, switch)
+     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+ 
+-    # Add listener to reload entry when subentries are added
++    # Reload when subentries are added, removed, renamed, or edited.
+     async def _on_entry_updated(
+         hass_instance: HomeAssistant, updated_entry: SchellenbergConfigEntry
+     ) -> None:
+-        """Handle updates to the hub entry (including subentry additions)."""
+-        current_subentries = set(updated_entry.subentries.keys())
++        """Handle changes to the hub's blind subentries."""
++        current_subentries = {
++            subentry_id: (subentry.title, dict(subentry.data))
++            for subentry_id, subentry in updated_entry.subentries.items()
++        }
+         known_subentries = _SETUP_CALLBACKS.get(entry.entry_id, {}).get(
+-            "subentry_ids", set()
++            "subentries", {}
+         )
+ 
+         _LOGGER.debug(
+@@ -125,13 +220,9 @@ async def async_setup_entry(
+ 
+         if current_subentries != known_subentries:
+             _LOGGER.info(
+-                "Subentries changed, reloading entry. Old: %s, New: %s",
+-                known_subentries,
+-                current_subentries,
++                "Subentry configuration changed; reloading entry %s", entry.entry_id
+             )
+-            # Update tracked subentries before reloading
+-            _SETUP_CALLBACKS[entry.entry_id]["subentry_ids"] = current_subentries
+-            # Reload the entire entry to re-setup all platforms with new subentries
++            _SETUP_CALLBACKS[entry.entry_id]["subentries"] = current_subentries
+             await hass_instance.config_entries.async_reload(entry.entry_id)
+ 
+     entry.add_update_listener(_on_entry_updated)
+@@ -139,7 +230,10 @@ async def async_setup_entry(
+     # Track known subentries
+     if entry.entry_id not in _SETUP_CALLBACKS:
+         _SETUP_CALLBACKS[entry.entry_id] = {}
+-    _SETUP_CALLBACKS[entry.entry_id]["subentry_ids"] = set(entry.subentries.keys())
++    _SETUP_CALLBACKS[entry.entry_id]["subentries"] = {
++        subentry_id: (subentry.title, dict(subentry.data))
++        for subentry_id, subentry in entry.subentries.items()
++    }
+ 
+     return True
+ 
+diff --git a/custom_components/schellenberg_usb/api.py b/custom_components/schellenberg_usb/api.py
+index 7aceb85..f760b18 100644
+--- a/custom_components/schellenberg_usb/api.py
++++ b/custom_components/schellenberg_usb/api.py
+@@ -5,10 +5,12 @@ from __future__ import annotations
+ import asyncio
+ import logging
+ from collections.abc import Callable
++from typing import Any
+ 
+ import serial_asyncio
+ from homeassistant.core import HomeAssistant, callback
+ from homeassistant.helpers.dispatcher import async_dispatcher_send
++from homeassistant.util import dt as dt_util
+ 
+ from .const import (
+     CMD_ALLOW_PAIRING,
+@@ -40,6 +42,10 @@ from .const import (
+     CMD_TRANSMIT,
+     CMD_UP,
+     CMD_VERIFY,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+     PAIRING_DEVICE_ENUM_START,
+     PAIRING_TIMEOUT,
+     SIGNAL_DEVICE_EVENT,
+@@ -62,6 +68,9 @@ class SchellenbergUsbApi:
+         self._registered_devices: dict[
+             str, str
+         ] = {}  # Dict[device_id, device_enum] for registered entities
++        self._registered_entity_keys: dict[tuple[str, str], str] = {}
++        # Exact (status_device_id, status_enum) -> entity name for event matching.
++        self._last_received_messages: dict[tuple[str, str], dict[str, str]] = {}
+         self._is_connecting = False
+         self._pairing_future: asyncio.Future[str] | None = None
+         self._stop_pairing_task: asyncio.Task[None] | None = (
+@@ -266,10 +275,27 @@ class SchellenbergUsbApi:
+                 _LOGGER.debug(
+                     "Parsed: enum=%s, id=%s, cmd=%s", device_enum, device_id, command
+                 )
++                normalized_device_id = device_id.upper()
++                normalized_device_enum = device_enum.upper()
++                self._last_received_messages[
++                    (normalized_device_id, normalized_device_enum)
++                ] = {
++                    "device_id": normalized_device_id,
++                    "enum": normalized_device_enum,
++                    "command": command.upper(),
++                    "time": dt_util.now().strftime("%H:%M:%S"),
++                }
+ 
+                 # If we're in pairing mode and this is a new device
+                 if self._pairing_future and not self._pairing_future.done():
+-                    if device_id not in self._registered_devices:
++                    known_status_id = any(
++                        key[0] == device_id.upper()
++                        for key in self._registered_entity_keys
++                    )
++                    if (
++                        device_id not in self._registered_devices
++                        and not known_status_id
++                    ):
+                         _LOGGER.info("Pairing successful! New device ID: %s", device_id)
+                         self._pairing_future.set_result(device_id)
+                         # Stop pairing mode after a 2 second delay to ensure device has fully paired
+@@ -282,45 +308,60 @@ class SchellenbergUsbApi:
+                         # Don't send dispatcher signal here - let the caller handle persistence
+                         return
+ 
+-                # If this is the first time we see this device (auto-discovery mode)
+-                if device_id not in self._registered_devices:
++                entity_name = self._registered_entity_keys.get(
++                    (normalized_device_id, normalized_device_enum)
++                )
++                if entity_name is None:
+                     _LOGGER.warning(
+-                        "Received message for device %s (enum=%s, cmd=%s) but no "
+-                        "corresponding entity found. The device may need to be added "
+-                        "to Home Assistant",
++                        "Received device_id=%s enum=%s cmd=%s matched=False; no "
++                        "cover has this status identity",
+                         device_id,
+                         device_enum,
+                         command,
+                     )
+                 else:
+-                    # The entity will handle the event via the dispatcher
+                     _LOGGER.debug(
+-                        "Forwarding event to device %s (enum=%s): command=%s",
++                        "Received device_id=%s enum=%s cmd=%s matched=True entity=%s",
+                         device_id,
+                         device_enum,
+                         command,
++                        entity_name,
+                     )
+ 
+-                # Forward the event to the correct entity (if it exists)
++                # Retain the ID-only signal for calibration before an entity exists.
+                 async_dispatcher_send(
+-                    self.hass, f"{SIGNAL_DEVICE_EVENT}_{device_id}", command
++                    self.hass,
++                    f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}",
++                    command,
+                 )
++                if entity_name is not None:
++                    async_dispatcher_send(
++                        self.hass,
++                        f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
++                        f"{normalized_device_enum}",
++                        command,
++                    )
+             except (IndexError, ValueError) as err:
+                 _LOGGER.debug("Failed to parse message %s: %s", message, err)
+ 
+-    async def send_command(self, command: str) -> None:
+-        """Send a command to the USB stick."""
++    async def send_command(self, command: str) -> bool:
++        """Queue a raw command on the serial transport."""
+         if self._transport is None or self._transport.is_closing():
+             _LOGGER.warning("Serial port not connected. Command dropped: %s", command)
+-            return
++            return False
+ 
+         # Store command for potential retry on "stick busy" error
+         self._pending_retry_command = command
+ 
+         full_command = f"{command}\r\n".encode("ascii")
+         _LOGGER.debug("Sending to serial device: %s", full_command.strip())
+-        self._transport.write(full_command)
++        try:
++            self._transport.write(full_command)
++        except (OSError, RuntimeError):
++            _LOGGER.exception("Serial transmit failed for payload=%s", command)
++            return False
+         _LOGGER.debug("Command sent to serial device: %s", full_command.strip())
++        return True
+ 
+     async def _retry_command_after_delay(self) -> None:
+         """Retry sending the pending command after a 100ms delay."""
+@@ -411,23 +452,42 @@ class SchellenbergUsbApi:
+         except OSError as err:
+             _LOGGER.debug("Error stopping pairing mode (communication error): %s", err)
+ 
+-    async def control_blind(self, device_enum: str, action: str) -> None:
++    async def control_blind(
++        self,
++        device_enum: str,
++        action: str,
++        *,
++        device_id: str | None = None,
++    ) -> bool:
+         """Send a control command to a specific blind.
+ 
+         Args:
+             device_enum: The device enumerator (hex string like "10")
+             action: Command (CMD_UP, CMD_DOWN, CMD_STOP)
++            device_id: Optional command device ID for diagnostic logging
+ 
+         """
+         if action not in (CMD_UP, CMD_DOWN, CMD_STOP):
+             _LOGGER.error("Invalid blind action: %s", action)
+-            return
++            return False
+ 
+         # Format: ssXX9AAZZZ
+         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
+-        command = f"{CMD_TRANSMIT}{device_enum}9{action}0000"
+-        _LOGGER.debug("Sending blind control: %s", command)
+-        await self.send_command(command)
++        raw_payload = f"{CMD_TRANSMIT}{device_enum.upper()}9{action}0000"
++        action_name = {CMD_UP: "open", CMD_DOWN: "close", CMD_STOP: "stop"}[action]
++        _LOGGER.info(
++            "Sending blind command=%s device_id=%s enum=%s payload=%s",
++            action_name,
++            device_id or "unknown",
++            device_enum,
++            raw_payload,
++        )
++        sent = await self.send_command(raw_payload)
++        if sent:
++            _LOGGER.info("Serial transmit queued successfully: %s", raw_payload)
++        else:
++            _LOGGER.error("Serial transmit failed: %s", raw_payload)
++        return sent
+ 
+     def initialize_next_device_enum(self) -> str:
+         """Get the next available device enum based on registered devices.
+@@ -470,20 +530,46 @@ class SchellenbergUsbApi:
+         )
+         return result
+ 
+-    def register_existing_devices(self, devices: list[dict]) -> None:
++    def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
+         """Register existing devices from storage.
+ 
+         Args:
+             devices: List of device dicts with 'id' and 'enum' keys
+         """
+         for device in devices:
+-            device_id = device.get("id")
+-            device_enum = device.get("enum")
+-            if device_id and device_enum:
+-                self._registered_devices[device_id] = device_enum
+-                _LOGGER.debug(
+-                    "Registered existing device %s with enum %s", device_id, device_enum
+-                )
++            command_device_id = (
++                device.get(CONF_COMMAND_DEVICE_ID)
++                or device.get("id")
++                or device.get(CONF_STATUS_DEVICE_ID)
++            )
++            command_enum = (
++                device.get(CONF_COMMAND_ENUM)
++                or device.get("enum")
++                or device.get(CONF_STATUS_ENUM)
++            )
++            status_device_id = (
++                device.get(CONF_STATUS_DEVICE_ID)
++                or device.get("id")
++                or command_device_id
++            )
++            status_enum = (
++                device.get(CONF_STATUS_ENUM) or device.get("enum") or command_enum
++            )
++            entity_name = str(device.get("name") or status_device_id)
++            if command_device_id and command_enum:
++                self._registered_devices[str(command_device_id)] = str(command_enum)
++            if status_device_id and status_enum:
++                self._registered_entity_keys[
++                    (str(status_device_id).upper(), str(status_enum).upper())
++                ] = entity_name
++            _LOGGER.debug(
++                "Registered existing entity=%s command=%s/%s status=%s/%s",
++                entity_name,
++                command_device_id,
++                command_enum,
++                status_device_id,
++                status_enum,
++            )
+ 
+     def remove_known_device(self, device_id: str) -> None:
+         """Remove a device from the registered entities.
+@@ -491,14 +577,48 @@ class SchellenbergUsbApi:
+         After removal, messages from this device will be treated as unknown.
+         """
+         self._registered_devices.pop(device_id, None)
++        normalized_id = device_id.upper()
++        self._registered_entity_keys = {
++            key: name
++            for key, name in self._registered_entity_keys.items()
++            if key[0] != normalized_id
++        }
+         _LOGGER.debug("Removed device %s from registered entities", device_id)
+ 
+-    def register_entity(self, device_id: str, device_enum: str) -> None:
+-        """Register that an entity exists for this device ID with its enum."""
+-        self._registered_devices[device_id] = device_enum
++    def register_entity(
++        self,
++        status_device_id: str,
++        status_enum: str,
++        entity_name: str | None = None,
++        *,
++        command_device_id: str | None = None,
++        command_enum: str | None = None,
++    ) -> None:
++        """Register command and exact incoming status identities for an entity."""
++        command_id = command_device_id or status_device_id
++        command_slot = command_enum or status_enum
++        self._registered_devices[command_id] = command_slot
++        self._registered_entity_keys[
++            (status_device_id.upper(), status_enum.upper())
++        ] = entity_name or status_device_id
+         _LOGGER.debug(
+-            "Registered entity for device %s with enum %s", device_id, device_enum
++            "Registered entity=%s command=%s/%s status=%s/%s",
++            entity_name or status_device_id,
++            command_id,
++            command_slot,
++            status_device_id,
++            status_enum,
++        )
++
++    @callback
++    def get_last_received(
++        self, status_device_id: str, status_enum: str
++    ) -> dict[str, str] | None:
++        """Return a copy of the latest frame for an exact status identity."""
++        message = self._last_received_messages.get(
++            (status_device_id.upper(), status_enum.upper())
+         )
++        return dict(message) if message is not None else None
+ 
+     async def verify_device(self) -> bool:
+         """Verify this is a Schellenberg USB stick by sending !? command.
+diff --git a/custom_components/schellenberg_usb/config_flow.py b/custom_components/schellenberg_usb/config_flow.py
+index b9ee5ae..7d671af 100644
+--- a/custom_components/schellenberg_usb/config_flow.py
++++ b/custom_components/schellenberg_usb/config_flow.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import logging
+ from typing import Any, Awaitable, cast
+ 
+@@ -18,16 +19,25 @@ from homeassistant.helpers import selector
+ from homeassistant.helpers.service_info.usb import UsbServiceInfo
+ 
+ from .const import (
++    CMD_DOWN,
++    CMD_STOP,
++    CMD_UP,
+     CONF_CLOSE_TIME,
+     CONF_CLOSE_TIME_SECONDS,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
+     CONF_DEVICE_ENUM,
+     CONF_DEVICE_ID,
+     CONF_DEVICE_NAME,
++    CONF_INVERT_DIRECTION,
+     CONF_OPEN_TIME,
+     CONF_OPEN_TIME_SECONDS,
+     CONF_SERIAL_PORT,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+     DOMAIN,
+     SUBENTRY_TYPE_BLIND,
++    TEST_COMMAND_DELAY,
+ )
+ from .options_flow import SchellenbergOptionsFlowHandler
+ from .options_flow_calibration import CalibrationFlowHandler
+@@ -206,6 +216,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+         self._pending_device_id: str | None = None
+         self._pending_device_enum: str | None = None
+         self._pending_device_name: str | None = None
++        self._pending_status_device_id: str | None = None
++        self._pending_status_enum: str | None = None
++        self._pending_open_time: float | None = None
++        self._pending_close_time: float | None = None
++        self._pending_invert_direction = False
++        self._pairing_workflow = "legacy"
++        self._developer_notice = "No test command sent in this session."
+ 
+     def _get_calibration_handler(self) -> CalibrationFlowHandler:
+         """Return (and lazily create) the calibration flow handler."""
+@@ -239,19 +256,31 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+     ) -> SubentryFlowResult:
+         """Choose between pairing/calibration and manual setup."""
+         return self.async_show_menu(
+-            step_id="user", menu_options=["pair_device", "manual"]
++            step_id="user", menu_options=["pair_test", "pair_device", "manual"]
+         )
+ 
+     async def async_step_pair_device(
+         self, user_input: dict[str, Any] | None = None
+     ) -> SubentryFlowResult:
+-        """Handle pairing initialization."""
++        """Run the original pair-then-calibrate workflow."""
++        self._pairing_workflow = "legacy"
++        return await self._async_pair_device("pair_device", user_input)
++
++    async def async_step_pair_test(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Pair a blind and verify outgoing control before calibration."""
++        self._pairing_workflow = "hybrid"
++        return await self._async_pair_device("pair_test", user_input)
++
++    async def _async_pair_device(
++        self, step_id: str, user_input: dict[str, Any] | None
++    ) -> SubentryFlowResult:
++        """Pair a device for either supported pairing workflow."""
+         _LOGGER.debug("Pairing step user input: %s", user_input)
+         if user_input is None:
+             _LOGGER.info("Showing pairing form")
+-            return self.async_show_form(
+-                step_id="pair_device", data_schema=vol.Schema({})
+-            )
++            return self.async_show_form(step_id=step_id, data_schema=vol.Schema({}))
+ 
+         # Get the hub entry (parent config entry)
+         hub_entry = self._get_entry()
+@@ -268,32 +297,42 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+         device_id, device_enum = pairing_result
+         self._pending_device_id = device_id
+         self._pending_device_enum = device_enum
++        self._pending_status_device_id = device_id
++        self._pending_status_enum = device_enum
+         self._pending_device_name = None
+         return await self.async_step_name_device()
+ 
+     async def async_step_manual(
+         self, user_input: dict[str, Any] | None = None
+     ) -> SubentryFlowResult:
+-        """Create a blind subentry from manually supplied protocol values."""
++        """Collect manual command/status identities and travel times."""
+         errors: dict[str, str] = {}
+ 
+         if user_input is not None:
+             device_name = str(user_input[CONF_DEVICE_NAME]).strip()
+-            device_id = str(user_input[CONF_DEVICE_ID]).strip().upper()
+-            device_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
++            command_device_id = str(user_input[CONF_DEVICE_ID]).strip().upper()
++            command_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
++            status_device_id = (
++                str(user_input.get(CONF_STATUS_DEVICE_ID, "")).strip().upper()
++                or command_device_id
++            )
++            status_enum = (
++                str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
++                or command_enum
++            )
+             open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
+             close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
+ 
+             if not device_name:
+                 errors[CONF_DEVICE_NAME] = "required"
+-            if len(device_id) != 6 or any(
+-                character not in "0123456789ABCDEF" for character in device_id
+-            ):
++            if not self._is_hex_value(command_device_id, 6):
+                 errors[CONF_DEVICE_ID] = "invalid_device_id"
+-            if len(device_enum) != 2 or any(
+-                character not in "0123456789ABCDEF" for character in device_enum
+-            ):
++            if not self._is_hex_value(command_enum, 2):
+                 errors[CONF_DEVICE_ENUM] = "invalid_device_enum"
++            if not self._is_hex_value(status_device_id, 6):
++                errors[CONF_STATUS_DEVICE_ID] = "invalid_device_id"
++            if not self._is_hex_value(status_enum, 2):
++                errors[CONF_STATUS_ENUM] = "invalid_device_enum"
+             if open_time <= 0:
+                 errors[CONF_OPEN_TIME_SECONDS] = "invalid_travel_time"
+             if close_time <= 0:
+@@ -301,30 +340,247 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+ 
+             hub_entry = self._get_entry()
+             if any(
+-                str(subentry.data.get(CONF_DEVICE_ID, "")).upper() == device_id
++                str(
++                    subentry.data.get(CONF_COMMAND_DEVICE_ID)
++                    or subentry.data.get(CONF_DEVICE_ID, "")
++                ).upper()
++                == command_device_id
+                 for subentry in hub_entry.subentries.values()
+             ):
+                 errors[CONF_DEVICE_ID] = "already_configured"
+ 
+             if not errors:
+-                return self.async_create_entry(
+-                    title=device_name,
+-                    data={
+-                        CONF_DEVICE_ID: device_id,
+-                        CONF_DEVICE_ENUM: device_enum,
+-                        CONF_OPEN_TIME: open_time,
+-                        CONF_CLOSE_TIME: close_time,
+-                    },
+-                    unique_id=device_id,
++                self._pending_device_name = device_name
++                self._pending_device_id = command_device_id
++                self._pending_device_enum = command_enum
++                self._pending_status_device_id = status_device_id
++                self._pending_status_enum = status_enum
++                self._pending_open_time = open_time
++                self._pending_close_time = close_time
++                self._pending_invert_direction = bool(
++                    user_input.get(CONF_INVERT_DIRECTION, False)
+                 )
++                self._pairing_workflow = "manual"
++                return await self.async_step_manual_next()
+ 
+         return self.async_show_form(
+             step_id="manual",
++            data_schema=self._manual_schema(),
++            errors=errors,
++        )
++
++    @staticmethod
++    def _is_hex_value(value: str, length: int) -> bool:
++        """Return whether value is an exact-length hexadecimal string."""
++        return len(value) == length and all(
++            character in "0123456789ABCDEF" for character in value
++        )
++
++    def _manual_schema(self) -> vol.Schema:
++        """Build the manual form with pending values as defaults."""
++        open_time_key = (
++            vol.Required(
++                CONF_OPEN_TIME_SECONDS,
++                default=self._pending_open_time,
++            )
++            if self._pending_open_time is not None
++            else vol.Required(CONF_OPEN_TIME_SECONDS)
++        )
++        close_time_key = (
++            vol.Required(
++                CONF_CLOSE_TIME_SECONDS,
++                default=self._pending_close_time,
++            )
++            if self._pending_close_time is not None
++            else vol.Required(CONF_CLOSE_TIME_SECONDS)
++        )
++        return vol.Schema(
++            {
++                vol.Required(
++                    CONF_DEVICE_NAME,
++                    default=self._pending_device_name or "",
++                ): selector.TextSelector(),
++                vol.Required(
++                    CONF_DEVICE_ID,
++                    default=self._pending_device_id or "",
++                ): selector.TextSelector(),
++                vol.Required(
++                    CONF_DEVICE_ENUM,
++                    default=self._pending_device_enum or "",
++                ): selector.TextSelector(),
++                vol.Optional(
++                    CONF_STATUS_DEVICE_ID,
++                    default=self._pending_status_device_id or "",
++                ): selector.TextSelector(),
++                vol.Optional(
++                    CONF_STATUS_ENUM,
++                    default=self._pending_status_enum or "",
++                ): selector.TextSelector(),
++                open_time_key: selector.NumberSelector(
++                    selector.NumberSelectorConfig(
++                        min=0.1,
++                        step=0.1,
++                        unit_of_measurement="s",
++                        mode=selector.NumberSelectorMode.BOX,
++                    )
++                ),
++                close_time_key: selector.NumberSelector(
++                    selector.NumberSelectorConfig(
++                        min=0.1,
++                        step=0.1,
++                        unit_of_measurement="s",
++                        mode=selector.NumberSelectorMode.BOX,
++                    )
++                ),
++                vol.Optional(
++                    CONF_INVERT_DIRECTION,
++                    default=self._pending_invert_direction,
++                ): selector.BooleanSelector(),
++            }
++        )
++
++    def _pending_data(self) -> dict[str, Any]:
++        """Return config-subentry data for the pending blind."""
++        assert self._pending_device_id is not None
++        assert self._pending_device_enum is not None
++        assert self._pending_status_device_id is not None
++        assert self._pending_status_enum is not None
++        assert self._pending_open_time is not None
++        assert self._pending_close_time is not None
++        return {
++            # Legacy keys stay populated for backward compatibility.
++            CONF_DEVICE_ID: self._pending_device_id,
++            CONF_DEVICE_ENUM: self._pending_device_enum,
++            CONF_COMMAND_DEVICE_ID: self._pending_device_id,
++            CONF_COMMAND_ENUM: self._pending_device_enum,
++            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
++            CONF_STATUS_ENUM: self._pending_status_enum,
++            CONF_OPEN_TIME: self._pending_open_time,
++            CONF_CLOSE_TIME: self._pending_close_time,
++            CONF_INVERT_DIRECTION: self._pending_invert_direction,
++        }
++
++    async def async_step_manual_next(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Offer command testing before saving a manually configured blind."""
++        return self.async_show_menu(
++            step_id="manual_next", menu_options=["test_motor", "save_manual"]
++        )
++
++    async def async_step_save_manual(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Save the pending blind without calibration."""
++        if (
++            not self._pending_device_name
++            or not self._pending_device_id
++            or self._pending_open_time is None
++            or self._pending_close_time is None
++        ):
++            return self.async_abort(reason="device_not_found")
++        return self.async_create_entry(
++            title=self._pending_device_name,
++            data=self._pending_data(),
++            unique_id=self._pending_device_id,
++        )
++
++    async def async_step_test_motor(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Send a short logical-open command followed by stop."""
++        if not self._pending_device_id or not self._pending_device_enum:
++            return self.async_abort(reason="device_not_found")
++
++        placeholders = {
++            "device_id": self._pending_device_id,
++            "device_enum": self._pending_device_enum,
++        }
++        if user_input is None:
++            return self.async_show_form(
++                step_id="test_motor",
++                data_schema=vol.Schema({}),
++                description_placeholders=placeholders,
++            )
++
++        api = self._get_entry().runtime_data
++        action = CMD_DOWN if self._pending_invert_direction else CMD_UP
++        if not await api.control_blind(
++            self._pending_device_enum,
++            action,
++            device_id=self._pending_device_id,
++        ):
++            return self.async_show_form(
++                step_id="test_motor",
++                data_schema=vol.Schema({}),
++                description_placeholders=placeholders,
++                errors={"base": "command_failed"},
++            )
++        try:
++            await asyncio.sleep(TEST_COMMAND_DELAY)
++        finally:
++            stopped = await api.control_blind(
++                self._pending_device_enum,
++                CMD_STOP,
++                device_id=self._pending_device_id,
++            )
++        if not stopped:
++            return self.async_show_form(
++                step_id="test_motor",
++                data_schema=vol.Schema({}),
++                description_placeholders=placeholders,
++                errors={"base": "command_failed"},
++            )
++        return await self.async_step_did_motor_move()
++
++    async def async_step_did_motor_move(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Ask whether the short command moved the motor."""
++        if user_input is None:
++            return self.async_show_form(
++                step_id="did_motor_move",
++                data_schema=vol.Schema(
++                    {
++                        vol.Required("motor_moved", default=True): (
++                            selector.BooleanSelector()
++                        )
++                    }
++                ),
++                description_placeholders={
++                    "device_id": self._pending_device_id or "unknown",
++                    "device_enum": self._pending_device_enum or "unknown",
++                },
++            )
++
++        if not user_input["motor_moved"]:
++            if self._pairing_workflow == "existing":
++                return await self.async_step_edit()
++            # Reuse the manual form with the detected/current values prefilled.
++            return await self.async_step_manual()
++
++        if self._pairing_workflow == "existing":
++            return self.async_abort(reason="command_test_successful")
++        if self._pairing_workflow == "hybrid":
++            return self.async_show_menu(
++                step_id="test_success",
++                menu_options=["calibration_close", "manual_times"],
++            )
++        return await self.async_step_save_manual()
++
++    async def async_step_manual_times(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Collect travel times after a successful paired command test."""
++        if user_input is not None:
++            self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
++            self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
++            return await self.async_step_save_manual()
++
++        return self.async_show_form(
++            step_id="manual_times",
+             data_schema=vol.Schema(
+                 {
+-                    vol.Required(CONF_DEVICE_NAME): selector.TextSelector(),
+-                    vol.Required(CONF_DEVICE_ID): selector.TextSelector(),
+-                    vol.Required(CONF_DEVICE_ENUM): selector.TextSelector(),
+                     vol.Required(CONF_OPEN_TIME_SECONDS): selector.NumberSelector(
+                         selector.NumberSelectorConfig(
+                             min=0.1,
+@@ -343,7 +599,6 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+                     ),
+                 }
+             ),
+-            errors=errors,
+         )
+ 
+     async def async_step_name_device(
+@@ -370,7 +625,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+                 },
+             )
+ 
+-        # User provided a name – begin calibration prior to creating subentry
++        # User provided a name; configure calibration state for either workflow.
+         if not device_id or not device_enum:
+             return self.async_abort(reason="pairing_failed")
+ 
+@@ -382,16 +637,23 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+         # Provide minimal device to handler
+         handler.set_selected_device(
+             {
+-                "id": device_id,
++                "id": self._pending_status_device_id or device_id,
++                "entity_id": device_id,
+                 "name": device_name,
+-                "enum": device_enum,
++                "enum": self._pending_status_enum or device_enum,
+             }
+         )
+         handler.enable_subentry_creation(
+             device_id=device_id,
+             device_enum=device_enum,
+             device_name=device_name,
++            status_device_id=self._pending_status_device_id or device_id,
++            status_enum=self._pending_status_enum or device_enum,
++            invert_direction=self._pending_invert_direction,
+         )
++        if self._pairing_workflow == "hybrid":
++            return await self.async_step_test_motor()
++
+         _LOGGER.debug(
+             "Starting calibration for paired device %s (%s) before creating subentry",
+             device_id,
+@@ -404,30 +666,358 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
+     async def async_step_reconfigure(
+         self, user_input: dict[str, Any] | None = None
+     ) -> SubentryFlowResult:
+-        """Configure a blind: run calibration for the single device under this subentry.
++        """Choose whether to edit settings or recalibrate a blind."""
++        return self.async_show_menu(
++            step_id="reconfigure",
++            menu_options=["edit", "test_existing", "developer_tools", "calibrate"],
++        )
+ 
+-        We bypass storage lookup and set the calibration handler's selected device
+-        directly from the subentry data to avoid device_not_found errors before
+-        calibration has ever run.
+-        """
++    def _developer_details(self) -> dict[str, Any]:
++        """Return normalized protocol details for the selected blind."""
++        subentry = self._get_reconfigure_subentry()
++        data = subentry.data
++        command_device_id = str(
++            data.get(CONF_COMMAND_DEVICE_ID) or data.get(CONF_DEVICE_ID, "")
++        ).upper()
++        command_enum = str(
++            data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, "")
++        ).upper()
++        return {
++            "name": subentry.title,
++            "command_device_id": command_device_id,
++            "command_enum": command_enum,
++            "status_device_id": str(
++                data.get(CONF_STATUS_DEVICE_ID) or command_device_id
++            ).upper(),
++            "status_enum": str(data.get(CONF_STATUS_ENUM) or command_enum).upper(),
++            "invert_direction": bool(data.get(CONF_INVERT_DIRECTION, False)),
++            "open_time": float(data.get(CONF_OPEN_TIME, 60.0)),
++            "close_time": float(data.get(CONF_CLOSE_TIME, 60.0)),
++        }
++
++    def _developer_snapshot(
++        self,
++    ) -> tuple[dict[str, Any], dict[str, str]]:
++        """Return current blind details and its latest received frame."""
++        details = self._developer_details()
++        api = self._get_entry().runtime_data
++        last_received = api.get_last_received(
++            details["status_device_id"], details["status_enum"]
++        ) or {
++            "device_id": "No matching frame received",
++            "enum": "--",
++            "command": "--",
++            "time": "--",
++        }
++        return details, last_received
++
++    async def async_step_developer_tools(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Show live protocol diagnostics and direct test actions."""
++        details, last_received = self._developer_snapshot()
++        return self.async_show_menu(
++            step_id="developer_tools",
++            menu_options=[
++                "test_open",
++                "test_close",
++                "test_stop",
++                "copy_diagnostics",
++            ],
++            description_placeholders={
++                "selected_blind": str(details["name"]),
++                "last_device_id": last_received["device_id"],
++                "last_enum": last_received["enum"],
++                "last_command": last_received["command"],
++                "last_time": last_received["time"],
++                "command_device_id": details["command_device_id"],
++                "command_enum": details["command_enum"],
++                "result": self._developer_notice,
++            },
++        )
++
++    async def _async_developer_command(self, command: str) -> SubentryFlowResult:
++        """Send one logical command from the developer tools menu."""
++        details = self._developer_details()
++        invert_direction = details["invert_direction"]
++        action = {
++            "open": CMD_DOWN if invert_direction else CMD_UP,
++            "close": CMD_UP if invert_direction else CMD_DOWN,
++            "stop": CMD_STOP,
++        }[command]
++        sent = await self._get_entry().runtime_data.control_blind(
++            details["command_enum"],
++            action,
++            device_id=details["command_device_id"],
++        )
++        self._developer_notice = (
++            f"{command.title()} command queued successfully."
++            if sent
++            else f"{command.title()} command failed; check the integration logs."
++        )
++        return await self.async_step_developer_tools()
++
++    async def async_step_test_open(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Send a direct logical-open test command."""
++        return await self._async_developer_command("open")
++
++    async def async_step_test_close(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Send a direct logical-close test command."""
++        return await self._async_developer_command("close")
++
++    async def async_step_test_stop(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Send a direct stop test command."""
++        return await self._async_developer_command("stop")
++
++    async def async_step_copy_diagnostics(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Show a copyable text snapshot for troubleshooting."""
++        if user_input is not None:
++            return await self.async_step_developer_tools()
++
++        details, last_received = self._developer_snapshot()
++        diagnostics = "\n".join(
++            (
++                "Schellenberg USB blind diagnostics",
++                f"Selected blind: {details['name']}",
++                "",
++                "Last received:",
++                f"Device ID: {last_received['device_id']}",
++                f"Enum: {last_received['enum']}",
++                f"Command: {last_received['command']}",
++                f"Time: {last_received['time']}",
++                "",
++                "Current transmit target:",
++                f"Device ID: {details['command_device_id']}",
++                f"Enum: {details['command_enum']}",
++                "",
++                "Configured status identity:",
++                f"Device ID: {details['status_device_id']}",
++                f"Enum: {details['status_enum']}",
++                f"Open time: {details['open_time']:.2f} seconds",
++                f"Close time: {details['close_time']:.2f} seconds",
++                f"Invert direction: {details['invert_direction']}",
++            )
++        )
++        return self.async_show_form(
++            step_id="copy_diagnostics",
++            data_schema=vol.Schema(
++                {
++                    vol.Required("diagnostics", default=diagnostics): (
++                        selector.TextSelector(
++                            selector.TextSelectorConfig(multiline=True)
++                        )
++                    )
++                }
++            ),
++        )
++
++    async def async_step_test_existing(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Load an existing blind into the short command test."""
++        subentry = self._get_reconfigure_subentry()
++        data = subentry.data
++        self._pending_device_name = subentry.title
++        self._pending_device_id = str(
++            data.get(CONF_COMMAND_DEVICE_ID) or data.get(CONF_DEVICE_ID, "")
++        )
++        self._pending_device_enum = str(
++            data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, "")
++        )
++        self._pending_status_device_id = str(
++            data.get(CONF_STATUS_DEVICE_ID) or self._pending_device_id
++        )
++        self._pending_status_enum = str(
++            data.get(CONF_STATUS_ENUM) or self._pending_device_enum
++        )
++        self._pending_open_time = float(data.get(CONF_OPEN_TIME, 60.0))
++        self._pending_close_time = float(data.get(CONF_CLOSE_TIME, 60.0))
++        self._pending_invert_direction = bool(data.get(CONF_INVERT_DIRECTION, False))
++        self._pairing_workflow = "existing"
++        return await self.async_step_test_motor(user_input)
++
++    async def async_step_edit(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Edit a blind while preserving its subentry and entity unique IDs."""
++        entry = self._get_entry()
++        subentry = self._get_reconfigure_subentry()
++        current_data = dict(subentry.data)
++        command_device_id = str(
++            current_data.get(CONF_COMMAND_DEVICE_ID)
++            or current_data.get(CONF_DEVICE_ID, "")
++        )
++        command_enum = str(
++            current_data.get(CONF_COMMAND_ENUM)
++            or current_data.get(CONF_DEVICE_ENUM, "")
++        )
++        status_device_id = str(
++            current_data.get(CONF_STATUS_DEVICE_ID) or command_device_id
++        )
++        status_enum = str(current_data.get(CONF_STATUS_ENUM) or command_enum)
++        errors: dict[str, str] = {}
++
++        if user_input is not None:
++            device_name = str(user_input[CONF_DEVICE_NAME]).strip()
++            command_device_id = str(user_input[CONF_DEVICE_ID]).strip().upper()
++            command_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
++            status_device_id = (
++                str(user_input.get(CONF_STATUS_DEVICE_ID, "")).strip().upper()
++                or command_device_id
++            )
++            status_enum = (
++                str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
++                or command_enum
++            )
++            open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
++            close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
++
++            if not device_name:
++                errors[CONF_DEVICE_NAME] = "required"
++            if not self._is_hex_value(command_device_id, 6):
++                errors[CONF_DEVICE_ID] = "invalid_device_id"
++            if not self._is_hex_value(command_enum, 2):
++                errors[CONF_DEVICE_ENUM] = "invalid_device_enum"
++            if not self._is_hex_value(status_device_id, 6):
++                errors[CONF_STATUS_DEVICE_ID] = "invalid_device_id"
++            if not self._is_hex_value(status_enum, 2):
++                errors[CONF_STATUS_ENUM] = "invalid_device_enum"
++            if open_time <= 0:
++                errors[CONF_OPEN_TIME_SECONDS] = "invalid_travel_time"
++            if close_time <= 0:
++                errors[CONF_CLOSE_TIME_SECONDS] = "invalid_travel_time"
++
++            if any(
++                candidate.subentry_id != subentry.subentry_id
++                and str(
++                    candidate.data.get(CONF_COMMAND_DEVICE_ID)
++                    or candidate.data.get(CONF_DEVICE_ID, "")
++                ).upper()
++                == command_device_id
++                for candidate in entry.subentries.values()
++            ):
++                errors[CONF_DEVICE_ID] = "already_configured"
++
++            if not errors:
++                current_data.update(
++                    {
++                        CONF_DEVICE_ID: command_device_id,
++                        CONF_DEVICE_ENUM: command_enum,
++                        CONF_COMMAND_DEVICE_ID: command_device_id,
++                        CONF_COMMAND_ENUM: command_enum,
++                        CONF_STATUS_DEVICE_ID: status_device_id,
++                        CONF_STATUS_ENUM: status_enum,
++                        CONF_OPEN_TIME: open_time,
++                        CONF_CLOSE_TIME: close_time,
++                        CONF_INVERT_DIRECTION: bool(
++                            user_input.get(CONF_INVERT_DIRECTION, False)
++                        ),
++                    }
++                )
++                return self.async_update_and_abort(
++                    entry,
++                    subentry,
++                    title=device_name,
++                    data=current_data,
++                )
++
++        return self.async_show_form(
++            step_id="edit",
++            data_schema=vol.Schema(
++                {
++                    vol.Required(
++                        CONF_DEVICE_NAME,
++                        default=subentry.title,
++                    ): selector.TextSelector(),
++                    vol.Required(
++                        CONF_DEVICE_ID,
++                        default=command_device_id,
++                    ): selector.TextSelector(),
++                    vol.Required(
++                        CONF_DEVICE_ENUM,
++                        default=command_enum,
++                    ): selector.TextSelector(),
++                    vol.Optional(
++                        CONF_STATUS_DEVICE_ID,
++                        default=status_device_id,
++                    ): selector.TextSelector(),
++                    vol.Optional(
++                        CONF_STATUS_ENUM,
++                        default=status_enum,
++                    ): selector.TextSelector(),
++                    vol.Required(
++                        CONF_OPEN_TIME_SECONDS,
++                        default=current_data.get(CONF_OPEN_TIME, 60.0),
++                    ): selector.NumberSelector(
++                        selector.NumberSelectorConfig(
++                            min=0.1,
++                            step=0.1,
++                            unit_of_measurement="s",
++                            mode=selector.NumberSelectorMode.BOX,
++                        )
++                    ),
++                    vol.Required(
++                        CONF_CLOSE_TIME_SECONDS,
++                        default=current_data.get(CONF_CLOSE_TIME, 60.0),
++                    ): selector.NumberSelector(
++                        selector.NumberSelectorConfig(
++                            min=0.1,
++                            step=0.1,
++                            unit_of_measurement="s",
++                            mode=selector.NumberSelectorMode.BOX,
++                        )
++                    ),
++                    vol.Optional(
++                        CONF_INVERT_DIRECTION,
++                        default=current_data.get(CONF_INVERT_DIRECTION, False),
++                    ): selector.BooleanSelector(),
++                }
++            ),
++            errors=errors,
++        )
++
++    async def async_step_calibrate(
++        self, user_input: dict[str, Any] | None = None
++    ) -> SubentryFlowResult:
++        """Run calibration for the selected blind subentry."""
+         handler = self._get_calibration_handler()
+         handler.disable_subentry_creation()
+ 
+         subentry = self._get_reconfigure_subentry()
+-        device_id = subentry.data.get("device_id")
+-        device_enum = subentry.data.get("device_enum")
+-        if not device_id:
++        command_device_id = subentry.data.get(
++            CONF_COMMAND_DEVICE_ID, subentry.data.get(CONF_DEVICE_ID)
++        )
++        command_enum = subentry.data.get(
++            CONF_COMMAND_ENUM, subentry.data.get(CONF_DEVICE_ENUM)
++        )
++        status_device_id = subentry.data.get(CONF_STATUS_DEVICE_ID, command_device_id)
++        status_enum = subentry.data.get(CONF_STATUS_ENUM, command_enum)
++        if not command_device_id or not status_device_id:
+             return self.async_abort(reason="device_not_found")
+ 
+-        # Build a minimal device record; calibration handler will enrich after timing
+-        device_name = subentry.title or f"Blind {device_id}"
++        stable_id = (
++            subentry.unique_id
++            if isinstance(subentry.unique_id, str) and subentry.unique_id
++            else command_device_id
++        )
++        device_name = subentry.title or f"Blind {stable_id}"
+         handler.set_selected_device(
+             {
+-                "id": device_id,
++                "id": status_device_id,
++                "entity_id": stable_id,
+                 "name": device_name,
+                 CONF_OPEN_TIME: subentry.data.get(CONF_OPEN_TIME),
+                 CONF_CLOSE_TIME: subentry.data.get(CONF_CLOSE_TIME),
+-                "enum": device_enum,
++                CONF_INVERT_DIRECTION: subentry.data.get(CONF_INVERT_DIRECTION, False),
++                "enum": status_enum,
+             }
+         )
+ 
+diff --git a/custom_components/schellenberg_usb/const.py b/custom_components/schellenberg_usb/const.py
+index 39182e7..73d151c 100644
+--- a/custom_components/schellenberg_usb/const.py
++++ b/custom_components/schellenberg_usb/const.py
+@@ -27,6 +27,14 @@ SUBENTRY_TYPE_BLIND = "blind"
+ CONF_SERIAL_PORT = "serial_port"
+ CONF_DEVICE_NAME = "device_name"
+ CONF_DEVICE_ENUM = "device_enum"
++CONF_COMMAND_DEVICE_ID = "command_device_id"
++CONF_COMMAND_ENUM = "command_enum"
++CONF_STATUS_DEVICE_ID = "status_device_id"
++CONF_STATUS_ENUM = "status_enum"
++CONF_INVERT_DIRECTION = "invert_direction"
++CONF_COMMAND = "command"
++CONF_ENUM = "enum"
++CONF_CONFIG_ENTRY_ID = "config_entry_id"
+ CONF_OPEN_TIME_SECONDS = "open_time_seconds"
+ CONF_CLOSE_TIME_SECONDS = "close_time_seconds"
+ 
+@@ -94,6 +102,10 @@ SIGNAL_PAIRING_TIMEOUT = f"{DOMAIN}_pairing_timeout"
+ SIGNAL_STICK_STATUS_UPDATED = f"{DOMAIN}_stick_status_updated"
+ SIGNAL_CALIBRATION_COMPLETED = f"{DOMAIN}_calibration_completed"
+ 
++# Services
++SERVICE_TEST_COMMAND = "test_command"
++TEST_COMMAND_DELAY = 0.75
++
+ # Device verification
+ VERIFY_TIMEOUT = 5  # seconds to wait for verification response
+ # Expected response format: RFTU_V20 F:20180510_DFBD B:1
+diff --git a/custom_components/schellenberg_usb/cover.py b/custom_components/schellenberg_usb/cover.py
+index 23ac1ec..ef702e9 100644
+--- a/custom_components/schellenberg_usb/cover.py
++++ b/custom_components/schellenberg_usb/cover.py
+@@ -25,8 +25,15 @@ from .const import (
+     CMD_STOP,
+     CMD_UP,
+     CONF_CLOSE_TIME,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
++    CONF_DEVICE_ENUM,
++    CONF_DEVICE_ID,
++    CONF_INVERT_DIRECTION,
+     CONF_OPEN_TIME,
+     CONF_SERIAL_PORT,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+     DOMAIN,
+     EVENT_STARTED_MOVING_DOWN,
+     EVENT_STARTED_MOVING_UP,
+@@ -78,25 +85,57 @@ async def async_setup_entry(
+             # Skip LED subentry; handled by switch platform
+             if subentry.subentry_type == SUBENTRY_TYPE_LED:
+                 continue
+-            device_id = subentry.data.get("device_id")
+-            device_enum = subentry.data.get("device_enum")
++            legacy_device_id = subentry.data.get(CONF_DEVICE_ID)
++            legacy_device_enum = subentry.data.get(CONF_DEVICE_ENUM)
++            command_device_id = (
++                subentry.data.get(CONF_COMMAND_DEVICE_ID) or legacy_device_id
++            )
++            command_enum = subentry.data.get(CONF_COMMAND_ENUM) or legacy_device_enum
++            status_device_id = (
++                subentry.data.get(CONF_STATUS_DEVICE_ID)
++                or legacy_device_id
++                or command_device_id
++            )
++            status_enum = (
++                subentry.data.get(CONF_STATUS_ENUM)
++                or legacy_device_enum
++                or command_enum
++            )
++            subentry_unique_id = getattr(subentry, "unique_id", None)
++            stable_device_id = (
++                subentry_unique_id
++                if isinstance(subentry_unique_id, str) and subentry_unique_id
++                else legacy_device_id or command_device_id
++            )
+             device_name = subentry.title
+ 
+-            if not device_id or not device_enum:
++            if not all(
++                (
++                    stable_device_id,
++                    command_device_id,
++                    command_enum,
++                    status_device_id,
++                    status_enum,
++                )
++            ):
+                 # This subentry lacks motor identification info; it's likely a non-motor type
+                 # or pairing is incomplete. Downgrade to debug to avoid user confusion.
+                 _LOGGER.debug(
+-                    "Skipping subentry %s (type=%s) missing device_id/device_enum",
++                    "Skipping subentry %s (type=%s) with incomplete command/status identity",
+                     subentry.subentry_id,
+                     getattr(subentry, "subentry_type", "unknown"),
+                 )
+                 continue
+ 
++            stable_device_id = str(stable_device_id)
++            command_device_id = str(command_device_id)
++            command_enum = str(command_enum)
++            status_device_id = str(status_device_id)
++            status_enum = str(status_enum)
++
+             # Check if entity already exists to avoid duplicates.
+-            # NOTE: The cover entity sets its unique_id to f"schellenberg_{device_id}" in the entity class.
+-            # We must use the same pattern here; previously this used f"{device_id}_cover" which never matched
+-            # and caused a new entity to be created on every reload, losing the restored position (defaulting to 0).
+-            entity_unique_id = f"schellenberg_{device_id}"
++            # Keep the original subentry unique ID stable when editable protocol IDs change.
++            entity_unique_id = f"schellenberg_{stable_device_id}"
+             existing_entity_id = entity_registry.async_get_entity_id(
+                 "cover", DOMAIN, entity_unique_id
+             )
+@@ -124,29 +163,38 @@ async def async_setup_entry(
+             device = device_registry.async_get_or_create(
+                 config_entry_id=entry.entry_id,
+                 config_subentry_id=subentry.subentry_id,
+-                identifiers={(DOMAIN, device_id)},
++                identifiers={(DOMAIN, stable_device_id)},
+                 name=device_name,
+                 manufacturer="Schellenberg",
+-                model=f"USB Stick Motor ({device_id}/{device_enum})",
++                model=(
++                    f"USB Stick Motor (command {command_device_id}/{command_enum}, "
++                    f"status {status_device_id}/{status_enum})"
++                ),
+             )
+             _LOGGER.debug(
+                 "Created/updated device %s for paired device %s",
+                 device.id,
+-                device_id,
++                stable_device_id,
+             )
+ 
+             # Create cover entity linked to this device
+             # Create and add the new cover entity attached to the subentry
+-            _LOGGER.debug("Creating cover entity for device %s", device_id)
++            _LOGGER.debug("Creating cover entity for device %s", stable_device_id)
+             async_add_entities(
+                 [
+                     SchellenbergCover(
+                         api=api,
+-                        device_id=device_id,
+-                        device_enum=device_enum,
++                        device_id=stable_device_id,
++                        device_enum=command_enum,
+                         device_name=device_name,
+                         device_data=subentry.data,
+                         config_entry_id=entry.entry_id,
++                        command_device_id=command_device_id,
++                        status_device_id=status_device_id,
++                        status_enum=status_enum,
++                        invert_direction=bool(
++                            subentry.data.get(CONF_INVERT_DIRECTION, False)
++                        ),
+                     )
+                 ],
+                 config_subentry_id=subentry.subentry_id,
+@@ -178,6 +226,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         device_name: str,
+         device_data: Mapping[str, Any] | None = None,
+         config_entry_id: str | None = None,
++        command_device_id: str | None = None,
++        status_device_id: str | None = None,
++        status_enum: str | None = None,
++        invert_direction: bool = False,
+     ) -> None:
+         """Initialize the Schellenberg cover entity.
+ 
+@@ -188,11 +240,21 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+             device_name: Friendly name for the device
+             device_data: Device data dict containing calibration times
+             config_entry_id: The config entry ID for linking to device
++            command_device_id: Protocol ID associated with outgoing commands
++            status_device_id: Protocol ID expected in incoming status messages
++            status_enum: Enum expected in incoming status messages
++            invert_direction: Swap physical up/down commands for logical open/close
+ 
+         """
+         self._api = api
+         self._device_id = device_id
+-        self._device_enum = device_enum
++        self._command_device_id = command_device_id or device_id
++        self._command_enum = device_enum
++        self._status_device_id = status_device_id or self._command_device_id
++        self._status_enum = status_enum or device_enum
++        self._invert_direction = invert_direction
++        # Backward-compatible alias retained for diagnostics.
++        self._device_enum = self._command_enum
+         self._config_entry_id = config_entry_id
+ 
+         # Entity attributes
+@@ -262,7 +324,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         await super().async_added_to_hass()
+ 
+         # Register this entity with the API so it knows we're listening
+-        self._api.register_entity(self._device_id, self._device_enum)
++        self._api.register_entity(
++            self._status_device_id,
++            self._status_enum,
++            self._attr_name,
++            command_device_id=self._command_device_id,
++            command_enum=self._command_enum,
++        )
+ 
+         # Restore the last known state
+         last_state = await self.async_get_last_state()
+@@ -322,7 +390,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         self.async_on_remove(
+             async_dispatcher_connect(
+                 self.hass,
+-                f"{SIGNAL_DEVICE_EVENT}_{self._device_id}",
++                f"{SIGNAL_DEVICE_EVENT}_{self._status_device_id}_{self._status_enum}",
+                 self._handle_event,
+             )
+         )
+@@ -394,21 +462,19 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+             event,
+         )
+ 
+-        if event == EVENT_STARTED_MOVING_UP:
+-            _LOGGER.info("Device %s started moving UP", self._attr_name)
+-            self._attr_is_opening = True
+-            self._attr_is_closing = False
+-            self._move_start_time = time.monotonic()
+-            self._move_start_position = self._attr_current_cover_position
+-            # Start real-time position tracking
+-            self._start_position_tracking()
+-        elif event == EVENT_STARTED_MOVING_DOWN:
+-            _LOGGER.info("Device %s started moving DOWN", self._attr_name)
+-            self._attr_is_opening = False
+-            self._attr_is_closing = True
++        if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
++            physical_up = event == EVENT_STARTED_MOVING_UP
++            logical_opening = physical_up != self._invert_direction
++            _LOGGER.info(
++                "Device %s physical_direction=%s logical_direction=%s",
++                self._attr_name,
++                "up" if physical_up else "down",
++                "opening" if logical_opening else "closing",
++            )
++            self._attr_is_opening = logical_opening
++            self._attr_is_closing = not logical_opening
+             self._move_start_time = time.monotonic()
+             self._move_start_position = self._attr_current_cover_position
+-            # Start real-time position tracking
+             self._start_position_tracking()
+         elif event == EVENT_STOPPED:
+             _LOGGER.info(
+@@ -498,7 +564,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+                         # If target is 0 or 100, let the device stop naturally at its limits.
+                         # For intermediate, send STOP and wait for STOP event to finalize & clear target.
+                         if self._target_position not in (0, 100):
+-                            await self._api.control_blind(self._device_enum, CMD_STOP)
++                            await self._api.control_blind(
++                                self._command_enum,
++                                CMD_STOP,
++                                device_id=self._command_device_id,
++                            )
+                         # Stop tracking loop
+                         self._position_update_task = None
+                         # Leave opening/closing flags as-is until STOP to aid debugging
+@@ -593,7 +663,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+ 
+     async def async_open_cover(self, **kwargs: Any) -> None:
+         """Open the cover."""
+-        _LOGGER.debug("Opening cover %s (enum=%s)", self._attr_name, self._device_enum)
++        action = CMD_DOWN if self._invert_direction else CMD_UP
++        _LOGGER.debug(
++            "Opening cover %s (command_id=%s enum=%s action=%s)",
++            self._attr_name,
++            self._command_device_id,
++            self._command_enum,
++            action,
++        )
+         self._attr_is_opening = True
+         self._attr_is_closing = False
+         self._move_start_time = time.monotonic()
+@@ -603,11 +680,20 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         self._move_start_position = self._attr_current_cover_position
+         self._start_position_tracking()
+         self.async_write_ha_state()
+-        await self._api.control_blind(self._device_enum, CMD_UP)
++        await self._api.control_blind(
++            self._command_enum, action, device_id=self._command_device_id
++        )
+ 
+     async def async_close_cover(self, **kwargs: Any) -> None:
+         """Close cover."""
+-        _LOGGER.debug("Closing cover %s (enum=%s)", self._attr_name, self._device_enum)
++        action = CMD_UP if self._invert_direction else CMD_DOWN
++        _LOGGER.debug(
++            "Closing cover %s (command_id=%s enum=%s action=%s)",
++            self._attr_name,
++            self._command_device_id,
++            self._command_enum,
++            action,
++        )
+         self._attr_is_opening = False
+         self._attr_is_closing = True
+         self._move_start_time = time.monotonic()
+@@ -616,11 +702,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         self._move_start_position = self._attr_current_cover_position
+         self._start_position_tracking()
+         self.async_write_ha_state()
+-        await self._api.control_blind(self._device_enum, CMD_DOWN)
++        await self._api.control_blind(
++            self._command_enum, action, device_id=self._command_device_id
++        )
+ 
+     async def async_stop_cover(self, **kwargs: Any) -> None:
+         """Stop the cover."""
+-        _LOGGER.debug("Stopping cover %s (enum=%s)", self._attr_name, self._device_enum)
++        _LOGGER.debug(
++            "Stopping cover %s (command_id=%s enum=%s)",
++            self._attr_name,
++            self._command_device_id,
++            self._command_enum,
++        )
+         self._stop_position_tracking()
+         self._update_position()
+         self._attr_is_opening = False
+@@ -629,7 +722,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
+         self._move_start_position = None
+         self._target_position = None
+         self.async_write_ha_state()
+-        await self._api.control_blind(self._device_enum, CMD_STOP)
++        await self._api.control_blind(
++            self._command_enum, CMD_STOP, device_id=self._command_device_id
++        )
+ 
+     async def async_set_cover_position(self, **kwargs: Any) -> None:
+         """Move the cover to a specific position."""
+diff --git a/custom_components/schellenberg_usb/options_flow_calibration.py b/custom_components/schellenberg_usb/options_flow_calibration.py
+index 7894fd6..68f5681 100644
+--- a/custom_components/schellenberg_usb/options_flow_calibration.py
++++ b/custom_components/schellenberg_usb/options_flow_calibration.py
+@@ -23,8 +23,14 @@ from homeassistant.helpers.storage import Store
+ from .const import (
+     CALIBRATION_TIMEOUT,
+     CONF_CLOSE_TIME,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
++    CONF_DEVICE_ENUM,
+     CONF_DEVICE_ID,
++    CONF_INVERT_DIRECTION,
+     CONF_OPEN_TIME,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+     EVENT_STARTED_MOVING_DOWN,
+     EVENT_STARTED_MOVING_UP,
+     EVENT_STOPPED,
+@@ -58,6 +64,9 @@ class CalibrationFlowHandler:
+         self._pending_device_id: str | None = None
+         self._pending_device_enum: str | None = None
+         self._pending_device_name: str | None = None
++        self._pending_status_device_id: str | None = None
++        self._pending_status_enum: str | None = None
++        self._pending_invert_direction = False
+ 
+     async def set_device_by_id(self, device_id: str) -> None:
+         """Set the device to calibrate by its ID.
+@@ -210,9 +219,13 @@ class CalibrationFlowHandler:
+ 
+         # User clicked Next - wait for movement start and measure timing
+         try:
+-            # Wait for user to manually open the blinds
+-            # This will trigger EVENT_STARTED_MOVING_UP from the device
+-            start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_UP)
++            # Wait for the physical direction that corresponds to logical opening.
++            open_event = (
++                EVENT_STARTED_MOVING_DOWN
++                if self._selected_device.get(CONF_INVERT_DIRECTION, False)
++                else EVENT_STARTED_MOVING_UP
++            )
++            start_ok = await self._wait_for_movement_start(open_event)
+             if not start_ok:
+                 errors["base"] = "calibration_start_timeout"
+                 return self.flow.async_show_form(
+@@ -283,9 +296,13 @@ class CalibrationFlowHandler:
+ 
+         # User clicked Next - wait for movement start and measure timing
+         try:
+-            # Wait for user to manually close the blinds
+-            # This will trigger EVENT_STARTED_MOVING_DOWN from the device
+-            start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_DOWN)
++            # Wait for the physical direction that corresponds to logical closing.
++            close_event = (
++                EVENT_STARTED_MOVING_UP
++                if self._selected_device.get(CONF_INVERT_DIRECTION, False)
++                else EVENT_STARTED_MOVING_DOWN
++            )
++            start_ok = await self._wait_for_movement_start(close_event)
+             if not start_ok:
+                 errors["base"] = "calibration_start_timeout"
+                 return self.flow.async_show_form(
+@@ -360,10 +377,15 @@ class CalibrationFlowHandler:
+                 return self.flow.async_create_entry(  # type: ignore[attr-defined]
+                     title=self._pending_device_name,
+                     data={
+-                        "device_id": self._pending_device_id,
+-                        "device_enum": self._pending_device_enum,
++                        CONF_DEVICE_ID: self._pending_device_id,
++                        CONF_DEVICE_ENUM: self._pending_device_enum,
++                        CONF_COMMAND_DEVICE_ID: self._pending_device_id,
++                        CONF_COMMAND_ENUM: self._pending_device_enum,
++                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
++                        CONF_STATUS_ENUM: self._pending_status_enum,
+                         CONF_OPEN_TIME: round(self._open_time, 2),
+                         CONF_CLOSE_TIME: round(self._close_time, 2),
++                        CONF_INVERT_DIRECTION: self._pending_invert_direction,
+                     },
+                     unique_id=self._pending_device_id,
+                 )
+@@ -505,7 +527,7 @@ class CalibrationFlowHandler:
+             async_dispatcher_send(
+                 self.flow.hass,
+                 SIGNAL_CALIBRATION_COMPLETED,
+-                self._selected_device["id"],
++                self._selected_device.get("entity_id", self._selected_device["id"]),
+                 round(open_time, 2),
+                 round(close_time, 2),
+             )
+@@ -516,12 +538,18 @@ class CalibrationFlowHandler:
+         device_id: str,
+         device_enum: str,
+         device_name: str,
++        status_device_id: str | None = None,
++        status_enum: str | None = None,
++        invert_direction: bool = False,
+     ) -> None:
+         """Enable creating a subentry after calibration completes."""
+         self._create_subentry_after_calibration = True
+         self._pending_device_id = device_id
+         self._pending_device_enum = device_enum
+         self._pending_device_name = device_name
++        self._pending_status_device_id = status_device_id or device_id
++        self._pending_status_enum = status_enum or device_enum
++        self._pending_invert_direction = invert_direction
+ 
+     def disable_subentry_creation(self) -> None:
+         """Disable subentry creation (used for reconfigure flows)."""
+@@ -529,3 +557,6 @@ class CalibrationFlowHandler:
+         self._pending_device_id = None
+         self._pending_device_enum = None
+         self._pending_device_name = None
++        self._pending_status_device_id = None
++        self._pending_status_enum = None
++        self._pending_invert_direction = False
+diff --git a/custom_components/schellenberg_usb/services.yaml b/custom_components/schellenberg_usb/services.yaml
+index c9b9b1b..d33d89b 100644
+--- a/custom_components/schellenberg_usb/services.yaml
++++ b/custom_components/schellenberg_usb/services.yaml
+@@ -3,3 +3,37 @@
+ pair:
+   name: Pair device
+   description: Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds.
++
++test_command:
++  name: Test blind command
++  description: Send a raw open, close, or stop command to a device enum without creating a cover.
++  fields:
++    device_id:
++      name: Device ID
++      description: Six-character device ID used for logging and diagnosis.
++      required: true
++      example: "F2B8D5"
++      selector:
++        text:
++    enum:
++      name: Enum
++      description: Two-character enum inserted into the outgoing serial payload.
++      required: true
++      example: "23"
++      selector:
++        text:
++    command:
++      name: Command
++      required: true
++      selector:
++        select:
++          options:
++            - open
++            - close
++            - stop
++    config_entry_id:
++      name: Config entry ID
++      description: Required only when more than one Schellenberg USB hub is loaded.
++      required: false
++      selector:
++        text:
+diff --git a/custom_components/schellenberg_usb/strings.json b/custom_components/schellenberg_usb/strings.json
+index c1e24c2..7e89c2c 100644
+--- a/custom_components/schellenberg_usb/strings.json
++++ b/custom_components/schellenberg_usb/strings.json
+@@ -39,32 +39,48 @@
+       "entry_type": "Blind",
+       "initiate_flow": {
+         "user": "Add blind",
+-        "reconfigure": "Calibrate"
++        "reconfigure": "Configure"
+       },
+       "step": {
+         "user": {
+           "title": "Add a blind",
+           "menu_options": {
+-            "pair_device": "Pair and calibrate",
++            "pair_test": "Pair and test (recommended)",
++            "pair_device": "Pair and calibrate (legacy)",
+             "manual": "Add manually"
+           }
+         },
+         "pair_device": {
+-          "title": "Pair a new device",
+-          "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
++          "title": "Pair and calibrate",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes.",
++          "submit": "Pair"
++        },
++        "pair_test": {
++          "title": "Pair and test",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
+           "submit": "Pair"
+         },
+         "manual": {
+-          "title": "Add a blind manually",
+-          "description": "Enter the device ID and enum shown in the logs, plus the measured full travel times. Calibration can be run later if needed.",
++          "title": "Configure blind identities",
++          "description": "The command identity is used for outgoing control. The optional status identity is matched against received movement messages; leave it blank to use the command identity.",
+           "data": {
+             "device_name": "Name",
+-            "device_id": "Device ID",
+-            "device_enum": "Enum",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
+             "open_time_seconds": "Open time",
+-            "close_time_seconds": "Close time"
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
+           },
+-          "submit": "Add"
++          "submit": "Continue"
++        },
++        "manual_next": {
++          "title": "Manual blind ready",
++          "menu_options": {
++            "test_motor": "Test motor command",
++            "save_manual": "Save without testing"
++          }
+         },
+         "name_device": {
+           "title": "Name your device",
+@@ -73,6 +89,77 @@
+             "device_name": "Device name"
+           }
+         },
++        "test_motor": {
++          "title": "Test motor command",
++          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
++          "submit": "Test"
++        },
++        "did_motor_move": {
++          "title": "Did the motor move?",
++          "description": "Tested command identity {device_id}/{device_enum}.",
++          "data": {
++            "motor_moved": "The motor moved"
++          },
++          "submit": "Continue"
++        },
++        "test_success": {
++          "title": "Command test successful",
++          "menu_options": {
++            "calibration_close": "Continue to calibration",
++            "manual_times": "Save with manual travel times"
++          }
++        },
++        "manual_times": {
++          "title": "Enter travel times",
++          "description": "Enter the measured full opening and closing times.",
++          "data": {
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time"
++          },
++          "submit": "Save"
++        },
++        "reconfigure": {
++          "title": "Configure blind",
++          "menu_options": {
++            "edit": "Edit identities and travel times",
++            "test_existing": "Test motor command",
++            "developer_tools": "Developer tools",
++            "calibrate": "Calibrate"
++          }
++        },
++        "developer_tools": {
++          "title": "Developer tools",
++          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
++          "menu_options": {
++            "test_open": "Test Open",
++            "test_close": "Test Close",
++            "test_stop": "Test Stop",
++            "copy_diagnostics": "Copy diagnostics"
++          }
++        },
++        "copy_diagnostics": {
++          "title": "Copy diagnostics",
++          "description": "Select and copy the diagnostic text below. Press Submit to return.",
++          "data": {
++            "diagnostics": "Diagnostics"
++          },
++          "submit": "Return"
++        },
++        "edit": {
++          "title": "Edit blind settings",
++          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
++          "data": {
++            "device_name": "Name",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
++          },
++          "submit": "Save"
++        },
+         "calibration_close": {
+           "title": "Step 1: Close the blind",
+           "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+@@ -80,17 +167,17 @@
+         },
+         "calibration_open_instruction": {
+           "title": "Step 2: Open the blind",
+-          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving up message from the blinds.",
++          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
+           "submit": "Start"
+         },
+         "calibration_close_instruction": {
+           "title": "Step 3: Close the blind",
+-          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving down message from the blinds.",
++          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
+           "submit": "Start"
+         },
+         "calibration_complete": {
+           "title": "Calibration complete",
+-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
++          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds",
+           "submit": "Done"
+         }
+       },
+@@ -99,17 +186,19 @@
+         "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
+         "invalid_device_enum": "Enum must contain exactly 2 hexadecimal characters.",
+         "invalid_travel_time": "Travel time must be greater than zero.",
+-        "already_configured": "This device is already configured.",
+-        "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
++        "already_configured": "This command device ID is already configured.",
++        "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
++        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+         "pairing_failed": "Pairing failed.",
+-        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+-        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
+-        "unknown": "An unexpected error occurred during calibration. Please try again."
++        "calibration_timeout": "Calibration timed out. Please check the device and try again.",
++        "calibration_start_timeout": "Timeout waiting for the blind to start moving.",
++        "unknown": "An unexpected error occurred."
+       },
+       "abort": {
+         "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+         "pairing_failed": "Pairing failed.",
+-        "reconfigure_successful": "Calibration completed successfully"
++        "command_test_successful": "The motor command test succeeded.",
++        "reconfigure_successful": "Blind configuration updated successfully"
+       }
+     }
+   },
+@@ -151,6 +240,10 @@
+     "pair": {
+       "name": "Pair device",
+       "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
++    },
++    "test_command": {
++      "name": "Test blind command",
++      "description": "Send open, close, or stop to a device enum without creating a cover."
+     }
+   }
+ }
+diff --git a/custom_components/schellenberg_usb/translations/en.json b/custom_components/schellenberg_usb/translations/en.json
+index c1e24c2..7e89c2c 100644
+--- a/custom_components/schellenberg_usb/translations/en.json
++++ b/custom_components/schellenberg_usb/translations/en.json
+@@ -39,32 +39,48 @@
+       "entry_type": "Blind",
+       "initiate_flow": {
+         "user": "Add blind",
+-        "reconfigure": "Calibrate"
++        "reconfigure": "Configure"
+       },
+       "step": {
+         "user": {
+           "title": "Add a blind",
+           "menu_options": {
+-            "pair_device": "Pair and calibrate",
++            "pair_test": "Pair and test (recommended)",
++            "pair_device": "Pair and calibrate (legacy)",
+             "manual": "Add manually"
+           }
+         },
+         "pair_device": {
+-          "title": "Pair a new device",
+-          "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
++          "title": "Pair and calibrate",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes.",
++          "submit": "Pair"
++        },
++        "pair_test": {
++          "title": "Pair and test",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
+           "submit": "Pair"
+         },
+         "manual": {
+-          "title": "Add a blind manually",
+-          "description": "Enter the device ID and enum shown in the logs, plus the measured full travel times. Calibration can be run later if needed.",
++          "title": "Configure blind identities",
++          "description": "The command identity is used for outgoing control. The optional status identity is matched against received movement messages; leave it blank to use the command identity.",
+           "data": {
+             "device_name": "Name",
+-            "device_id": "Device ID",
+-            "device_enum": "Enum",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
+             "open_time_seconds": "Open time",
+-            "close_time_seconds": "Close time"
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
+           },
+-          "submit": "Add"
++          "submit": "Continue"
++        },
++        "manual_next": {
++          "title": "Manual blind ready",
++          "menu_options": {
++            "test_motor": "Test motor command",
++            "save_manual": "Save without testing"
++          }
+         },
+         "name_device": {
+           "title": "Name your device",
+@@ -73,6 +89,77 @@
+             "device_name": "Device name"
+           }
+         },
++        "test_motor": {
++          "title": "Test motor command",
++          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
++          "submit": "Test"
++        },
++        "did_motor_move": {
++          "title": "Did the motor move?",
++          "description": "Tested command identity {device_id}/{device_enum}.",
++          "data": {
++            "motor_moved": "The motor moved"
++          },
++          "submit": "Continue"
++        },
++        "test_success": {
++          "title": "Command test successful",
++          "menu_options": {
++            "calibration_close": "Continue to calibration",
++            "manual_times": "Save with manual travel times"
++          }
++        },
++        "manual_times": {
++          "title": "Enter travel times",
++          "description": "Enter the measured full opening and closing times.",
++          "data": {
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time"
++          },
++          "submit": "Save"
++        },
++        "reconfigure": {
++          "title": "Configure blind",
++          "menu_options": {
++            "edit": "Edit identities and travel times",
++            "test_existing": "Test motor command",
++            "developer_tools": "Developer tools",
++            "calibrate": "Calibrate"
++          }
++        },
++        "developer_tools": {
++          "title": "Developer tools",
++          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
++          "menu_options": {
++            "test_open": "Test Open",
++            "test_close": "Test Close",
++            "test_stop": "Test Stop",
++            "copy_diagnostics": "Copy diagnostics"
++          }
++        },
++        "copy_diagnostics": {
++          "title": "Copy diagnostics",
++          "description": "Select and copy the diagnostic text below. Press Submit to return.",
++          "data": {
++            "diagnostics": "Diagnostics"
++          },
++          "submit": "Return"
++        },
++        "edit": {
++          "title": "Edit blind settings",
++          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
++          "data": {
++            "device_name": "Name",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
++          },
++          "submit": "Save"
++        },
+         "calibration_close": {
+           "title": "Step 1: Close the blind",
+           "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+@@ -80,17 +167,17 @@
+         },
+         "calibration_open_instruction": {
+           "title": "Step 2: Open the blind",
+-          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving up message from the blinds.",
++          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
+           "submit": "Start"
+         },
+         "calibration_close_instruction": {
+           "title": "Step 3: Close the blind",
+-          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. There is no need to rush, the timer does not start until we receive a moving down message from the blinds.",
++          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
+           "submit": "Start"
+         },
+         "calibration_complete": {
+           "title": "Calibration complete",
+-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind position.",
++          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds",
+           "submit": "Done"
+         }
+       },
+@@ -99,17 +186,19 @@
+         "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
+         "invalid_device_enum": "Enum must contain exactly 2 hexadecimal characters.",
+         "invalid_travel_time": "Travel time must be greater than zero.",
+-        "already_configured": "This device is already configured.",
+-        "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
++        "already_configured": "This command device ID is already configured.",
++        "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
++        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+         "pairing_failed": "Pairing failed.",
+-        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+-        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please ensure the device is properly connected and try again.",
+-        "unknown": "An unexpected error occurred during calibration. Please try again."
++        "calibration_timeout": "Calibration timed out. Please check the device and try again.",
++        "calibration_start_timeout": "Timeout waiting for the blind to start moving.",
++        "unknown": "An unexpected error occurred."
+       },
+       "abort": {
+         "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+         "pairing_failed": "Pairing failed.",
+-        "reconfigure_successful": "Calibration completed successfully"
++        "command_test_successful": "The motor command test succeeded.",
++        "reconfigure_successful": "Blind configuration updated successfully"
+       }
+     }
+   },
+@@ -151,6 +240,10 @@
+     "pair": {
+       "name": "Pair device",
+       "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
++    },
++    "test_command": {
++      "name": "Test blind command",
++      "description": "Send open, close, or stop to a device enum without creating a cover."
+     }
+   }
+ }
+diff --git a/tests/test_api_messages.py b/tests/test_api_messages.py
+index 082492e..064d067 100644
+--- a/tests/test_api_messages.py
++++ b/tests/test_api_messages.py
+@@ -147,11 +147,49 @@ async def test_handle_message_device_event_registered_device(
+         # Format: ssXXYYYYYYZZZZCCPPRR where XX=enum, YYYYYY=device_id, CC=command
+         api._handle_message("ss10ABC123ZZZZ01PP00")
+ 
+-        # Should dispatch event to device
+-        mock_send.assert_called_once()
+-        call_args = mock_send.call_args[0]
+-        assert "schellenberg_usb_device_event_ABC123" in call_args[1]
+-        assert call_args[2] == "01"  # command
++        # Calibration receives the ID-only signal and the cover receives an exact signal.
++        assert mock_send.call_count == 2
++        assert mock_send.call_args_list[0].args == (
++            hass,
++            "schellenberg_usb_device_event_ABC123",
++            "01",
++        )
++        assert mock_send.call_args_list[1].args == (
++            hass,
++            "schellenberg_usb_device_event_ABC123_10",
++            "01",
++        )
++
++
++@pytest.mark.asyncio
++async def test_handle_message_requires_exact_status_pair(
++    hass: HomeAssistant,
++) -> None:
++    """Test a matching ID with another enum does not reach the cover."""
++    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
++    api.register_entity(
++        "3720B8",
++        "08",
++        "Sitting room",
++        command_device_id="F2B8D5",
++        command_enum="23",
++    )
++
++    with patch(
++        "custom_components.schellenberg_usb.api.async_dispatcher_send"
++    ) as mock_send:
++        api._handle_message("ss133720B8ZZZZ01PP00")
++
++    mock_send.assert_called_once_with(
++        hass,
++        "schellenberg_usb_device_event_3720B8",
++        "01",
++    )
++    last_received = api.get_last_received("3720B8", "13")
++    assert last_received is not None
++    assert last_received["device_id"] == "3720B8"
++    assert last_received["enum"] == "13"
++    assert last_received["command"] == "01"
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/test_config_flow.py b/tests/test_config_flow.py
+index abc86f9..3e39f78 100644
+--- a/tests/test_config_flow.py
++++ b/tests/test_config_flow.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+ 
+ from types import MappingProxyType
+-from unittest.mock import AsyncMock, MagicMock, patch
++from unittest.mock import AsyncMock, MagicMock, call, patch
+ 
+ import pytest
+ from homeassistant.config_entries import ConfigSubentryFlow, SOURCE_USER
+@@ -13,13 +13,21 @@ from custom_components.schellenberg_usb.config_flow import (
+     SchellenbergPairingSubentryFlow,
+ )
+ from custom_components.schellenberg_usb.const import (
++    CMD_DOWN,
++    CMD_STOP,
++    CMD_UP,
+     CONF_CLOSE_TIME,
+     CONF_CLOSE_TIME_SECONDS,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
+     CONF_DEVICE_ENUM,
+     CONF_DEVICE_ID,
+     CONF_DEVICE_NAME,
++    CONF_INVERT_DIRECTION,
+     CONF_OPEN_TIME,
+     CONF_OPEN_TIME_SECONDS,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+ )
+ from custom_components.schellenberg_usb.options_flow_calibration import (
+     CalibrationFlowHandler,
+@@ -35,67 +43,94 @@ def _create_flow() -> SchellenbergPairingSubentryFlow:
+ 
+ @pytest.mark.asyncio
+ async def test_blind_subentry_flow_shows_setup_method_menu() -> None:
+-    """Test that users can choose pairing or manual setup."""
+-    flow = _create_flow()
+-
+-    result = await flow.async_step_user()
++    """Test that legacy, hybrid, and manual setup remain available."""
++    result = await _create_flow().async_step_user()
+ 
+     assert result["type"] is FlowResultType.MENU
+-    assert result["step_id"] == "user"
+-    assert result["menu_options"] == ["pair_device", "manual"]
++    assert result["menu_options"] == ["pair_test", "pair_device", "manual"]
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_pairing_path_is_unchanged() -> None:
+-    """Test that selecting pairing still starts the existing pairing flow."""
++async def test_legacy_pairing_path_is_unchanged() -> None:
++    """Test selecting legacy pairing still reaches naming and calibration."""
+     flow = _create_flow()
+     api = MagicMock()
+     api.pair_device_and_wait = AsyncMock(return_value=("3720B8", "08"))
+     hub_entry = MagicMock(runtime_data=api)
+ 
+     form = await flow.async_step_pair_device()
+-    assert form["type"] is FlowResultType.FORM
+     assert form["step_id"] == "pair_device"
+ 
+     with patch.object(flow, "_get_entry", return_value=hub_entry):
+         result = await flow.async_step_pair_device({})
+ 
+-    assert result["type"] is FlowResultType.FORM
+     assert result["step_id"] == "name_device"
+-    assert result["description_placeholders"] == {"device_id": "3720B8"}
++    assert flow._pairing_workflow == "legacy"
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_manual_setup_creates_normalized_blind_subentry() -> None:
+-    """Test creating a calibrated blind without running calibration."""
++async def test_hybrid_pairing_reaches_command_test() -> None:
++    """Test hybrid pairing names the device before command testing."""
++    flow = _create_flow()
++    api = MagicMock()
++    api.pair_device_and_wait = AsyncMock(return_value=("F2B8D5", "23"))
++    hub_entry = MagicMock(runtime_data=api)
++
++    with patch.object(flow, "_get_entry", return_value=hub_entry):
++        await flow.async_step_pair_test({})
++        result = await flow.async_step_name_device({CONF_DEVICE_NAME: "Sitting room"})
++
++    assert result["type"] is FlowResultType.FORM
++    assert result["step_id"] == "test_motor"
++    assert result["description_placeholders"] == {
++        "device_id": "F2B8D5",
++        "device_enum": "23",
++    }
++
++
++@pytest.mark.asyncio
++async def test_manual_setup_stores_separate_command_and_status_identity() -> None:
++    """Test manual setup stores split identities while retaining legacy keys."""
+     flow = _create_flow()
+     hub_entry = MagicMock(subentries=MappingProxyType({}))
+ 
+     with patch.object(flow, "_get_entry", return_value=hub_entry):
+         result = await flow.async_step_manual(
+             {
+-                CONF_DEVICE_NAME: "Living room",
+-                CONF_DEVICE_ID: "3720b8",
+-                CONF_DEVICE_ENUM: "08",
+-                CONF_OPEN_TIME_SECONDS: 24.5,
+-                CONF_CLOSE_TIME_SECONDS: 22,
++                CONF_DEVICE_NAME: "Sitting room",
++                CONF_DEVICE_ID: "f2b8d5",
++                CONF_DEVICE_ENUM: "23",
++                CONF_STATUS_DEVICE_ID: "3720b8",
++                CONF_STATUS_ENUM: "08",
++                CONF_OPEN_TIME_SECONDS: 25.06,
++                CONF_CLOSE_TIME_SECONDS: 23.05,
++                CONF_INVERT_DIRECTION: False,
+             }
+         )
+ 
++    assert result["type"] is FlowResultType.MENU
++    assert result["step_id"] == "manual_next"
++
++    result = await flow.async_step_save_manual()
+     assert result["type"] is FlowResultType.CREATE_ENTRY
+-    assert result["title"] == "Living room"
++    assert result["title"] == "Sitting room"
+     assert result["data"] == {
+-        CONF_DEVICE_ID: "3720B8",
+-        CONF_DEVICE_ENUM: "08",
+-        CONF_OPEN_TIME: 24.5,
+-        CONF_CLOSE_TIME: 22.0,
++        CONF_DEVICE_ID: "F2B8D5",
++        CONF_DEVICE_ENUM: "23",
++        CONF_COMMAND_DEVICE_ID: "F2B8D5",
++        CONF_COMMAND_ENUM: "23",
++        CONF_STATUS_DEVICE_ID: "3720B8",
++        CONF_STATUS_ENUM: "08",
++        CONF_OPEN_TIME: 25.06,
++        CONF_CLOSE_TIME: 23.05,
++        CONF_INVERT_DIRECTION: False,
+     }
+-    assert result["unique_id"] == "3720B8"
++    assert result["unique_id"] == "F2B8D5"
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_manual_setup_validates_protocol_values() -> None:
+-    """Test validation of IDs and positive travel times."""
++    """Test validation of command/status identities and travel times."""
+     flow = _create_flow()
+     hub_entry = MagicMock(subentries=MappingProxyType({}))
+ 
+@@ -105,6 +140,8 @@ async def test_manual_setup_validates_protocol_values() -> None:
+                 CONF_DEVICE_NAME: " ",
+                 CONF_DEVICE_ID: "not-hex",
+                 CONF_DEVICE_ENUM: "123",
++                CONF_STATUS_DEVICE_ID: "also-bad",
++                CONF_STATUS_ENUM: "x",
+                 CONF_OPEN_TIME_SECONDS: 0,
+                 CONF_CLOSE_TIME_SECONDS: -1,
+             }
+@@ -115,71 +152,186 @@ async def test_manual_setup_validates_protocol_values() -> None:
+         CONF_DEVICE_NAME: "required",
+         CONF_DEVICE_ID: "invalid_device_id",
+         CONF_DEVICE_ENUM: "invalid_device_enum",
++        CONF_STATUS_DEVICE_ID: "invalid_device_id",
++        CONF_STATUS_ENUM: "invalid_device_enum",
+         CONF_OPEN_TIME_SECONDS: "invalid_travel_time",
+         CONF_CLOSE_TIME_SECONDS: "invalid_travel_time",
+     }
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_manual_setup_rejects_existing_device_id() -> None:
+-    """Test that manual setup cannot duplicate a blind subentry."""
++async def test_short_motor_command_sends_open_then_stop() -> None:
++    """Test the hybrid command sequence and its diagnostic context."""
+     flow = _create_flow()
+-    existing_subentry = MagicMock(data={CONF_DEVICE_ID: "3720B8"})
+-    hub_entry = MagicMock(subentries=MappingProxyType({"existing": existing_subentry}))
++    flow._pending_device_id = "F2B8D5"
++    flow._pending_device_enum = "23"
++    api = MagicMock()
++    api.control_blind = AsyncMock(return_value=True)
++    hub_entry = MagicMock(runtime_data=api)
+ 
+-    with patch.object(flow, "_get_entry", return_value=hub_entry):
+-        result = await flow.async_step_manual(
++    with (
++        patch.object(flow, "_get_entry", return_value=hub_entry),
++        patch("custom_components.schellenberg_usb.config_flow.asyncio.sleep") as sleep,
++    ):
++        result = await flow.async_step_test_motor({})
++
++    assert result["step_id"] == "did_motor_move"
++    api.control_blind.assert_has_awaits(
++        [
++            call("23", CMD_UP, device_id="F2B8D5"),
++            call("23", CMD_STOP, device_id="F2B8D5"),
++        ]
++    )
++    sleep.assert_awaited_once_with(0.75)
++
++
++@pytest.mark.asyncio
++async def test_edit_updates_protocol_data_without_unique_id_change() -> None:
++    """Test editing updates subentry data without replacing the subentry."""
++    flow = _create_flow()
++    subentry = MagicMock(
++        subentry_id="sub1",
++        title="Sitting room",
++        unique_id="F2B8D5",
++        data={
++            CONF_DEVICE_ID: "F2B8D5",
++            CONF_DEVICE_ENUM: "23",
++            CONF_OPEN_TIME: 25.06,
++            CONF_CLOSE_TIME: 23.05,
++        },
++    )
++    entry = MagicMock(subentries=MappingProxyType({"sub1": subentry}))
++    expected_result = {"type": FlowResultType.ABORT}
++
++    with (
++        patch.object(flow, "_get_entry", return_value=entry),
++        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
++        patch.object(
++            flow, "async_update_and_abort", return_value=expected_result
++        ) as update,
++    ):
++        result = await flow.async_step_edit(
+             {
+-                CONF_DEVICE_NAME: "Duplicate",
+-                CONF_DEVICE_ID: "3720b8",
+-                CONF_DEVICE_ENUM: "08",
+-                CONF_OPEN_TIME_SECONDS: 24,
+-                CONF_CLOSE_TIME_SECONDS: 22,
++                CONF_DEVICE_NAME: "Door",
++                CONF_DEVICE_ID: "f2b8d5",
++                CONF_DEVICE_ENUM: "13",
++                CONF_STATUS_DEVICE_ID: "3720b8",
++                CONF_STATUS_ENUM: "08",
++                CONF_OPEN_TIME_SECONDS: 25.06,
++                CONF_CLOSE_TIME_SECONDS: 23.05,
++                CONF_INVERT_DIRECTION: True,
+             }
+         )
+ 
+-    assert result["type"] is FlowResultType.FORM
+-    assert result["errors"] == {CONF_DEVICE_ID: "already_configured"}
++    assert result is expected_result
++    _, kwargs = update.call_args
++    assert kwargs["title"] == "Door"
++    assert kwargs["data"][CONF_COMMAND_DEVICE_ID] == "F2B8D5"
++    assert kwargs["data"][CONF_COMMAND_ENUM] == "13"
++    assert kwargs["data"][CONF_STATUS_DEVICE_ID] == "3720B8"
++    assert kwargs["data"][CONF_STATUS_ENUM] == "08"
++    assert kwargs["data"][CONF_INVERT_DIRECTION] is True
++    assert "unique_id" not in kwargs
++
++
++@pytest.mark.asyncio
++async def test_developer_tools_show_last_frame_and_send_selected_target() -> None:
++    """Test the native diagnostic view and its direct command actions."""
++    flow = _create_flow()
++    subentry = MagicMock(
++        title="Sitting room door",
++        data={
++            CONF_COMMAND_DEVICE_ID: "F2B8D5",
++            CONF_COMMAND_ENUM: "23",
++            CONF_STATUS_DEVICE_ID: "3720B8",
++            CONF_STATUS_ENUM: "08",
++            CONF_OPEN_TIME: 25.06,
++            CONF_CLOSE_TIME: 23.05,
++            CONF_INVERT_DIRECTION: True,
++        },
++    )
++    api = MagicMock()
++    api.get_last_received.return_value = {
++        "device_id": "3720B8",
++        "enum": "08",
++        "command": "01",
++        "time": "17:32:14",
++    }
++    api.control_blind = AsyncMock(return_value=True)
++    entry = MagicMock(runtime_data=api)
++
++    with (
++        patch.object(flow, "_get_entry", return_value=entry),
++        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
++    ):
++        result = await flow.async_step_developer_tools()
++        command_result = await flow.async_step_test_open()
++        copy_result = await flow.async_step_copy_diagnostics()
++
++    placeholders = result["description_placeholders"]
++    assert placeholders is not None
++    assert placeholders["selected_blind"] == "Sitting room door"
++    assert placeholders["last_device_id"] == "3720B8"
++    assert placeholders["command_device_id"] == "F2B8D5"
++    assert placeholders["command_enum"] == "23"
++    api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
++    command_placeholders = command_result["description_placeholders"]
++    assert command_placeholders is not None
++    assert "queued successfully" in command_placeholders["result"]
++    schema = copy_result["data_schema"]
++    assert schema is not None
++    diagnostics = schema({})["diagnostics"]
++    assert "Selected blind: Sitting room door" in diagnostics
++    assert "Device ID: 3720B8" in diagnostics
++    assert "Device ID: F2B8D5" in diagnostics
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_pairing_persists_calibrated_travel_times() -> None:
+-    """Test that paired subentries retain measured times across restarts."""
++async def test_pairing_persists_calibrated_protocol_data() -> None:
++    """Test paired subentries retain identities and measured times."""
+     flow = MagicMock(spec=ConfigSubentryFlow)
+     handler = CalibrationFlowHandler(flow)
+     handler.set_selected_device(
+         {
+             "id": "3720B8",
+-            "name": "Living room",
++            "entity_id": "F2B8D5",
++            "name": "Sitting room",
+             "enum": "08",
+         }
+     )
+     handler.enable_subentry_creation(
+-        device_id="3720B8",
+-        device_enum="08",
+-        device_name="Living room",
++        device_id="F2B8D5",
++        device_enum="23",
++        device_name="Sitting room",
++        status_device_id="3720B8",
++        status_enum="08",
+     )
+-    handler._open_time = 24.567
+-    handler._close_time = 22.345
++    handler._open_time = 25.064
++    handler._close_time = 23.054
+ 
+     with patch.object(handler, "_save_calibration_data", new=AsyncMock()):
+         await handler.async_step_calibration_complete({})
+ 
+     flow.async_create_entry.assert_called_once_with(
+-        title="Living room",
++        title="Sitting room",
+         data={
+-            CONF_DEVICE_ID: "3720B8",
+-            CONF_DEVICE_ENUM: "08",
+-            CONF_OPEN_TIME: 24.57,
+-            CONF_CLOSE_TIME: 22.34,
++            CONF_DEVICE_ID: "F2B8D5",
++            CONF_DEVICE_ENUM: "23",
++            CONF_COMMAND_DEVICE_ID: "F2B8D5",
++            CONF_COMMAND_ENUM: "23",
++            CONF_STATUS_DEVICE_ID: "3720B8",
++            CONF_STATUS_ENUM: "08",
++            CONF_OPEN_TIME: 25.06,
++            CONF_CLOSE_TIME: 23.05,
++            CONF_INVERT_DIRECTION: False,
+         },
+-        unique_id="3720B8",
++        unique_id="F2B8D5",
+     )
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_reconfigure_persists_calibrated_travel_times() -> None:
+-    """Test that recalibration updates the existing blind subentry."""
++    """Test recalibration updates the existing blind subentry."""
+     flow = MagicMock(spec=ConfigSubentryFlow)
+     entry = MagicMock()
+     subentry = MagicMock()
+@@ -189,11 +341,7 @@ async def test_reconfigure_persists_calibrated_travel_times() -> None:
+     flow.async_update_and_abort.return_value = expected_result
+     handler = CalibrationFlowHandler(flow)
+     handler.set_selected_device(
+-        {
+-            "id": "3720B8",
+-            "name": "Living room",
+-            "enum": "08",
+-        }
++        {"id": "3720B8", "entity_id": "F2B8D5", "name": "Door", "enum": "08"}
+     )
+     handler._open_time = 25.678
+     handler._close_time = 23.456
+diff --git a/tests/test_cover.py b/tests/test_cover.py
+index 5bfd954..99d3f96 100644
+--- a/tests/test_cover.py
++++ b/tests/test_cover.py
+@@ -235,7 +235,42 @@ async def test_cover_async_open_cover(
+ 
+     assert cover._attr_is_opening is True
+     assert cover._attr_is_closing is False
+-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "01")
++    _async_mock(mock_api.control_blind).assert_called_once_with(
++        "01", "01", device_id="ABC123"
++    )
++
++
++@pytest.mark.asyncio
++async def test_cover_uses_split_identity_and_inverted_direction(
++    hass: HomeAssistant,
++    mock_api: SchellenbergUsbApi,
++) -> None:
++    """Test commands use command identity while status direction is inverted."""
++    cover = SchellenbergCover(
++        api=mock_api,
++        device_id="STABLE1",
++        device_enum="23",
++        device_name="Sitting room",
++        command_device_id="F2B8D5",
++        status_device_id="3720B8",
++        status_enum="08",
++        invert_direction=True,
++    )
++    cover.hass = hass
++    cover._attr_current_cover_position = 0
++
++    with (
++        patch.object(cover, "_start_position_tracking"),
++        patch.object(cover, "async_write_ha_state"),
++    ):
++        await cover.async_open_cover()
++        cover._handle_event(EVENT_STARTED_MOVING_DOWN)
++
++    _async_mock(mock_api.control_blind).assert_awaited_once_with(
++        "23", "02", device_id="F2B8D5"
++    )
++    assert cover._attr_is_opening is True
++    assert cover._attr_is_closing is False
+ 
+ 
+ @pytest.mark.asyncio
+@@ -259,7 +294,9 @@ async def test_cover_async_close_cover(
+ 
+     assert cover._attr_is_opening is False
+     assert cover._attr_is_closing is True
+-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "02")
++    _async_mock(mock_api.control_blind).assert_called_once_with(
++        "01", "02", device_id="ABC123"
++    )
+ 
+ 
+ @pytest.mark.asyncio
+@@ -284,7 +321,9 @@ async def test_cover_async_stop_cover(
+ 
+     assert cover._attr_is_opening is False
+     assert cover._attr_is_closing is False
+-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "00")
++    _async_mock(mock_api.control_blind).assert_called_once_with(
++        "01", "00", device_id="ABC123"
++    )
+ 
+ 
+ @pytest.mark.asyncio
+@@ -625,7 +664,13 @@ async def test_cover_registers_with_api(
+             with patch.object(cover, "async_write_ha_state"):
+                 await cover.async_added_to_hass()
+ 
+-    _magic_mock(mock_api.register_entity).assert_called_once_with("ABC123", "01")
++    _magic_mock(mock_api.register_entity).assert_called_once_with(
++        "ABC123",
++        "01",
++        "Test Cover",
++        command_device_id="ABC123",
++        command_enum="01",
++    )
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/test_init.py b/tests/test_init.py
+index 9f7b44f..a28d5a9 100644
+--- a/tests/test_init.py
++++ b/tests/test_init.py
+@@ -12,9 +12,14 @@ from homeassistant.helpers import device_registry as dr
+ 
+ from custom_components.schellenberg_usb.api import SchellenbergUsbApi
+ from custom_components.schellenberg_usb.const import (
++    CMD_UP,
++    CONF_COMMAND,
++    CONF_DEVICE_ID,
++    CONF_ENUM,
+     CONF_SERIAL_PORT,
+     DOMAIN,
+     PLATFORMS,
++    SERVICE_TEST_COMMAND,
+ )
+ 
+ 
+@@ -62,6 +67,34 @@ async def test_async_setup_entry_basic(
+         assert isinstance(mock_config_entry.runtime_data, SchellenbergUsbApi)
+ 
+ 
++@pytest.mark.asyncio
++async def test_async_setup_registers_test_command_service(
++    hass: HomeAssistant, mock_config_entry: ConfigEntry
++) -> None:
++    """Test the diagnostic service validates and forwards a command."""
++    from custom_components.schellenberg_usb import async_setup
++
++    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
++    api.control_blind = AsyncMock(return_value=True)  # type: ignore[method-assign]
++    mock_config_entry.runtime_data = api
++
++    assert await async_setup(hass, {})
++    await hass.services.async_call(
++        DOMAIN,
++        SERVICE_TEST_COMMAND,
++        {
++            CONF_DEVICE_ID: "f2b8d5",
++            CONF_ENUM: "23",
++            CONF_COMMAND: "open",
++        },
++        blocking=True,
++    )
++
++    api.control_blind.assert_awaited_once_with(  # type: ignore[attr-defined]
++        "23", CMD_UP, device_id="F2B8D5"
++    )
++
++
+ @pytest.mark.asyncio
+ async def test_async_setup_entry_creates_hub_device(
+     hass: HomeAssistant, mock_config_entry: ConfigEntry

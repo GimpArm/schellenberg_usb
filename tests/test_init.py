@@ -12,9 +12,14 @@ from homeassistant.helpers import device_registry as dr
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
+    CMD_UP,
+    CONF_COMMAND,
+    CONF_DEVICE_ID,
+    CONF_ENUM,
     CONF_SERIAL_PORT,
     DOMAIN,
     PLATFORMS,
+    SERVICE_TEST_COMMAND,
 )
 
 
@@ -60,6 +65,34 @@ async def test_async_setup_entry_basic(
         # Check that runtime_data was set
         assert mock_config_entry.runtime_data is not None
         assert isinstance(mock_config_entry.runtime_data, SchellenbergUsbApi)
+
+
+@pytest.mark.asyncio
+async def test_async_setup_registers_test_command_service(
+    hass: HomeAssistant, mock_config_entry: ConfigEntry
+) -> None:
+    """Test the diagnostic service validates and forwards a command."""
+    from custom_components.schellenberg_usb import async_setup
+
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.control_blind = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    mock_config_entry.runtime_data = api
+
+    assert await async_setup(hass, {})
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TEST_COMMAND,
+        {
+            CONF_DEVICE_ID: "f2b8d5",
+            CONF_ENUM: "23",
+            CONF_COMMAND: "open",
+        },
+        blocking=True,
+    )
+
+    api.control_blind.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "23", CMD_UP, device_id="F2B8D5"
+    )
 
 
 @pytest.mark.asyncio

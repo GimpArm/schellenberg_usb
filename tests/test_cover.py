@@ -235,7 +235,42 @@ async def test_cover_async_open_cover(
 
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "01")
+    _async_mock(mock_api.control_blind).assert_called_once_with(
+        "01", "01", device_id="ABC123"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cover_uses_split_identity_and_inverted_direction(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test commands use command identity while status direction is inverted."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="STABLE1",
+        device_enum="23",
+        device_name="Sitting room",
+        command_device_id="F2B8D5",
+        status_device_id="3720B8",
+        status_enum="08",
+        invert_direction=True,
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = 0
+
+    with (
+        patch.object(cover, "_start_position_tracking"),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_open_cover()
+        cover._handle_event(EVENT_STARTED_MOVING_DOWN)
+
+    _async_mock(mock_api.control_blind).assert_awaited_once_with(
+        "23", "02", device_id="F2B8D5"
+    )
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
 
 
 @pytest.mark.asyncio
@@ -259,7 +294,9 @@ async def test_cover_async_close_cover(
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is True
-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "02")
+    _async_mock(mock_api.control_blind).assert_called_once_with(
+        "01", "02", device_id="ABC123"
+    )
 
 
 @pytest.mark.asyncio
@@ -284,7 +321,9 @@ async def test_cover_async_stop_cover(
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
-    _async_mock(mock_api.control_blind).assert_called_once_with("01", "00")
+    _async_mock(mock_api.control_blind).assert_called_once_with(
+        "01", "00", device_id="ABC123"
+    )
 
 
 @pytest.mark.asyncio
@@ -625,7 +664,13 @@ async def test_cover_registers_with_api(
             with patch.object(cover, "async_write_ha_state"):
                 await cover.async_added_to_hass()
 
-    _magic_mock(mock_api.register_entity).assert_called_once_with("ABC123", "01")
+    _magic_mock(mock_api.register_entity).assert_called_once_with(
+        "ABC123",
+        "01",
+        "Test Cover",
+        command_device_id="ABC123",
+        command_enum="01",
+    )
 
 
 @pytest.mark.asyncio

@@ -25,8 +25,15 @@ from .const import (
     CMD_STOP,
     CMD_UP,
     CONF_CLOSE_TIME,
+    CONF_COMMAND_DEVICE_ID,
+    CONF_COMMAND_ENUM,
+    CONF_DEVICE_ENUM,
+    CONF_DEVICE_ID,
+    CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
+    CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_ENUM,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
@@ -78,25 +85,57 @@ async def async_setup_entry(
             # Skip LED subentry; handled by switch platform
             if subentry.subentry_type == SUBENTRY_TYPE_LED:
                 continue
-            device_id = subentry.data.get("device_id")
-            device_enum = subentry.data.get("device_enum")
+            legacy_device_id = subentry.data.get(CONF_DEVICE_ID)
+            legacy_device_enum = subentry.data.get(CONF_DEVICE_ENUM)
+            command_device_id = (
+                subentry.data.get(CONF_COMMAND_DEVICE_ID) or legacy_device_id
+            )
+            command_enum = subentry.data.get(CONF_COMMAND_ENUM) or legacy_device_enum
+            status_device_id = (
+                subentry.data.get(CONF_STATUS_DEVICE_ID)
+                or legacy_device_id
+                or command_device_id
+            )
+            status_enum = (
+                subentry.data.get(CONF_STATUS_ENUM)
+                or legacy_device_enum
+                or command_enum
+            )
+            subentry_unique_id = getattr(subentry, "unique_id", None)
+            stable_device_id = (
+                subentry_unique_id
+                if isinstance(subentry_unique_id, str) and subentry_unique_id
+                else legacy_device_id or command_device_id
+            )
             device_name = subentry.title
 
-            if not device_id or not device_enum:
+            if not all(
+                (
+                    stable_device_id,
+                    command_device_id,
+                    command_enum,
+                    status_device_id,
+                    status_enum,
+                )
+            ):
                 # This subentry lacks motor identification info; it's likely a non-motor type
                 # or pairing is incomplete. Downgrade to debug to avoid user confusion.
                 _LOGGER.debug(
-                    "Skipping subentry %s (type=%s) missing device_id/device_enum",
+                    "Skipping subentry %s (type=%s) with incomplete command/status identity",
                     subentry.subentry_id,
                     getattr(subentry, "subentry_type", "unknown"),
                 )
                 continue
 
+            stable_device_id = str(stable_device_id)
+            command_device_id = str(command_device_id)
+            command_enum = str(command_enum)
+            status_device_id = str(status_device_id)
+            status_enum = str(status_enum)
+
             # Check if entity already exists to avoid duplicates.
-            # NOTE: The cover entity sets its unique_id to f"schellenberg_{device_id}" in the entity class.
-            # We must use the same pattern here; previously this used f"{device_id}_cover" which never matched
-            # and caused a new entity to be created on every reload, losing the restored position (defaulting to 0).
-            entity_unique_id = f"schellenberg_{device_id}"
+            # Keep the original subentry unique ID stable when editable protocol IDs change.
+            entity_unique_id = f"schellenberg_{stable_device_id}"
             existing_entity_id = entity_registry.async_get_entity_id(
                 "cover", DOMAIN, entity_unique_id
             )
@@ -124,29 +163,38 @@ async def async_setup_entry(
             device = device_registry.async_get_or_create(
                 config_entry_id=entry.entry_id,
                 config_subentry_id=subentry.subentry_id,
-                identifiers={(DOMAIN, device_id)},
+                identifiers={(DOMAIN, stable_device_id)},
                 name=device_name,
                 manufacturer="Schellenberg",
-                model=f"USB Stick Motor ({device_id}/{device_enum})",
+                model=(
+                    f"USB Stick Motor (command {command_device_id}/{command_enum}, "
+                    f"status {status_device_id}/{status_enum})"
+                ),
             )
             _LOGGER.debug(
                 "Created/updated device %s for paired device %s",
                 device.id,
-                device_id,
+                stable_device_id,
             )
 
             # Create cover entity linked to this device
             # Create and add the new cover entity attached to the subentry
-            _LOGGER.debug("Creating cover entity for device %s", device_id)
+            _LOGGER.debug("Creating cover entity for device %s", stable_device_id)
             async_add_entities(
                 [
                     SchellenbergCover(
                         api=api,
-                        device_id=device_id,
-                        device_enum=device_enum,
+                        device_id=stable_device_id,
+                        device_enum=command_enum,
                         device_name=device_name,
                         device_data=subentry.data,
                         config_entry_id=entry.entry_id,
+                        command_device_id=command_device_id,
+                        status_device_id=status_device_id,
+                        status_enum=status_enum,
+                        invert_direction=bool(
+                            subentry.data.get(CONF_INVERT_DIRECTION, False)
+                        ),
                     )
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -178,6 +226,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         device_name: str,
         device_data: Mapping[str, Any] | None = None,
         config_entry_id: str | None = None,
+        command_device_id: str | None = None,
+        status_device_id: str | None = None,
+        status_enum: str | None = None,
+        invert_direction: bool = False,
     ) -> None:
         """Initialize the Schellenberg cover entity.
 
@@ -188,11 +240,21 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             device_name: Friendly name for the device
             device_data: Device data dict containing calibration times
             config_entry_id: The config entry ID for linking to device
+            command_device_id: Protocol ID associated with outgoing commands
+            status_device_id: Protocol ID expected in incoming status messages
+            status_enum: Enum expected in incoming status messages
+            invert_direction: Swap physical up/down commands for logical open/close
 
         """
         self._api = api
         self._device_id = device_id
-        self._device_enum = device_enum
+        self._command_device_id = command_device_id or device_id
+        self._command_enum = device_enum
+        self._status_device_id = status_device_id or self._command_device_id
+        self._status_enum = status_enum or device_enum
+        self._invert_direction = invert_direction
+        # Backward-compatible alias retained for diagnostics.
+        self._device_enum = self._command_enum
         self._config_entry_id = config_entry_id
 
         # Entity attributes
@@ -262,7 +324,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         await super().async_added_to_hass()
 
         # Register this entity with the API so it knows we're listening
-        self._api.register_entity(self._device_id, self._device_enum)
+        self._api.register_entity(
+            self._status_device_id,
+            self._status_enum,
+            self._attr_name,
+            command_device_id=self._command_device_id,
+            command_enum=self._command_enum,
+        )
 
         # Restore the last known state
         last_state = await self.async_get_last_state()
@@ -322,7 +390,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{SIGNAL_DEVICE_EVENT}_{self._device_id}",
+                f"{SIGNAL_DEVICE_EVENT}_{self._status_device_id}_{self._status_enum}",
                 self._handle_event,
             )
         )
@@ -394,21 +462,19 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             event,
         )
 
-        if event == EVENT_STARTED_MOVING_UP:
-            _LOGGER.info("Device %s started moving UP", self._attr_name)
-            self._attr_is_opening = True
-            self._attr_is_closing = False
+        if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
+            physical_up = event == EVENT_STARTED_MOVING_UP
+            logical_opening = physical_up != self._invert_direction
+            _LOGGER.info(
+                "Device %s physical_direction=%s logical_direction=%s",
+                self._attr_name,
+                "up" if physical_up else "down",
+                "opening" if logical_opening else "closing",
+            )
+            self._attr_is_opening = logical_opening
+            self._attr_is_closing = not logical_opening
             self._move_start_time = time.monotonic()
             self._move_start_position = self._attr_current_cover_position
-            # Start real-time position tracking
-            self._start_position_tracking()
-        elif event == EVENT_STARTED_MOVING_DOWN:
-            _LOGGER.info("Device %s started moving DOWN", self._attr_name)
-            self._attr_is_opening = False
-            self._attr_is_closing = True
-            self._move_start_time = time.monotonic()
-            self._move_start_position = self._attr_current_cover_position
-            # Start real-time position tracking
             self._start_position_tracking()
         elif event == EVENT_STOPPED:
             _LOGGER.info(
@@ -498,7 +564,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         # If target is 0 or 100, let the device stop naturally at its limits.
                         # For intermediate, send STOP and wait for STOP event to finalize & clear target.
                         if self._target_position not in (0, 100):
-                            await self._api.control_blind(self._device_enum, CMD_STOP)
+                            await self._api.control_blind(
+                                self._command_enum,
+                                CMD_STOP,
+                                device_id=self._command_device_id,
+                            )
                         # Stop tracking loop
                         self._position_update_task = None
                         # Leave opening/closing flags as-is until STOP to aid debugging
@@ -593,7 +663,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
-        _LOGGER.debug("Opening cover %s (enum=%s)", self._attr_name, self._device_enum)
+        action = CMD_DOWN if self._invert_direction else CMD_UP
+        _LOGGER.debug(
+            "Opening cover %s (command_id=%s enum=%s action=%s)",
+            self._attr_name,
+            self._command_device_id,
+            self._command_enum,
+            action,
+        )
         self._attr_is_opening = True
         self._attr_is_closing = False
         self._move_start_time = time.monotonic()
@@ -603,11 +680,20 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._move_start_position = self._attr_current_cover_position
         self._start_position_tracking()
         self.async_write_ha_state()
-        await self._api.control_blind(self._device_enum, CMD_UP)
+        await self._api.control_blind(
+            self._command_enum, action, device_id=self._command_device_id
+        )
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close cover."""
-        _LOGGER.debug("Closing cover %s (enum=%s)", self._attr_name, self._device_enum)
+        action = CMD_UP if self._invert_direction else CMD_DOWN
+        _LOGGER.debug(
+            "Closing cover %s (command_id=%s enum=%s action=%s)",
+            self._attr_name,
+            self._command_device_id,
+            self._command_enum,
+            action,
+        )
         self._attr_is_opening = False
         self._attr_is_closing = True
         self._move_start_time = time.monotonic()
@@ -616,11 +702,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._move_start_position = self._attr_current_cover_position
         self._start_position_tracking()
         self.async_write_ha_state()
-        await self._api.control_blind(self._device_enum, CMD_DOWN)
+        await self._api.control_blind(
+            self._command_enum, action, device_id=self._command_device_id
+        )
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
-        _LOGGER.debug("Stopping cover %s (enum=%s)", self._attr_name, self._device_enum)
+        _LOGGER.debug(
+            "Stopping cover %s (command_id=%s enum=%s)",
+            self._attr_name,
+            self._command_device_id,
+            self._command_enum,
+        )
         self._stop_position_tracking()
         self._update_position()
         self._attr_is_opening = False
@@ -629,7 +722,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._move_start_position = None
         self._target_position = None
         self.async_write_ha_state()
-        await self._api.control_blind(self._device_enum, CMD_STOP)
+        await self._api.control_blind(
+            self._command_enum, CMD_STOP, device_id=self._command_device_id
+        )
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""

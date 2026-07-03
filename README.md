@@ -15,7 +15,9 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 ## Features
 
 * Supports blind movement Up, Down, and Stop
-* After calibation, position tracking is possible.
+* Tracks estimated position from measured or manually supplied travel times
+* Supports manual command/status identities when calibration cannot create a blind
+* Can test a paired command before calibration and edit a blind after creation
 
 ## Installation
 
@@ -28,8 +30,19 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 Make sure you have HACS installed. If you don't, run `wget -O - https://get.hacs.xyz | bash -` in HA.  
 Choose Integrations under HACS. Click the '+' button on the bottom of the page, search for "schellenberg usb", choose it, and click install in HACS.
 
+
 #### Option 2: Manual
 Clone this repository or download the source code as a zip file and add/merge the `custom_components/` folder with its contents in your configuration directory.
+
+To test a local checkout on Home Assistant OS, use the Samba Share or Studio Code
+Server add-on and copy the repository's `custom_components/schellenberg_usb`
+directory to `/config/custom_components/schellenberg_usb`. The resulting directory
+must contain `manifest.json` directly. Replace the integration files, restart Home
+Assistant (a configuration reload is not sufficient), then check **Settings > System
+> Logs** for `schellenberg_usb` messages.
+
+Back up an existing copy first. HACS may overwrite these test files during an update,
+so restore or reinstall the released version after testing if necessary.
 
 
 ### Step 2: Restart HA
@@ -49,11 +62,44 @@ Select it, and the schellenberg usb integration is ready for use.
 2. Find the **Schellenberg USB** integration and click on it
 3. Click the **+** button or select **Add blind** from the menu
 4. Choose one of the setup methods:
-   - **Pair and calibrate** keeps the existing guided setup. Put the blind motor
-     into pairing mode, provide a friendly name, and complete calibration.
-   - **Add manually** creates the cover immediately from its name, six-character
-     device ID, two-character enum, and measured open/close travel times. The ID
-     and enum can be copied from the integration's received-message log entries.
+   - **Pair and test (recommended)** pairs the motor, sends Open for 0.75 seconds
+     followed by Stop, and asks whether it moved. A successful test can continue to
+     calibration or save with manual travel times. A failed test opens the detected
+     values for editing.
+   - **Pair and calibrate (legacy)** keeps the original guided setup unchanged.
+   - **Add manually** creates a cover from a name, command ID/enum, optional separate
+     status ID/enum, and measured open/close travel times. Calibration is optional.
+
+
+The command enum selects the paired slot in the USB stick and is inserted into the
+outgoing serial packet. The command device ID is retained for identification and
+diagnostic logging. The status ID and enum are matched exactly against incoming
+movement messages.
+
+To edit an existing blind, open its configuration action from the Schellenberg USB
+integration and choose **Edit identities and travel times**. The same menu also
+offers a short motor command test and recalibration. Editing protocol values keeps
+the existing Home Assistant entity unique ID.
+Choose **Developer tools** in the same blind configuration menu to see the last
+frame matching its status identity, the current transmit target, direct Open,
+Close, and Stop actions, and a copyable diagnostics snapshot.
+
+
+### Diagnostic command service
+
+Before creating or changing a blind, use **Developer Tools > Actions** and run
+`schellenberg_usb.test_command`:
+
+```yaml
+device_id: F2B8D5
+enum: "23"
+command: open
+```
+
+Valid commands are `open`, `close`, and `stop`. Open and close are direct commands,
+so send `stop` yourself when performing a short test. If more than one Schellenberg
+USB hub is loaded, also supply its `config_entry_id`. Sending logs the command,
+device ID, enum, raw serial payload, and whether it was queued successfully.
 
 ### Step 5: Calibrate your blinds
 
