@@ -26,6 +26,9 @@ SUBENTRY_TYPE_BLIND = "blind"
 # Configuration keys
 CONF_SERIAL_PORT = "serial_port"
 CONF_DEVICE_NAME = "device_name"
+CONF_DEVICE_ENUM = "device_enum"
+CONF_OPEN_TIME_SECONDS = "open_time_seconds"
+CONF_CLOSE_TIME_SECONDS = "close_time_seconds"
 
 # Data keys
 DATA_API_INSTANCE = "api_instance"

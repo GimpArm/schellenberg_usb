@@ -38,14 +38,33 @@
     "blind": {
       "entry_type": "Blind",
       "initiate_flow": {
-        "user": "Pair device",
+        "user": "Add blind",
         "reconfigure": "Calibrate"
       },
       "step": {
         "user": {
+          "title": "Add a blind",
+          "menu_options": {
+            "pair_device": "Pair and calibrate",
+            "manual": "Add manually"
+          }
+        },
+        "pair_device": {
           "title": "Pair a new device",
           "description": "Press the pair button to activate pairing mode on your Schellenberg USB stick. Then press the pairing button on your blind motor within 2 minutes.",
           "submit": "Pair"
+        },
+        "manual": {
+          "title": "Add a blind manually",
+          "description": "Enter the device ID and enum shown in the logs, plus the measured full travel times. Calibration can be run later if needed.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Device ID",
+            "device_enum": "Enum",
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time"
+          },
+          "submit": "Add"
         },
         "name_device": {
           "title": "Name your device",
@@ -76,6 +95,11 @@
         }
       },
       "error": {
+        "required": "This field is required.",
+        "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
+        "invalid_device_enum": "Enum must contain exactly 2 hexadecimal characters.",
+        "invalid_travel_time": "Travel time must be greater than zero.",
+        "already_configured": "This device is already configured.",
         "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
         "pairing_failed": "Pairing failed.",
         "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",

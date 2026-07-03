@@ -362,6 +362,8 @@ class CalibrationFlowHandler:
                     data={
                         "device_id": self._pending_device_id,
                         "device_enum": self._pending_device_enum,
+                        CONF_OPEN_TIME: round(self._open_time, 2),
+                        CONF_CLOSE_TIME: round(self._close_time, 2),
                     },
                     unique_id=self._pending_device_id,
                 )
@@ -369,6 +371,16 @@ class CalibrationFlowHandler:
             # Options flow: create empty entry to finish
             if isinstance(self.flow, OptionsFlow):
                 return self.flow.async_create_entry(title="", data={})
+
+            if isinstance(self.flow, ConfigSubentryFlow):
+                return self.flow.async_update_and_abort(
+                    self.flow._get_entry(),
+                    self.flow._get_reconfigure_subentry(),
+                    data_updates={
+                        CONF_OPEN_TIME: round(self._open_time, 2),
+                        CONF_CLOSE_TIME: round(self._close_time, 2),
+                    },
+                )
 
             # Fallback: abort with success if no creation path triggered
             return self.flow.async_abort(reason="reconfigure_successful")

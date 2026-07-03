@@ -19,7 +19,12 @@ from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
 from .const import (
     CONF_CLOSE_TIME,
+    CONF_CLOSE_TIME_SECONDS,
+    CONF_DEVICE_ENUM,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_NAME,
     CONF_OPEN_TIME,
+    CONF_OPEN_TIME_SECONDS,
     CONF_SERIAL_PORT,
     DOMAIN,
     SUBENTRY_TYPE_BLIND,
@@ -218,7 +223,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def async_step_blind(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Entry point when the user clicks the 'Pair device' button.
+        """Entry point when the user clicks the 'Add blind' button.
 
         Home Assistant calls async_step_{subentry_type}() where subentry_type is
         the key returned by async_get_supported_subentry_types. Since our type is
@@ -226,17 +231,27 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         async_step_pairing, which caused the flow to fall back and the
         translation key for the initiate button to be missing.
         """
-        _LOGGER.debug("Subentry blind flow initiated (pairing new device)")
+        _LOGGER.debug("Subentry blind flow initiated")
         return await self.async_step_user(user_input)
 
     async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose between pairing/calibration and manual setup."""
+        return self.async_show_menu(
+            step_id="user", menu_options=["pair_device", "manual"]
+        )
+
+    async def async_step_pair_device(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Handle pairing initialization."""
         _LOGGER.debug("Pairing step user input: %s", user_input)
         if user_input is None:
             _LOGGER.info("Showing pairing form")
-            return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
+            return self.async_show_form(
+                step_id="pair_device", data_schema=vol.Schema({})
+            )
 
         # Get the hub entry (parent config entry)
         hub_entry = self._get_entry()
@@ -255,6 +270,81 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_device_enum = device_enum
         self._pending_device_name = None
         return await self.async_step_name_device()
+
+    async def async_step_manual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Create a blind subentry from manually supplied protocol values."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            device_name = str(user_input[CONF_DEVICE_NAME]).strip()
+            device_id = str(user_input[CONF_DEVICE_ID]).strip().upper()
+            device_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
+            open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
+            close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
+
+            if not device_name:
+                errors[CONF_DEVICE_NAME] = "required"
+            if len(device_id) != 6 or any(
+                character not in "0123456789ABCDEF" for character in device_id
+            ):
+                errors[CONF_DEVICE_ID] = "invalid_device_id"
+            if len(device_enum) != 2 or any(
+                character not in "0123456789ABCDEF" for character in device_enum
+            ):
+                errors[CONF_DEVICE_ENUM] = "invalid_device_enum"
+            if open_time <= 0:
+                errors[CONF_OPEN_TIME_SECONDS] = "invalid_travel_time"
+            if close_time <= 0:
+                errors[CONF_CLOSE_TIME_SECONDS] = "invalid_travel_time"
+
+            hub_entry = self._get_entry()
+            if any(
+                str(subentry.data.get(CONF_DEVICE_ID, "")).upper() == device_id
+                for subentry in hub_entry.subentries.values()
+            ):
+                errors[CONF_DEVICE_ID] = "already_configured"
+
+            if not errors:
+                return self.async_create_entry(
+                    title=device_name,
+                    data={
+                        CONF_DEVICE_ID: device_id,
+                        CONF_DEVICE_ENUM: device_enum,
+                        CONF_OPEN_TIME: open_time,
+                        CONF_CLOSE_TIME: close_time,
+                    },
+                    unique_id=device_id,
+                )
+
+        return self.async_show_form(
+            step_id="manual",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_DEVICE_NAME): selector.TextSelector(),
+                    vol.Required(CONF_DEVICE_ID): selector.TextSelector(),
+                    vol.Required(CONF_DEVICE_ENUM): selector.TextSelector(),
+                    vol.Required(CONF_OPEN_TIME_SECONDS): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            step=0.1,
+                            unit_of_measurement="s",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(CONF_CLOSE_TIME_SECONDS): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            step=0.1,
+                            unit_of_measurement="s",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+        )
 
     async def async_step_name_device(
         self, user_input: dict[str, Any] | None = None

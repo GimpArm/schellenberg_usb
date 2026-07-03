@@ -38,14 +38,33 @@
     "blind": {
       "entry_type": "Rollladen",
       "initiate_flow": {
-        "user": "Gerät koppeln",
+        "user": "Rollladen hinzufügen",
         "reconfigure": "Kalibrieren"
       },
       "step": {
         "user": {
+          "title": "Rollladen hinzufügen",
+          "menu_options": {
+            "pair_device": "Koppeln und kalibrieren",
+            "manual": "Manuell hinzufügen"
+          }
+        },
+        "pair_device": {
           "title": "Neues Gerät koppeln",
           "description": "Drücken Sie die Kopplungstaste, um den Kopplungsmodus an Ihrem Schellenberg USB-Stick zu aktivieren. Drücken Sie dann innerhalb von 2 Minuten die Kopplungstaste an Ihrem Rollladenmotor.",
           "submit": "Koppeln"
+        },
+        "manual": {
+          "title": "Rollladen manuell hinzufügen",
+          "description": "Geben Sie die Geräte-ID und den Enum-Wert aus den Protokollen sowie die gemessenen vollständigen Laufzeiten ein. Die Kalibrierung kann später ausgeführt werden.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Geräte-ID",
+            "device_enum": "Enum",
+            "open_time_seconds": "Öffnungszeit",
+            "close_time_seconds": "Schließzeit"
+          },
+          "submit": "Hinzufügen"
         },
         "name_device": {
           "title": "Gerät benennen",
@@ -76,6 +95,11 @@
         }
       },
       "error": {
+        "required": "Dieses Feld ist erforderlich.",
+        "invalid_device_id": "Die Geräte-ID muss genau 6 Hexadezimalzeichen enthalten.",
+        "invalid_device_enum": "Der Enum-Wert muss genau 2 Hexadezimalzeichen enthalten.",
+        "invalid_travel_time": "Die Laufzeit muss größer als null sein.",
+        "already_configured": "Dieses Gerät ist bereits konfiguriert.",
         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut und stellen Sie sicher, dass Sie die Kopplungstaste an Ihrem Rollladenmotor drücken.",
         "pairing_failed": "Kopplung fehlgeschlagen.",
         "calibration_timeout": "Kalibrierung abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",

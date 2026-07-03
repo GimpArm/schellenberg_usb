@@ -38,14 +38,33 @@
     "blind": {
       "entry_type": "Persiana",
       "initiate_flow": {
-        "user": "Emparejar dispositivo",
+        "user": "Añadir persiana",
         "reconfigure": "Calibrar"
       },
       "step": {
         "user": {
+          "title": "Añadir una persiana",
+          "menu_options": {
+            "pair_device": "Emparejar y calibrar",
+            "manual": "Añadir manualmente"
+          }
+        },
+        "pair_device": {
           "title": "Emparejar un nuevo dispositivo",
           "description": "Presione el botón de emparejamiento para activar el modo de emparejamiento en su memoria USB Schellenberg. Luego presione el botón de emparejamiento en su motor de persiana en los próximos 2 minutos.",
           "submit": "Emparejar"
+        },
+        "manual": {
+          "title": "Añadir una persiana manualmente",
+          "description": "Introduzca el ID del dispositivo y el enum que aparecen en los registros, además de los tiempos de recorrido completo medidos. La calibración se puede ejecutar más adelante.",
+          "data": {
+            "device_name": "Nombre",
+            "device_id": "ID del dispositivo",
+            "device_enum": "Enum",
+            "open_time_seconds": "Tiempo de apertura",
+            "close_time_seconds": "Tiempo de cierre"
+          },
+          "submit": "Añadir"
         },
         "name_device": {
           "title": "Nombre su dispositivo",
@@ -76,6 +95,11 @@
         }
       },
       "error": {
+        "required": "Este campo es obligatorio.",
+        "invalid_device_id": "El ID del dispositivo debe contener exactamente 6 caracteres hexadecimales.",
+        "invalid_device_enum": "El enum debe contener exactamente 2 caracteres hexadecimales.",
+        "invalid_travel_time": "El tiempo de recorrido debe ser mayor que cero.",
+        "already_configured": "Este dispositivo ya está configurado.",
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo y asegúrese de presionar el botón de emparejamiento en su motor de persiana.",
         "pairing_failed": "Error en el emparejamiento.",
         "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",

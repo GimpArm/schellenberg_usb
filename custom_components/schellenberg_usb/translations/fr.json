@@ -38,14 +38,33 @@
     "blind": {
       "entry_type": "Volet",
       "initiate_flow": {
-        "user": "Appairer l'appareil",
+        "user": "Ajouter un volet",
         "reconfigure": "Calibrer"
       },
       "step": {
         "user": {
+          "title": "Ajouter un volet",
+          "menu_options": {
+            "pair_device": "Appairer et calibrer",
+            "manual": "Ajouter manuellement"
+          }
+        },
+        "pair_device": {
           "title": "Appairer un nouvel appareil",
           "description": "Appuyez sur le bouton d'appairage pour activer le mode d'appairage sur votre clé USB Schellenberg. Ensuite, appuyez sur le bouton d'appairage de votre moteur de volet dans les 2 minutes.",
           "submit": "Appairer"
+        },
+        "manual": {
+          "title": "Ajouter un volet manuellement",
+          "description": "Saisissez l'ID de l'appareil et l'énumération affichés dans les journaux, ainsi que les durées de course complètes mesurées. Le calibrage pourra être effectué ultérieurement.",
+          "data": {
+            "device_name": "Nom",
+            "device_id": "ID de l'appareil",
+            "device_enum": "Énumération",
+            "open_time_seconds": "Durée d'ouverture",
+            "close_time_seconds": "Durée de fermeture"
+          },
+          "submit": "Ajouter"
         },
         "name_device": {
           "title": "Nommer votre appareil",
@@ -76,6 +95,11 @@
         }
       },
       "error": {
+        "required": "Ce champ est obligatoire.",
+        "invalid_device_id": "L'ID de l'appareil doit contenir exactement 6 caractères hexadécimaux.",
+        "invalid_device_enum": "L'énumération doit contenir exactement 2 caractères hexadécimaux.",
+        "invalid_travel_time": "La durée de course doit être supérieure à zéro.",
+        "already_configured": "Cet appareil est déjà configuré.",
         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer et vous assurer d'appuyer sur le bouton d'appairage de votre moteur de volet.",
         "pairing_failed": "Échec de l'appairage.",
         "calibration_timeout": "Délai de calibration dépassé. Le volet a mis plus de 5 minutes pour terminer le mouvement. Veuillez vérifier l'appareil et réessayer.",

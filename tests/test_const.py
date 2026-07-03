@@ -12,7 +12,12 @@ from custom_components.schellenberg_usb.const import (
     CMD_STOP,
     CMD_UP,
     CONF_CLOSE_TIME,
+    CONF_CLOSE_TIME_SECONDS,
+    CONF_DEVICE_ENUM,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_NAME,
     CONF_OPEN_TIME,
+    CONF_OPEN_TIME_SECONDS,
     CONF_SERIAL_PORT,
     DATA_API_INSTANCE,
     DATA_UNSUB_DISPATCHER,
@@ -45,6 +50,11 @@ def test_configuration_constants() -> None:
     """Test configuration constants."""
     assert CONF_SERIAL_PORT == "serial_port"
     assert CONF_OPEN_TIME == "open_time"
+    assert CONF_DEVICE_NAME == "device_name"
+    assert CONF_DEVICE_ID == "device_id"
+    assert CONF_DEVICE_ENUM == "device_enum"
+    assert CONF_OPEN_TIME_SECONDS == "open_time_seconds"
+    assert CONF_CLOSE_TIME_SECONDS == "close_time_seconds"
     assert CONF_CLOSE_TIME == "close_time"
 
 

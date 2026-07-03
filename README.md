@@ -43,17 +43,21 @@ If the component is properly installed, you should be able to find 'Schellenberg
 
 Select it, and the schellenberg usb integration is ready for use.
 
-### Step 4: Pair your devices
+### Step 4: Add your devices
 
 1. In Home Assistant, go to **Settings > Devices & Services**
 2. Find the **Schellenberg USB** integration and click on it
-3. Click the **+** button or select **Pair device** from the menu
-4. Put your blind motor into pairing mode (see [Device Pairing Instructions](#device-pairing-instructions))
-5. Once pairing is successful, provide a friendly name for your blind
+3. Click the **+** button or select **Add blind** from the menu
+4. Choose one of the setup methods:
+   - **Pair and calibrate** keeps the existing guided setup. Put the blind motor
+     into pairing mode, provide a friendly name, and complete calibration.
+   - **Add manually** creates the cover immediately from its name, six-character
+     device ID, two-character enum, and measured open/close travel times. The ID
+     and enum can be copied from the integration's received-message log entries.
 
 ### Step 5: Calibrate your blinds
 
-Calibration is essential for accurate position tracking. The integration measures how long it takes your blind to fully open and close, allowing it to calculate the current position during operation.
+Calibration is recommended for accurate position tracking. The integration measures how long it takes your blind to fully open and close, allowing it to calculate the current position during operation. It is optional when the travel times were supplied during manual setup.
 
 > [!IMPORTANT]
 > This calibration is **not** the same as setting the end positions (fully open/closed limits) on your blind motor. End positions must be configured directly on the device itself using the motor's built-in adjustment features or a Schellenberg remote control before using this integration.
