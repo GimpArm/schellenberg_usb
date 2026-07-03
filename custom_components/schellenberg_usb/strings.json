@@ -129,11 +129,12 @@
         },
         "developer_tools": {
           "title": "Developer tools",
-          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
+          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
           "menu_options": {
             "test_open": "Test Open",
             "test_close": "Test Close",
             "test_stop": "Test Stop",
+            "reset_stick": "Reset stick / reconnect serial",
             "copy_diagnostics": "Copy diagnostics"
           }
         },

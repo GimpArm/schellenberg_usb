@@ -26,6 +26,8 @@ async def test_api_control_blind_up(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.control_blind("10", CMD_UP)
 
@@ -44,6 +46,8 @@ async def test_api_control_blind_down(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.control_blind("11", CMD_DOWN)
 
@@ -61,6 +65,8 @@ async def test_api_control_blind_stop(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.control_blind("12", CMD_STOP)
 
@@ -71,6 +77,28 @@ async def test_api_control_blind_stop(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("device_enum", "expected_enum"),
+    [("8", "08"), ("08", "08"), ("0d", "0D")],
+)
+async def test_api_control_blind_preserves_two_digit_enum(
+    hass: HomeAssistant, device_enum: str, expected_enum: str
+) -> None:
+    """Test command payloads retain leading-zero hexadecimal enum slots."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+
+    assert await api.control_blind(device_enum, CMD_UP) is True
+
+    payload = mock_transport.write.call_args.args[0]
+    assert payload.startswith(f"ss{expected_enum}9".encode())
+
+
+@pytest.mark.asyncio
 async def test_api_control_blind_invalid_action(hass: HomeAssistant) -> None:
     """Test control blind with invalid action."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
@@ -78,6 +106,8 @@ async def test_api_control_blind_invalid_action(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.control_blind("10", "99")
 
@@ -93,6 +123,8 @@ async def test_api_led_on(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.led_on()
 
@@ -109,6 +141,8 @@ async def test_api_led_off(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.led_off()
 
@@ -125,6 +159,8 @@ async def test_api_led_blink_valid_count(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.led_blink(5)
 
@@ -141,6 +177,8 @@ async def test_api_led_blink_invalid_count(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.led_blink(10)  # Invalid - should be 1-9
 
@@ -156,6 +194,8 @@ async def test_api_set_upper_endpoint(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.set_upper_endpoint("10")
 
@@ -172,6 +212,8 @@ async def test_api_set_lower_endpoint(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.set_lower_endpoint("10")
 
@@ -188,6 +230,8 @@ async def test_api_manual_up(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.manual_up("10")
 
@@ -204,6 +248,8 @@ async def test_api_manual_down(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.manual_down("10")
 
@@ -220,6 +266,8 @@ async def test_api_allow_pairing_on_device(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.allow_pairing_on_device("10")
 
@@ -236,6 +284,8 @@ async def test_api_echo_on(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.echo_on()
 
@@ -250,6 +300,8 @@ async def test_api_echo_off(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.echo_off()
 
@@ -264,6 +316,8 @@ async def test_api_enter_bootloader_mode(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.enter_bootloader_mode()
 
@@ -278,6 +332,8 @@ async def test_api_enter_initial_mode(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.enter_initial_mode()
 
@@ -292,6 +348,8 @@ async def test_api_reboot_stick(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     await api.reboot_stick()
 
@@ -340,6 +398,8 @@ async def test_api_verify_device_success(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
         mock_wait.return_value = True
@@ -356,6 +416,8 @@ async def test_api_verify_device_timeout(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
         mock_wait.side_effect = TimeoutError()
@@ -385,6 +447,8 @@ async def test_api_get_device_id_success(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
         mock_wait.return_value = "ABC123DEF"
@@ -401,6 +465,8 @@ async def test_api_get_device_id_timeout(hass: HomeAssistant) -> None:
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
         mock_wait.side_effect = TimeoutError()
@@ -429,6 +495,8 @@ async def test_api_disconnect_with_retry_task(hass: HomeAssistant) -> None:
 
     mock_transport = MagicMock()
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
     # Create a mock retry task
     mock_retry_task = MagicMock()
@@ -574,7 +642,7 @@ def test_protocol_connection_lost() -> None:
 
     protocol.connection_lost(None)
 
-    api.update_connection_status.assert_called_once_with(False)
+    api.handle_connection_lost.assert_called_once_with(protocol, None)
 
 
 def test_protocol_connection_lost_with_exception() -> None:
@@ -586,7 +654,36 @@ def test_protocol_connection_lost_with_exception() -> None:
     exc = Exception("Connection error")
     protocol.connection_lost(exc)
 
-    api.update_connection_status.assert_called_once_with(False)
+    api.handle_connection_lost.assert_called_once_with(protocol, exc)
+
+
+def test_api_connection_loss_clears_state_and_schedules_reconnect(
+    hass: HomeAssistant,
+) -> None:
+    """Test a live protocol loss clears stale state and requests reconnect."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    protocol = SchellenbergProtocol(api._handle_message, api)
+    transport = MagicMock()
+    api._protocol = protocol
+    api._transport = transport
+    api._is_connected = True
+    api._device_mode = "listening"
+    api._transmitter_active = True
+    api._transmitter_idle.clear()
+
+    with (
+        patch.object(api, "_schedule_reconnect") as schedule_reconnect,
+        patch("custom_components.schellenberg_usb.api.async_dispatcher_send"),
+    ):
+        api.handle_connection_lost(protocol, None)
+
+    assert api._transport is None
+    assert api._protocol is None
+    assert api.is_connected is False
+    assert api.device_mode is None
+    assert api.transmitter_active is False
+    assert api._transmitter_idle.is_set() is True
+    schedule_reconnect.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -604,16 +701,36 @@ async def test_api_pair_device_already_pairing(hass: HomeAssistant) -> None:
 
 @pytest.mark.asyncio
 async def test_api_pair_device_success(hass: HomeAssistant) -> None:
-    """Test successful device pairing."""
+    """Test pairing waits for transmit completion and exits pairing mode."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
 
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
 
-    with patch("asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
-        mock_wait.return_value = "device_abc123"
+    async def _complete_transmit(_: str) -> bool:
+        api._handle_message("t0")
+        return True
+
+    with (
+        patch("asyncio.wait_for", new=AsyncMock(return_value="device_abc123")),
+        patch.object(
+            api,
+            "_wait_for_transmitter_idle",
+            new=AsyncMock(side_effect=_complete_transmit),
+        ),
+        patch("custom_components.schellenberg_usb.api.asyncio.sleep", new=AsyncMock()),
+    ):
         result = await api.pair_device_and_wait()
 
     assert result == ("device_abc123", "10")
-    mock_transport.write.assert_called()
+    assert [call.args[0] for call in mock_transport.write.call_args_list] == [
+        b"sp\r\n",
+        b"ss109600000\r\n",
+        b"sp\r\n",
+    ]
+    assert api.pairing_active is False
+    assert api.device_mode == "listening"
+    assert api.transmit_ready is True

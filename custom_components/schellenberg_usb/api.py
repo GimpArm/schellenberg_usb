@@ -58,6 +58,9 @@ _LOGGER = logging.getLogger(__name__)
 
 TRANSMIT_RETRY_DELAY = 0.05
 TRANSMIT_MAX_RETRIES = 3
+TRANSMIT_IDLE_TIMEOUT = 3.0
+RECONNECT_DELAY = 5.0
+RESET_SETTLE_DELAY = 0.25
 
 
 def _normalize_protocol_enum(value: object) -> str:
@@ -90,9 +93,12 @@ class SchellenbergUsbApi:
         self._last_received_messages: dict[tuple[str, str], dict[str, str]] = {}
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
+        self._pairing_active = False
         self._stop_pairing_task: asyncio.Task[None] | None = (
             None  # Track task to stop pairing
         )
+        self._disconnect_requested = False
+        self._reconnect_handle: asyncio.TimerHandle | None = None
 
         # USB stick status
         self._is_connected = False
@@ -109,15 +115,25 @@ class SchellenbergUsbApi:
         self._transmit_lock = asyncio.Lock()
         self._transmit_busy = False
 
-    async def connect(self) -> None:
-        """Establish a connection to the serial port."""
-        if self._is_connecting or (
-            self._transport and not self._transport.is_closing()
-        ):
-            _LOGGER.debug("Connection attempt already in progress or established")
-            return
+        self._transmitter_active = False
+        self._transmitter_idle = asyncio.Event()
+        self._transmitter_idle.set()
+        self._busy_latched = False
 
+    async def connect(self) -> bool:
+        """Establish, verify, and initialize the serial connection."""
+        if self._is_connecting:
+            _LOGGER.debug("Connection attempt already in progress")
+            return False
+        if self._transport is not None and not self._transport.is_closing():
+            _LOGGER.debug("Serial connection already established")
+            return self._is_connected
+
+        self._disconnect_requested = False
+        self._cancel_scheduled_reconnect()
         self._is_connecting = True
+        self._transport = None
+        self._protocol = None
         _LOGGER.info("Connecting to Schellenberg USB stick at %s", self.port)
         try:
             transport, protocol = await serial_asyncio_fast.create_serial_connection(
@@ -129,55 +145,104 @@ class SchellenbergUsbApi:
             self._transport = transport
             # The factory above always creates this concrete protocol type.
             self._protocol = cast(SchellenbergProtocol, protocol)
-            self._is_connecting = False
             _LOGGER.info("Successfully connected to Schellenberg USB stick")
 
-            # Verify this is a Schellenberg device
             if not await self.verify_device():
                 _LOGGER.error(
                     "Device verification failed - not a Schellenberg USB stick"
                 )
-                if self._transport:
-                    self._transport.close()
+                transport.close()
                 self._transport = None
+                self._protocol = None
                 self._is_connected = False
-                return
+                self._device_mode = None
+                self._schedule_reconnect()
+                return False
 
             self._is_connected = True
+            self._busy_latched = False
+            self._transmitter_active = False
+            self._transmitter_idle.set()
             self._update_status()
 
-            # Enter listening mode if not already in it
-            if self._device_mode != "listening":
-                _LOGGER.info(
-                    "Device is in %s mode, entering listening mode", self._device_mode
+            if not await self._enter_listening_mode():
+                _LOGGER.error(
+                    "USB stick could not enter transmit-capable listening mode"
                 )
-                # Send any lowercase command to enter listening mode (B:2)
-                await self.send_command("hello")
-                # Give the device a moment to switch modes
-                await asyncio.sleep(0.5)
-                # Update the mode to listening after sending the command
-                self._device_mode = "listening"
+                transport.close()
+                self._transport = None
+                self._protocol = None
+                self._is_connected = False
+                self._device_mode = None
                 self._update_status()
-                _LOGGER.info("Device now in listening mode")
-            else:
-                _LOGGER.info("Device already in listening mode")
+                self._schedule_reconnect()
+                return False
 
-            # Get the hub device ID after listening mode
             hub_id = await self.get_device_id()
             if hub_id:
                 self._hub_id = hub_id
                 _LOGGER.info("Hub device ID retrieved: %s", self._hub_id)
             else:
                 _LOGGER.warning("Failed to retrieve hub device ID")
+            return True
         except (serial.SerialException, OSError) as err:
             _LOGGER.error(
-                "Failed to connect to %s: %s. Retrying in 5 seconds",
+                "Failed to connect to %s: %s. Retrying in %.0f seconds",
                 self.port,
                 err,
+                RECONNECT_DELAY,
             )
+            self._transport = None
+            self._protocol = None
+            self._is_connected = False
+            self._device_mode = None
+            self._update_status()
+            self._schedule_reconnect()
+            return False
+        finally:
             self._is_connecting = False
-            # Always retry after 5 seconds
-            self.hass.loop.call_later(5, lambda: self.hass.create_task(self.connect()))
+
+    async def _enter_listening_mode(self) -> bool:
+        """Put a connected stick into B:2 listening mode when needed."""
+        if self._transport is None or self._transport.is_closing():
+            return False
+        if self._device_mode == "listening":
+            _LOGGER.info("Device already in listening mode")
+            return True
+        if self._device_mode == "bootloader":
+            _LOGGER.error("Refusing transmit initialization while in bootloader mode")
+            return False
+
+        _LOGGER.info("Device is in %s mode, entering listening mode", self._device_mode)
+        if not await self.send_command("hello"):
+            return False
+        await asyncio.sleep(0.5)
+        self._device_mode = "listening"
+        self._update_status()
+        _LOGGER.info("Device now in listening mode")
+        return True
+
+    def _cancel_scheduled_reconnect(self) -> None:
+        """Cancel a pending automatic reconnect callback."""
+        if self._reconnect_handle is not None:
+            self._reconnect_handle.cancel()
+            self._reconnect_handle = None
+
+    def _schedule_reconnect(self, delay: float = RECONNECT_DELAY) -> None:
+        """Schedule one reconnect unless shutdown was explicitly requested."""
+        if self._disconnect_requested or self._reconnect_handle is not None:
+            return
+        _LOGGER.info("Scheduling serial reconnect in %.1f seconds", delay)
+        self._reconnect_handle = self.hass.loop.call_later(
+            delay, self._start_scheduled_reconnect
+        )
+
+    @callback
+    def _start_scheduled_reconnect(self) -> None:
+        """Start the reconnect task from its timer callback."""
+        self._reconnect_handle = None
+        if not self._disconnect_requested:
+            self.hass.loop.create_task(self.connect())
 
     @callback
     def _handle_message(self, message: str) -> None:
@@ -201,6 +266,8 @@ class SchellenbergUsbApi:
                             self._device_mode = "bootloader"
                         elif boot_mode == "1":
                             self._device_mode = "initial"
+                        elif boot_mode == "2":
+                            self._device_mode = "listening"
                         else:
                             self._device_mode = "unknown"
                         break
@@ -217,24 +284,45 @@ class SchellenbergUsbApi:
                 self._update_status()
             return
 
-        # Handle acknowledgments
-        if message in ("t1", "t0"):
+        # t1 means the RF transmitter started; it is not idle until t0.
+        if message == "t1":
+            self._transmitter_active = True
+            self._transmitter_idle.clear()
+            self._busy_latched = False
             if self._pending_retry_command is not None:
                 _LOGGER.info(
-                    "Serial transmit acknowledged response=%s payload=%s retries=%d",
-                    message,
+                    "Serial transmit started mode=%s payload=%s retries=%d",
+                    self._device_mode,
                     self._pending_retry_command,
                     self._transmit_retry_count,
                 )
             else:
-                _LOGGER.debug(
-                    "Received transmit ACK %s with no pending payload", message
+                _LOGGER.debug("Transmitter started with no tracked payload")
+            return
+
+        if message == "t0":
+            self._transmitter_active = False
+            self._transmitter_idle.set()
+            self._busy_latched = False
+            if self._retry_task is not None and not self._retry_task.done():
+                _LOGGER.info(
+                    "Serial transmitter is idle; queued retry may proceed payload=%s",
+                    self._pending_retry_command,
                 )
-            self._clear_pending_transmit()
+            else:
+                _LOGGER.info(
+                    "Serial transmit completed mode=%s payload=%s retries=%d",
+                    self._device_mode,
+                    self._pending_retry_command,
+                    self._transmit_retry_count,
+                )
+                self._clear_pending_transmit(cancel_retry=False)
             return
 
         if message == "tE":
             command = self._pending_retry_command
+            self._transmitter_active = True
+            self._transmitter_idle.clear()
             if command is None:
                 _LOGGER.warning(
                     "Serial stick reported busy with no pending transmit payload"
@@ -254,10 +342,12 @@ class SchellenbergUsbApi:
                 return
 
             if self._transmit_retry_count >= TRANSMIT_MAX_RETRIES:
+                self._busy_latched = True
                 _LOGGER.error(
                     "Serial transmit abandoned after %d attempts because the stick "
-                    "remained busy payload=%s",
+                    "remained busy mode=%s payload=%s; reset/reconnect required",
                     TRANSMIT_MAX_RETRIES + 1,
+                    self._device_mode,
                     command,
                 )
                 self._clear_pending_transmit(cancel_retry=False)
@@ -265,10 +355,12 @@ class SchellenbergUsbApi:
 
             self._transmit_retry_count += 1
             _LOGGER.warning(
-                "Serial stick busy; scheduling retry %d/%d in %dms payload=%s",
+                "Serial stick busy; retry %d/%d will wait up to %.1fs for idle "
+                "mode=%s payload=%s",
                 self._transmit_retry_count,
                 TRANSMIT_MAX_RETRIES,
-                round(TRANSMIT_RETRY_DELAY * 1000),
+                TRANSMIT_IDLE_TIMEOUT,
+                self._device_mode,
                 command,
             )
             self._retry_task = asyncio.create_task(
@@ -308,13 +400,6 @@ class SchellenbergUsbApi:
             if self._pairing_future and not self._pairing_future.done():
                 _LOGGER.info("Pairing successful! New device ID: %s", device_id)
                 self._pairing_future.set_result(device_id)
-                # Stop pairing mode after a 2 second delay to ensure device has fully paired
-                self._stop_pairing_task = asyncio.create_task(
-                    self._stop_pairing_mode(delay=True)
-                )
-                self._stop_pairing_task.add_done_callback(
-                    lambda _: setattr(self, "_stop_pairing_task", None)
-                )
                 # Don't send dispatcher signal here - let the caller handle persistence
                 return
             return
@@ -361,13 +446,6 @@ class SchellenbergUsbApi:
                     ):
                         _LOGGER.info("Pairing successful! New device ID: %s", device_id)
                         self._pairing_future.set_result(device_id)
-                        # Stop pairing mode after a 2 second delay to ensure device has fully paired
-                        self._stop_pairing_task = asyncio.create_task(
-                            self._stop_pairing_mode(delay=True)
-                        )
-                        self._stop_pairing_task.add_done_callback(
-                            lambda _: setattr(self, "_stop_pairing_task", None)
-                        )
                         # Don't send dispatcher signal here - let the caller handle persistence
                         return
 
@@ -433,27 +511,62 @@ class SchellenbergUsbApi:
                         self._clear_pending_transmit(cancel_retry=False)
                     return False
 
-                if command.startswith(CMD_TRANSMIT) and not is_retry:
-                    if self._pending_retry_command is not None:
-                        _LOGGER.warning(
-                            "Replacing unacknowledged serial transmit old_payload=%s "
-                            "new_payload=%s",
+                is_transmit = command.startswith(CMD_TRANSMIT)
+                if is_transmit:
+                    if self._busy_latched:
+                        _LOGGER.error(
+                            "Serial transmit blocked because stick busy state is "
+                            "latched mode=%s payload=%s; reset/reconnect required",
+                            self._device_mode,
+                            command,
+                        )
+                        return False
+
+                    if not is_retry and not self._transmitter_idle.is_set():
+                        _LOGGER.info(
+                            "Waiting for active serial transmit to finish mode=%s "
+                            "pending_payload=%s new_payload=%s",
+                            self._device_mode,
                             self._pending_retry_command,
                             command,
                         )
-                    self._clear_pending_transmit()
-                    self._pending_retry_command = command
-                    self._transmit_retry_count = 0
+                        if not await self._wait_for_transmitter_idle(
+                            "before a new transmit"
+                        ):
+                            self._busy_latched = True
+                            return False
+
+                    if not is_retry:
+                        if self._pending_retry_command is not None:
+                            _LOGGER.warning(
+                                "Replacing completed serial transmit old_payload=%s "
+                                "new_payload=%s",
+                                self._pending_retry_command,
+                                command,
+                            )
+                        self._clear_pending_transmit()
+                        self._pending_retry_command = command
+                        self._transmit_retry_count = 0
+
+                    # Close the idle window before writing. This prevents another
+                    # coroutine from queuing a command before the stick reports t1.
+                    self._transmitter_active = True
+                    self._transmitter_idle.clear()
 
                 full_command = f"{command}\r\n".encode("ascii")
                 attempt = self._transmit_retry_count + 1 if is_retry else 1
                 max_attempts = TRANSMIT_MAX_RETRIES + 1
                 _LOGGER.debug(
-                    "Writing serial command payload=%s bytes=%d attempt=%d/%d retry=%s",
+                    "Writing serial command mode=%s connected=%s pairing=%s "
+                    "transmitter_active=%s payload=%s bytes=%d attempt=%d/%d retry=%s",
+                    self._device_mode,
+                    self._is_connected,
+                    self._pairing_active,
+                    self._transmitter_active,
                     command,
                     len(full_command),
                     attempt,
-                    max_attempts if command.startswith(CMD_TRANSMIT) else 1,
+                    max_attempts if is_transmit else 1,
                     is_retry,
                 )
                 try:
@@ -467,6 +580,9 @@ class SchellenbergUsbApi:
                     )
                     if self._pending_retry_command == command:
                         self._clear_pending_transmit(cancel_retry=False)
+                    if is_transmit:
+                        self._transmitter_active = False
+                        self._transmitter_idle.set()
                     return False
 
                 _LOGGER.debug(
@@ -481,10 +597,40 @@ class SchellenbergUsbApi:
                 # cancellation, disconnected transport, or stale retry.
                 self._transmit_busy = False
 
+    async def _wait_for_transmitter_idle(self, reason: str) -> bool:
+        """Wait for the stick's t0 completion marker with a hard timeout."""
+        if self._transmitter_idle.is_set():
+            return True
+        try:
+            await asyncio.wait_for(
+                self._transmitter_idle.wait(), timeout=TRANSMIT_IDLE_TIMEOUT
+            )
+        except TimeoutError:
+            _LOGGER.error(
+                "Serial transmitter did not return to idle within %.1fs (%s) "
+                "mode=%s pending_payload=%s",
+                TRANSMIT_IDLE_TIMEOUT,
+                reason,
+                self._device_mode,
+                self._pending_retry_command,
+            )
+            return False
+        return True
+
     async def _retry_command_after_delay(self, command: str) -> None:
-        """Retry a busy transmit once after the configured delay."""
+        """Retry a busy transmit only after the stick reports idle."""
         retry_task = asyncio.current_task()
         try:
+            if not await self._wait_for_transmitter_idle("after a busy response"):
+                self._busy_latched = True
+                _LOGGER.error(
+                    "Serial transmit abandoned because the stick never returned "
+                    "to idle payload=%s; reset/reconnect required",
+                    command,
+                )
+                self._clear_pending_transmit(cancel_retry=False)
+                return
+
             await asyncio.sleep(TRANSMIT_RETRY_DELAY)
             if self._pending_retry_command != command:
                 _LOGGER.debug("Busy retry no longer pending payload=%s", command)
@@ -495,9 +641,10 @@ class SchellenbergUsbApi:
             if self._retry_task is retry_task:
                 self._retry_task = None
             _LOGGER.info(
-                "Retrying serial transmit after busy response retry=%d/%d payload=%s",
+                "Retrying serial transmit after idle retry=%d/%d mode=%s payload=%s",
                 self._transmit_retry_count,
                 TRANSMIT_MAX_RETRIES,
+                self._device_mode,
                 command,
             )
             await self._write_command(command, is_retry=True)
@@ -523,56 +670,60 @@ class SchellenbergUsbApi:
         self._transmit_retry_count = 0
 
     async def pair_device_and_wait(self) -> tuple[str, str] | None:
-        """Put the stick into pairing mode and wait for a device to pair.
-
-        Returns a tuple of (device_id, device_enum) if successful, None if timeout.
-        """
+        """Put the stick into pairing mode and wait for a device to pair."""
         if self._pairing_future and not self._pairing_future.done():
             _LOGGER.warning("Pairing already in progress")
             return None
+        if not self._is_transmit_capable():
+            _LOGGER.error(
+                "Pairing blocked because stick is not ready connected=%s mode=%s "
+                "busy_latched=%s",
+                self._is_connected,
+                self._device_mode,
+                self._busy_latched,
+            )
+            return None
 
-        # Get the next available device enumerator
         device_enum = self.initialize_next_device_enum()
-
-        # Format: ssXX9CCPPPP
-        # ss = transmit prefix
-        # XX = device enumerator (2 hex chars)
-        # 9 = number of messages to send
-        # CC = command (60 = pair)
-        # PPPP = padding (4 chars)
         pair_command = f"{CMD_TRANSMIT}{device_enum}9{CMD_PAIR}0000"
-
         _LOGGER.info(
-            "Initiating pairing with device enum %s. Command: %s",
+            "Initiating pairing with device enum %s payload=%s",
             device_enum,
             pair_command,
         )
 
-        # Create a future to wait for device ID first
+        self._pairing_active = True
+        self._device_mode = "pairing"
+        self._update_status()
         self._pairing_future = self.hass.loop.create_future()
+        paired = False
 
         try:
-            # Send sp command to enter pairing/listening mode (like C# does)
             _LOGGER.debug("Entering pairing mode with command: sp")
-            await self.send_command(CMD_GET_PARAM_P)
+            if not await self.send_command(CMD_GET_PARAM_P):
+                raise ConnectionError("could not enter pairing mode")
 
-            # Wait for device to send its ID first (with timeout)
             device_id = await asyncio.wait_for(
                 self._pairing_future, timeout=PAIRING_TIMEOUT
             )
-
-            # Once we have the device ID, send the pairing command
             _LOGGER.debug(
-                "Received device ID %s, sending pairing command: %s",
+                "Received device ID %s, sending pairing payload=%s",
                 device_id,
                 pair_command,
             )
-            await self.send_command(pair_command)
+            if not await self.send_command(pair_command):
+                raise ConnectionError("could not send pairing transmit")
+            if not await self._wait_for_transmitter_idle("finishing pairing transmit"):
+                self._busy_latched = True
+                return None
+            paired = True
         except TimeoutError:
             _LOGGER.warning("Pairing timeout - no device responded with ID")
             return None
+        except ConnectionError as err:
+            _LOGGER.warning("Pairing stopped because serial connection failed: %s", err)
+            return None
         else:
-            # Pairing successful - return the device ID and enum
             _LOGGER.info(
                 "Pairing completed successfully: %s with device enum %s",
                 device_id,
@@ -581,22 +732,38 @@ class SchellenbergUsbApi:
             return (device_id, device_enum)
         finally:
             self._pairing_future = None
+            # Await pairing shutdown. A delayed background `sp` used to race the
+            # first test command and could leave the stick busy/programming.
+            stop_task = asyncio.create_task(
+                self._stop_pairing_mode(delay=paired),
+                name="schellenberg-stop-pairing",
+            )
+            self._stop_pairing_task = stop_task
+            try:
+                await stop_task
+            finally:
+                if self._stop_pairing_task is stop_task:
+                    self._stop_pairing_task = None
 
     async def _stop_pairing_mode(self, delay: bool = False) -> None:
-        """Stop pairing mode by sending a stop command to the stick.
-
-        Args:
-            delay: If True, wait 2 seconds before stopping to ensure device has fully paired.
-        """
+        """Toggle pairing off and restore the normal listening-mode state."""
+        stopped = False
         try:
             if delay:
-                # Wait 2 seconds before stopping pairing mode to ensure device has fully paired
                 await asyncio.sleep(2)
             _LOGGER.debug("Stopping pairing mode with command: sp")
-            await self.send_command(CMD_GET_PARAM_P)
-            _LOGGER.info("Pairing mode stopped")
+            stopped = await self.send_command(CMD_GET_PARAM_P)
+            if stopped:
+                _LOGGER.info("Pairing mode stopped; stick returned to listening mode")
+            else:
+                _LOGGER.warning("Could not send pairing stop command")
         except OSError as err:
             _LOGGER.debug("Error stopping pairing mode (communication error): %s", err)
+        finally:
+            self._pairing_active = False
+            if self._is_connected:
+                self._device_mode = "listening" if stopped else "unknown"
+            self._update_status()
 
     async def control_blind(
         self,
@@ -605,27 +772,42 @@ class SchellenbergUsbApi:
         *,
         device_id: str | None = None,
     ) -> bool:
-        """Send a control command to a specific blind.
-
-        Args:
-            device_enum: The device enumerator (hex string like "10")
-            action: Command (CMD_UP, CMD_DOWN, CMD_STOP)
-            device_id: Optional command device ID for diagnostic logging
-
-        """
+        """Send a control command to a specific blind."""
         if action not in (CMD_UP, CMD_DOWN, CMD_STOP):
             _LOGGER.error("Invalid blind action: %s", action)
             return False
 
-        # Format: ssXX9AAZZZ
-        # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        raw_payload = f"{CMD_TRANSMIT}{device_enum.upper()}9{action}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        _LOGGER.info(
+            "Preparing blind command device_id=%s enum=%s connected=%s mode=%s "
+            "ready=%s pairing=%s transmitter_active=%s busy_latched=%s",
+            device_id or "unknown",
+            normalized_enum,
+            self._is_connected,
+            self._device_mode,
+            self.transmit_ready,
+            self._pairing_active,
+            self._transmitter_active,
+            self._busy_latched,
+        )
+        if not self._is_transmit_capable():
+            _LOGGER.error(
+                "Blind command blocked because stick is not transmit-capable "
+                "connected=%s mode=%s pairing=%s busy_latched=%s",
+                self._is_connected,
+                self._device_mode,
+                self._pairing_active,
+                self._busy_latched,
+            )
+            return False
+
+        raw_payload = f"{CMD_TRANSMIT}{normalized_enum}9{action}0000"
         action_name = {CMD_UP: "open", CMD_DOWN: "close", CMD_STOP: "stop"}[action]
         _LOGGER.info(
             "Sending blind command=%s device_id=%s enum=%s payload=%s",
             action_name,
             device_id or "unknown",
-            device_enum,
+            normalized_enum,
             raw_payload,
         )
         sent = await self.send_command(raw_payload)
@@ -770,25 +952,22 @@ class SchellenbergUsbApi:
         return dict(message) if message is not None else None
 
     async def verify_device(self) -> bool:
-        """Verify this is a Schellenberg USB stick by sending !? command.
-
-        Returns True if verification succeeds, False otherwise.
-        """
+        """Verify that the connected serial device is a Schellenberg stick."""
         if self._verify_future and not self._verify_future.done():
             _LOGGER.warning("Device verification already in progress")
             return False
 
         _LOGGER.debug("Verifying Schellenberg USB device")
         self._verify_future = self.hass.loop.create_future()
-
         try:
-            # Send the verification command
-            await self.send_command(CMD_VERIFY)
-
-            # Wait for verification response with timeout
+            if not await self.send_command(CMD_VERIFY):
+                return False
             result = await asyncio.wait_for(self._verify_future, timeout=VERIFY_TIMEOUT)
         except TimeoutError:
             _LOGGER.error("Device verification timeout - device did not respond to !?")
+            return False
+        except ConnectionError as err:
+            _LOGGER.error("Device verification interrupted: %s", err)
             return False
         else:
             _LOGGER.info("Device verification successful")
@@ -802,9 +981,58 @@ class SchellenbergUsbApi:
         async_dispatcher_send(self.hass, SIGNAL_STICK_STATUS_UPDATED)
 
     def update_connection_status(self, connected: bool) -> None:
-        """Update connection status (called from protocol)."""
+        """Update connection status for compatibility with existing callers."""
         self._is_connected = connected
         self._update_status()
+
+    @callback
+    def handle_connection_lost(
+        self, protocol: SchellenbergProtocol, exc: Exception | None
+    ) -> None:
+        """Clear dead serial state and schedule reconnection."""
+        if protocol is not self._protocol:
+            _LOGGER.debug("Ignoring connection_lost from a stale serial protocol")
+            return
+
+        if self._disconnect_requested:
+            _LOGGER.info("Serial port closed intentionally")
+        else:
+            _LOGGER.warning("Serial port connection lost: %s", exc)
+
+        self._transport = None
+        self._protocol = None
+        self._is_connected = False
+        self._device_mode = None
+        self._pairing_active = False
+        self._clear_pending_transmit()
+        self._transmit_busy = False
+        self._transmitter_active = False
+        self._transmitter_idle.set()
+        self._busy_latched = False
+
+        error = ConnectionError(f"serial connection lost: {exc}")
+        for future in (
+            self._verify_future,
+            self._device_id_future,
+            self._pairing_future,
+        ):
+            if future is not None and not future.done():
+                future.set_exception(error)
+
+        self._update_status()
+        if not self._disconnect_requested:
+            self._schedule_reconnect()
+
+    def _is_transmit_capable(self) -> bool:
+        """Return whether normal RF commands may use the current stick mode."""
+        return (
+            self._is_connected
+            and self._transport is not None
+            and not self._transport.is_closing()
+            and self._device_mode == "listening"
+            and not self._pairing_active
+            and not self._busy_latched
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -818,13 +1046,39 @@ class SchellenbergUsbApi:
 
     @property
     def device_mode(self) -> str | None:
-        """Return the device mode (boot, initial, or listening)."""
+        """Return the device mode (bootloader, initial, listening, or pairing)."""
         return self._device_mode
 
     @property
     def hub_id(self) -> str | None:
         """Return the hub device ID."""
         return self._hub_id
+
+    @property
+    def pairing_active(self) -> bool:
+        """Return whether a pairing workflow currently owns the stick."""
+        return self._pairing_active
+
+    @property
+    def busy_latched(self) -> bool:
+        """Return whether a busy timeout requires reset/reconnect."""
+        return self._busy_latched
+
+    @property
+    def transmitter_active(self) -> bool:
+        """Return whether t1 was seen without a subsequent t0."""
+        return self._transmitter_active
+
+    @property
+    def transmit_ready(self) -> bool:
+        """Return whether a new Developer Tools command can be sent immediately."""
+        return (
+            self._is_transmit_capable()
+            and self._transmitter_idle.is_set()
+            and self._pending_retry_command is None
+            and not self._transmit_busy
+            and not self._transmit_lock.locked()
+        )
 
     # LED Control Methods
     async def led_on(self) -> None:
@@ -931,25 +1185,22 @@ class SchellenbergUsbApi:
 
     # USB Stick System Commands
     async def get_device_id(self) -> str | None:
-        """Get the USB stick's unique device ID.
-
-        Returns the device ID string or None if request fails.
-        """
+        """Get the USB stick's unique device ID."""
         if self._device_id_future and not self._device_id_future.done():
             _LOGGER.warning("Device ID request already in progress")
             return None
 
         _LOGGER.debug("Requesting device ID")
         self._device_id_future = self.hass.loop.create_future()
-
         try:
-            # Send the request command
-            await self.send_command(CMD_GET_DEVICE_ID)
-
-            # Wait for device ID response with timeout
+            if not await self.send_command(CMD_GET_DEVICE_ID):
+                return None
             device_id = await asyncio.wait_for(self._device_id_future, timeout=5)
         except TimeoutError:
             _LOGGER.error("Device ID request timeout - device did not respond")
+            return None
+        except ConnectionError as err:
+            _LOGGER.error("Device ID request interrupted: %s", err)
             return None
         else:
             _LOGGER.info("Device ID retrieved successfully: %s", device_id)
@@ -983,14 +1234,68 @@ class SchellenbergUsbApi:
         await self.send_command(CMD_REBOOT)
 
     async def disconnect(self) -> None:
-        """Disconnect from the serial port."""
-        self._clear_pending_transmit()
-        self._transmit_busy = False
+        """Disconnect intentionally and cancel all pending serial work."""
+        self._disconnect_requested = True
+        self._cancel_scheduled_reconnect()
 
-        if self._transport:
-            self._transport.close()
-            self._transport = None
-            _LOGGER.info("Disconnected from Schellenberg USB stick")
+        self._clear_pending_transmit()
+        stop_task = self._stop_pairing_task
+        self._stop_pairing_task = None
+        if (
+            stop_task is not None
+            and stop_task is not asyncio.current_task()
+            and not stop_task.done()
+        ):
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+
+        error = ConnectionError("serial connection closed")
+        for future in (
+            self._verify_future,
+            self._device_id_future,
+            self._pairing_future,
+        ):
+            if future is not None and not future.done():
+                future.set_exception(error)
+
+        transport = self._transport
+        self._transport = None
+        self._protocol = None
+        self._is_connected = False
+        self._device_mode = None
+        self._pairing_active = False
+        self._transmit_busy = False
+        self._transmitter_active = False
+        self._transmitter_idle.set()
+        self._busy_latched = False
+        if transport is not None:
+            transport.close()
+        self._update_status()
+        _LOGGER.info("Disconnected from Schellenberg USB stick")
+
+    async def reset_and_reconnect(self) -> bool:
+        """Close and reopen the serial port, restoring listening mode."""
+        _LOGGER.warning(
+            "Resetting Schellenberg stick serial state connected=%s mode=%s "
+            "pairing=%s transmitter_active=%s busy_latched=%s",
+            self._is_connected,
+            self._device_mode,
+            self._pairing_active,
+            self._transmitter_active,
+            self._busy_latched,
+        )
+        await self.disconnect()
+        await asyncio.sleep(RESET_SETTLE_DELAY)
+        connected = await self.connect()
+        ready = connected and self.transmit_ready
+        _LOGGER.log(
+            logging.INFO if ready else logging.ERROR,
+            "Stick reset/reconnect completed connected=%s mode=%s ready=%s",
+            self._is_connected,
+            self._device_mode,
+            ready,
+        )
+        return ready
 
 
 class SchellenbergProtocol(asyncio.Protocol):
@@ -1021,5 +1326,4 @@ class SchellenbergProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         """Called when the connection is lost."""
-        _LOGGER.warning("Serial port connection lost: %s", exc)
-        self.api.update_connection_status(False)
+        self.api.handle_connection_lost(self, exc)

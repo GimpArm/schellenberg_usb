@@ -716,12 +716,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Show live protocol diagnostics and direct test actions."""
         details, last_received = self._developer_snapshot()
+        api = self._get_entry().runtime_data
         return self.async_show_menu(
             step_id="developer_tools",
             menu_options=[
                 "test_open",
                 "test_close",
                 "test_stop",
+                "reset_stick",
                 "copy_diagnostics",
             ],
             description_placeholders={
@@ -732,12 +734,25 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "last_time": last_received["time"],
                 "command_device_id": details["command_device_id"],
                 "command_enum": details["command_enum"],
+                "stick_connected": str(api.is_connected),
+                "stick_mode": str(api.device_mode or "unknown"),
+                "stick_ready": str(api.transmit_ready),
+                "stick_busy": str(api.busy_latched),
                 "result": self._developer_notice,
             },
         )
 
     async def _async_developer_command(self, command: str) -> SubentryFlowResult:
         """Send one logical command from the developer tools menu."""
+        api = self._get_entry().runtime_data
+        if not api.transmit_ready:
+            self._developer_notice = (
+                f"{command.title()} command blocked: stick is not ready "
+                f"(connected={api.is_connected}, mode={api.device_mode or 'unknown'}, "
+                f"busy={api.busy_latched}). Use Reset stick / reconnect serial."
+            )
+            return await self.async_step_developer_tools()
+
         details = self._developer_details()
         invert_direction = details["invert_direction"]
         action = {
@@ -745,7 +760,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "close": CMD_UP if invert_direction else CMD_DOWN,
             "stop": CMD_STOP,
         }[command]
-        sent = await self._get_entry().runtime_data.control_blind(
+        sent = await api.control_blind(
             details["command_enum"],
             action,
             device_id=details["command_device_id"],
@@ -775,6 +790,23 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         """Send a direct stop test command."""
         return await self._async_developer_command("stop")
 
+    async def async_step_reset_stick(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Reset local stick state and reopen the serial connection."""
+        api = self._get_entry().runtime_data
+        ready = await api.reset_and_reconnect()
+        self._developer_notice = (
+            "Stick reset and serial reconnect completed; ready for transmit."
+            if ready
+            else (
+                "Stick reset/reconnect did not become ready "
+                f"(connected={api.is_connected}, mode={api.device_mode or 'unknown'}). "
+                "Check the integration logs and USB connection."
+            )
+        )
+        return await self.async_step_developer_tools()
+
     async def async_step_copy_diagnostics(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -783,10 +815,19 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             return await self.async_step_developer_tools()
 
         details, last_received = self._developer_snapshot()
+        api = self._get_entry().runtime_data
         diagnostics = "\n".join(
             (
                 "Schellenberg USB blind diagnostics",
                 f"Selected blind: {details['name']}",
+                "",
+                "Stick state:",
+                f"Connected: {api.is_connected}",
+                f"Mode: {api.device_mode or 'unknown'}",
+                f"Ready: {api.transmit_ready}",
+                f"Pairing active: {api.pairing_active}",
+                f"Transmitter active: {api.transmitter_active}",
+                f"Busy latched: {api.busy_latched}",
                 "",
                 "Last received:",
                 f"Device ID: {last_received['device_id']}",

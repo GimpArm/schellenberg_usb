@@ -16,6 +16,7 @@ EXPECTED_MENU_OPTIONS = {
         "test_open",
         "test_close",
         "test_stop",
+        "reset_stick",
         "copy_diagnostics",
     },
 }

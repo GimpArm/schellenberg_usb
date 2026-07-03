@@ -336,6 +336,13 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
         "time": "17:32:14",
     }
     api.control_blind = AsyncMock(return_value=True)
+    api.reset_and_reconnect = AsyncMock(return_value=True)
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
     entry = MagicMock(runtime_data=api)
 
     with (
@@ -344,6 +351,7 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     ):
         result = await flow.async_step_developer_tools()
         command_result = await flow.async_step_test_open()
+        reset_result = await flow.async_step_reset_stick()
         copy_result = await flow.async_step_copy_diagnostics()
 
     placeholders = result["description_placeholders"]
@@ -356,18 +364,60 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
         "test_open",
         "test_close",
         "test_stop",
+        "reset_stick",
         "copy_diagnostics",
     ]
     api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
+    api.reset_and_reconnect.assert_awaited_once_with()
     command_placeholders = command_result["description_placeholders"]
     assert command_placeholders is not None
     assert "queued successfully" in command_placeholders["result"]
+    reset_placeholders = reset_result["description_placeholders"]
+    assert reset_placeholders is not None
+    assert "ready for transmit" in reset_placeholders["result"]
     schema = copy_result["data_schema"]
     assert schema is not None
     diagnostics = schema({})["diagnostics"]
     assert "Selected blind: Sitting room door" in diagnostics
     assert "Device ID: 3720B8" in diagnostics
     assert "Device ID: F2B8D5" in diagnostics
+    assert "Mode: listening" in diagnostics
+    assert "Ready: True" in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_developer_command_is_blocked_when_stick_is_not_ready() -> None:
+    """Test Developer Tools does not queue commands in a non-ready state."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Blind",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "08",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "0D",
+        },
+    )
+    api = MagicMock()
+    api.get_last_received.return_value = None
+    api.control_blind = AsyncMock()
+    api.is_connected = True
+    api.device_mode = "pairing"
+    api.transmit_ready = False
+    api.busy_latched = True
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        result = await flow.async_step_test_stop()
+
+    api.control_blind.assert_not_awaited()
+    placeholders = result["description_placeholders"]
+    assert placeholders is not None
+    assert "command blocked" in placeholders["result"]
+    assert "Reset stick / reconnect serial" in placeholders["result"]
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,20 @@ async def test_handle_message_device_verification_response(hass: HomeAssistant) 
 
 
 @pytest.mark.asyncio
+async def test_handle_message_device_verification_listening_mode(
+    hass: HomeAssistant,
+) -> None:
+    """Test B:2 is retained as the transmit-capable listening mode."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api._verify_future = hass.loop.create_future()
+
+    with patch("custom_components.schellenberg_usb.api.async_dispatcher_send"):
+        api._handle_message("RFTU_V20 F:20180510_DFBD B:2")
+
+    assert api._device_mode == "listening"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_device_verification_bootloader_mode(
     hass: HomeAssistant,
 ) -> None:
@@ -78,20 +92,30 @@ async def test_handle_message_device_verification_no_boot_mode(
 
 @pytest.mark.asyncio
 async def test_handle_message_transmit_ack_t1(hass: HomeAssistant) -> None:
-    """Test handling transmit acknowledgment t1."""
+    """Test t1 starts RF transmission but does not mark it completed."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api._pending_retry_command = "ss089010000"
 
-    # Should not raise any errors
     api._handle_message("t1")
+
+    assert api.transmitter_active is True
+    assert api._transmitter_idle.is_set() is False
+    assert api._pending_retry_command == "ss089010000"
 
 
 @pytest.mark.asyncio
 async def test_handle_message_transmit_ack_t0(hass: HomeAssistant) -> None:
-    """Test handling transmit acknowledgment t0."""
+    """Test t0 marks RF transmission complete and clears pending state."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api._pending_retry_command = "ss0D9020000"
+    api._transmitter_active = True
+    api._transmitter_idle.clear()
 
-    # Should not raise any errors
     api._handle_message("t0")
+
+    assert api.transmitter_active is False
+    assert api._transmitter_idle.is_set() is True
+    assert api._pending_retry_command is None
 
 
 @pytest.mark.asyncio
@@ -122,9 +146,11 @@ async def test_busy_burst_keeps_existing_retry_task(
         await real_sleep(0)
 
         api._handle_message("tE")
-
         assert api._retry_task is first_retry
         assert not first_retry.cancelled()
+
+        api._handle_message("t0")
+        await real_sleep(0)
         release_retry.set()
         await first_retry
 
@@ -133,7 +159,7 @@ async def test_busy_burst_keeps_existing_retry_task(
 
 @pytest.mark.asyncio
 async def test_busy_retry_stops_after_max_attempts(hass: HomeAssistant) -> None:
-    """Test a permanently busy stick cannot create an infinite retry loop."""
+    """Test repeated busy/idle responses cannot create an infinite retry loop."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
@@ -149,6 +175,7 @@ async def test_busy_retry_stops_after_max_attempts(hass: HomeAssistant) -> None:
             api._handle_message("tE")
             retry_task = api._retry_task
             assert retry_task is not None
+            api._handle_message("t0")
             await retry_task
 
         api._handle_message("tE")
@@ -158,6 +185,32 @@ async def test_busy_retry_stops_after_max_attempts(hass: HomeAssistant) -> None:
     assert api._retry_task is None
     assert api._transmit_busy is False
     assert api._transmit_lock.locked() is False
+    assert api.busy_latched is True
+
+
+@pytest.mark.asyncio
+async def test_busy_without_idle_times_out_and_requires_reset(
+    hass: HomeAssistant,
+) -> None:
+    """Test a missing t0 abandons the command without scheduling forever."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    await api.send_command("ss089010000")
+
+    with patch.object(
+        api, "_wait_for_transmitter_idle", new=AsyncMock(return_value=False)
+    ):
+        api._handle_message("tE")
+        retry_task = api._retry_task
+        assert retry_task is not None
+        await retry_task
+
+    assert mock_transport.write.call_count == 1
+    assert api._retry_task is None
+    assert api._pending_retry_command is None
+    assert api.busy_latched is True
 
 
 @pytest.mark.asyncio
