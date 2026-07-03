@@ -1,0 +1,361 @@
+diff --git a/custom_components/schellenberg_usb/__init__.py b/custom_components/schellenberg_usb/__init__.py
+index 0549a63..958b0d9 100644
+--- a/custom_components/schellenberg_usb/__init__.py
++++ b/custom_components/schellenberg_usb/__init__.py
+@@ -36,9 +36,6 @@ CONFIG_SCHEMA = vol.Schema(
+     extra=vol.ALLOW_EXTRA,
+ )
+ 
+-# Store setup callbacks for each entry so we can track subentries
+-_SETUP_CALLBACKS: dict[str, dict] = {}
+-
+ 
+ def _validate_device_id(value: str) -> str:
+     """Validate and normalize a six-character protocol device ID."""
+@@ -199,41 +196,39 @@ async def async_setup_entry(
+     # Forward setup to the hub's platforms (cover, sensor, switch)
+     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+ 
+-    # Reload when subentries are added, removed, renamed, or edited.
++    # Reload when blind subentries are added, removed, renamed, or edited.
++    known_subentries = {
++        subentry_id: (
++            subentry.subentry_type,
++            subentry.title,
++            subentry.unique_id,
++            dict(subentry.data),
++        )
++        for subentry_id, subentry in entry.subentries.items()
++    }
++
+     async def _on_entry_updated(
+         hass_instance: HomeAssistant, updated_entry: SchellenbergConfigEntry
+     ) -> None:
+         """Handle changes to the hub's blind subentries."""
++        nonlocal known_subentries
+         current_subentries = {
+-            subentry_id: (subentry.title, dict(subentry.data))
++            subentry_id: (
++                subentry.subentry_type,
++                subentry.title,
++                subentry.unique_id,
++                dict(subentry.data),
++            )
+             for subentry_id, subentry in updated_entry.subentries.items()
+         }
+-        known_subentries = _SETUP_CALLBACKS.get(entry.entry_id, {}).get(
+-            "subentries", {}
+-        )
+-
+-        _LOGGER.debug(
+-            "Entry update detected. Current subentries: %s, Known subentries: %s",
+-            current_subentries,
+-            known_subentries,
+-        )
+-
+         if current_subentries != known_subentries:
+             _LOGGER.info(
+                 "Subentry configuration changed; reloading entry %s", entry.entry_id
+             )
+-            _SETUP_CALLBACKS[entry.entry_id]["subentries"] = current_subentries
++            known_subentries = current_subentries
+             await hass_instance.config_entries.async_reload(entry.entry_id)
+ 
+-    entry.add_update_listener(_on_entry_updated)
+-
+-    # Track known subentries
+-    if entry.entry_id not in _SETUP_CALLBACKS:
+-        _SETUP_CALLBACKS[entry.entry_id] = {}
+-    _SETUP_CALLBACKS[entry.entry_id]["subentries"] = {
+-        subentry_id: (subentry.title, dict(subentry.data))
+-        for subentry_id, subentry in entry.subentries.items()
+-    }
++    entry.async_on_unload(entry.add_update_listener(_on_entry_updated))
+ 
+     return True
+ 
+diff --git a/custom_components/schellenberg_usb/cover.py b/custom_components/schellenberg_usb/cover.py
+index ef702e9..d07f77f 100644
+--- a/custom_components/schellenberg_usb/cover.py
++++ b/custom_components/schellenberg_usb/cover.py
+@@ -41,7 +41,7 @@ from .const import (
+     SIGNAL_CALIBRATION_COMPLETED,
+     SIGNAL_DEVICE_EVENT,
+     SIGNAL_STICK_STATUS_UPDATED,
+-    SUBENTRY_TYPE_LED,
++    SUBENTRY_TYPE_BLIND,
+     SchellenbergConfigEntry,
+ )
+ 
+@@ -72,19 +72,20 @@ async def async_setup_entry(
+         api = entry.runtime_data
+ 
+         # Get paired devices from subentries
+-        subentries = entry.subentries.values()
+-        _LOGGER.info("Hub has %d subentries (paired devices)", len(entry.subentries))
+-
+-        if not entry.subentries:
+-            _LOGGER.info("No subentries (paired devices) found for hub")
++        subentries = [
++            subentry
++            for subentry in entry.subentries.values()
++            if subentry.subentry_type == SUBENTRY_TYPE_BLIND
++        ]
++        _LOGGER.info("Hub has %d saved blind subentries", len(subentries))
++
++        if not subentries:
++            _LOGGER.info("No saved blind subentries found for hub")
+             return
+ 
+-        _LOGGER.info("Loading %d paired Schellenberg devices", len(entry.subentries))
++        _LOGGER.info("Loading %d saved Schellenberg blinds", len(subentries))
+ 
+         for subentry in subentries:
+-            # Skip LED subentry; handled by switch platform
+-            if subentry.subentry_type == SUBENTRY_TYPE_LED:
+-                continue
+             legacy_device_id = subentry.data.get(CONF_DEVICE_ID)
+             legacy_device_enum = subentry.data.get(CONF_DEVICE_ENUM)
+             command_device_id = (
+diff --git a/tests/test_config_flow.py b/tests/test_config_flow.py
+index 3e39f78..a4ca84b 100644
+--- a/tests/test_config_flow.py
++++ b/tests/test_config_flow.py
+@@ -6,8 +6,10 @@ from types import MappingProxyType
+ from unittest.mock import AsyncMock, MagicMock, call, patch
+ 
+ import pytest
+-from homeassistant.config_entries import ConfigSubentryFlow, SOURCE_USER
++from homeassistant.config_entries import ConfigEntries, ConfigSubentryFlow, SOURCE_USER
++from homeassistant.core import HomeAssistant
+ from homeassistant.data_entry_flow import FlowResultType
++from pytest_homeassistant_custom_component.common import MockConfigEntry
+ 
+ from custom_components.schellenberg_usb.config_flow import (
+     SchellenbergPairingSubentryFlow,
+@@ -28,6 +30,8 @@ from custom_components.schellenberg_usb.const import (
+     CONF_OPEN_TIME_SECONDS,
+     CONF_STATUS_DEVICE_ID,
+     CONF_STATUS_ENUM,
++    DOMAIN,
++    SUBENTRY_TYPE_BLIND,
+ )
+ from custom_components.schellenberg_usb.options_flow_calibration import (
+     CalibrationFlowHandler,
+@@ -128,6 +132,60 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
+     assert result["unique_id"] == "F2B8D5"
+ 
+ 
++@pytest.mark.asyncio
++async def test_manual_subentry_persists_through_storage_reload(
++    hass: HomeAssistant,
++    enable_custom_integrations: None,
++) -> None:
++    """Test manual add is committed by HA and survives config-entry hydration."""
++    entry = MockConfigEntry(
++        domain=DOMAIN,
++        data={"serial_port": "/dev/ttyUSB0"},
++        title="Schellenberg USB",
++    )
++    entry.add_to_hass(hass)
++
++    result = await hass.config_entries.subentries.async_init(
++        (entry.entry_id, SUBENTRY_TYPE_BLIND),
++        context={"source": SOURCE_USER},
++    )
++    result = await hass.config_entries.subentries.async_configure(
++        result["flow_id"], {"next_step_id": "manual"}
++    )
++    result = await hass.config_entries.subentries.async_configure(
++        result["flow_id"],
++        {
++            CONF_DEVICE_NAME: "Sitting room door",
++            CONF_DEVICE_ID: "F2B8D5",
++            CONF_DEVICE_ENUM: "23",
++            CONF_STATUS_DEVICE_ID: "3720B8",
++            CONF_STATUS_ENUM: "08",
++            CONF_OPEN_TIME_SECONDS: 25.06,
++            CONF_CLOSE_TIME_SECONDS: 23.05,
++            CONF_INVERT_DIRECTION: False,
++        },
++    )
++    await hass.config_entries.subentries.async_configure(
++        result["flow_id"], {"next_step_id": "save_manual"}
++    )
++    saved_subentry_id = next(iter(entry.subentries))
++
++    await hass.config_entries._store.async_save(hass.config_entries._data_to_save())
++    restarted_config_entries = ConfigEntries(hass, {})
++    await restarted_config_entries.async_initialize()
++    restored = restarted_config_entries.async_get_entry(entry.entry_id)
++
++    assert restored is not None
++    assert len(restored.subentries) == 1
++    subentry = next(iter(restored.subentries.values()))
++    assert subentry.subentry_id == saved_subentry_id
++    assert subentry.subentry_type == SUBENTRY_TYPE_BLIND
++    assert subentry.title == "Sitting room door"
++    assert subentry.unique_id == "F2B8D5"
++    assert subentry.data[CONF_STATUS_DEVICE_ID] == "3720B8"
++    assert subentry.data[CONF_OPEN_TIME] == 25.06
++
++
+ @pytest.mark.asyncio
+ async def test_manual_setup_validates_protocol_values() -> None:
+     """Test validation of command/status identities and travel times."""
+diff --git a/tests/test_cover.py b/tests/test_cover.py
+index 99d3f96..f6813bc 100644
+--- a/tests/test_cover.py
++++ b/tests/test_cover.py
+@@ -15,12 +15,19 @@ from homeassistant.helpers import device_registry as dr
+ from custom_components.schellenberg_usb.api import SchellenbergUsbApi
+ from custom_components.schellenberg_usb.const import (
+     CONF_CLOSE_TIME,
++    CONF_COMMAND_DEVICE_ID,
++    CONF_COMMAND_ENUM,
++    CONF_DEVICE_ENUM,
++    CONF_DEVICE_ID,
+     CONF_OPEN_TIME,
+     CONF_SERIAL_PORT,
++    CONF_STATUS_DEVICE_ID,
++    CONF_STATUS_ENUM,
+     DOMAIN,
+     EVENT_STARTED_MOVING_DOWN,
+     EVENT_STARTED_MOVING_UP,
+     EVENT_STOPPED,
++    SUBENTRY_TYPE_BLIND,
+ )
+ from custom_components.schellenberg_usb.cover import (
+     DEFAULT_TRAVEL_TIME,
+@@ -57,6 +64,7 @@ def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
+     # Create a real subentry dict instead of MagicMock to avoid serialization issues
+     subentry = MagicMock()
+     subentry.subentry_id = "sub1"
++    subentry.subentry_type = SUBENTRY_TYPE_BLIND
+     subentry.data = {
+         "device_id": "ABC123",
+         "device_enum": "01",
+@@ -116,6 +124,60 @@ async def test_async_setup_entry_creates_covers(
+     assert entities[0]._device_enum == "01"
+ 
+ 
++@pytest.mark.asyncio
++async def test_setup_restores_manual_cover_from_persisted_subentry(
++    hass: HomeAssistant,
++    mock_api: SchellenbergUsbApi,
++) -> None:
++    """Test a stored manual blind is recreated during platform setup."""
++    entry = ConfigEntry(
++        version=1,
++        minor_version=1,
++        domain=DOMAIN,
++        title="Schellenberg USB",
++        data={CONF_SERIAL_PORT: "/dev/ttyUSB0"},
++        options={},
++        source="user",
++        unique_id="/dev/ttyUSB0",
++        discovery_keys=MappingProxyType({}),
++        subentries_data=[
++            {
++                "subentry_id": "manual_blind",
++                "subentry_type": SUBENTRY_TYPE_BLIND,
++                "title": "Sitting room door",
++                "unique_id": "F2B8D5",
++                "data": {
++                    CONF_DEVICE_ID: "F2B8D5",
++                    CONF_DEVICE_ENUM: "23",
++                    CONF_COMMAND_DEVICE_ID: "F2B8D5",
++                    CONF_COMMAND_ENUM: "23",
++                    CONF_STATUS_DEVICE_ID: "3720B8",
++                    CONF_STATUS_ENUM: "08",
++                    CONF_OPEN_TIME: 25.06,
++                    CONF_CLOSE_TIME: 23.05,
++                },
++            }
++        ],
++    )
++    entry.runtime_data = mock_api
++    hass.config_entries._entries[entry.entry_id] = entry
++    add_entities = MagicMock()
++
++    await async_setup_entry(hass, entry, add_entities)
++
++    add_entities.assert_called_once()
++    assert add_entities.call_args.kwargs == {"config_subentry_id": "manual_blind"}
++    cover = add_entities.call_args.args[0][0]
++    assert isinstance(cover, SchellenbergCover)
++    assert cover.name == "Sitting room door"
++    assert cover.unique_id == "schellenberg_F2B8D5"
++    assert cover._command_enum == "23"
++    assert cover._status_device_id == "3720B8"
++    assert cover._status_enum == "08"
++    assert cover._travel_time_open == 25.06
++    assert cover._travel_time_close == 23.05
++
++
+ @pytest.mark.asyncio
+ async def test_cover_initialization(
+     hass: HomeAssistant,
+diff --git a/tests/test_init.py b/tests/test_init.py
+index a28d5a9..9b8a312 100644
+--- a/tests/test_init.py
++++ b/tests/test_init.py
+@@ -6,7 +6,7 @@ from types import MappingProxyType
+ from unittest.mock import AsyncMock, patch
+ 
+ import pytest
+-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
++from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+ from homeassistant.core import HomeAssistant
+ from homeassistant.helpers import device_registry as dr
+ 
+@@ -20,6 +20,7 @@ from custom_components.schellenberg_usb.const import (
+     DOMAIN,
+     PLATFORMS,
+     SERVICE_TEST_COMMAND,
++    SUBENTRY_TYPE_BLIND,
+ )
+ 
+ 
+@@ -67,6 +68,41 @@ async def test_async_setup_entry_basic(
+         assert isinstance(mock_config_entry.runtime_data, SchellenbergUsbApi)
+ 
+ 
++@pytest.mark.asyncio
++async def test_subentry_change_listener_reloads_once_and_is_removed_on_unload(
++    hass: HomeAssistant, mock_config_entry: ConfigEntry
++) -> None:
++    """Test subentry reload listeners do not accumulate across reloads."""
++    from custom_components.schellenberg_usb import async_setup_entry
++
++    with (
++        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
++        patch.object(
++            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
++        ),
++        patch.object(
++            hass.config_entries, "async_reload", new_callable=AsyncMock
++        ) as reload_entry,
++    ):
++        await async_setup_entry(hass, mock_config_entry)
++        hass.config_entries.async_add_subentry(
++            mock_config_entry,
++            ConfigSubentry(
++                data=MappingProxyType({CONF_DEVICE_ID: "F2B8D5"}),
++                subentry_type=SUBENTRY_TYPE_BLIND,
++                title="Sitting room door",
++                unique_id="F2B8D5",
++            ),
++        )
++        await hass.async_block_till_done()
++
++        reload_entry.assert_awaited_once_with(mock_config_entry.entry_id)
++        assert len(mock_config_entry.update_listeners) == 1
++        await mock_config_entry._async_process_on_unload(hass)
++
++    assert mock_config_entry.update_listeners == []
++
++
+ @pytest.mark.asyncio
+ async def test_async_setup_registers_test_command_service(
+     hass: HomeAssistant, mock_config_entry: ConfigEntry

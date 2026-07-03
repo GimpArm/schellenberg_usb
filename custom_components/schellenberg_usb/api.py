@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
-import serial_asyncio
+import serial
+import serial_asyncio_fast
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
@@ -100,15 +101,15 @@ class SchellenbergUsbApi:
         self._is_connecting = True
         _LOGGER.info("Connecting to Schellenberg USB stick at %s", self.port)
         try:
-            (
-                self._transport,
-                self._protocol,
-            ) = await serial_asyncio.create_serial_connection(
+            transport, protocol = await serial_asyncio_fast.create_serial_connection(
                 self.hass.loop,
                 lambda: SchellenbergProtocol(self._handle_message, self),
                 self.port,
                 baudrate=112500,
             )
+            self._transport = transport
+            # The factory above always creates this concrete protocol type.
+            self._protocol = cast(SchellenbergProtocol, protocol)
             self._is_connecting = False
             _LOGGER.info("Successfully connected to Schellenberg USB stick")
 
@@ -149,7 +150,7 @@ class SchellenbergUsbApi:
                 _LOGGER.info("Hub device ID retrieved: %s", self._hub_id)
             else:
                 _LOGGER.warning("Failed to retrieve hub device ID")
-        except (serial_asyncio.serial.SerialException, OSError) as err:
+        except (serial.SerialException, OSError) as err:
             _LOGGER.error(
                 "Failed to connect to %s: %s. Retrying in 5 seconds",
                 self.port,

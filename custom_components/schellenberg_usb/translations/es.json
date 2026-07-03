@@ -46,7 +46,8 @@
           "title": "Añadir una persiana",
           "menu_options": {
             "pair_device": "Emparejar y calibrar",
-            "manual": "Añadir manualmente"
+            "manual": "Añadir manualmente",
+            "pair_test": "Pair and test (recommended)"
           }
         },
         "pair_device": {
@@ -62,7 +63,10 @@
             "device_id": "ID del dispositivo",
             "device_enum": "Enum",
             "open_time_seconds": "Tiempo de apertura",
-            "close_time_seconds": "Tiempo de cierre"
+            "close_time_seconds": "Tiempo de cierre",
+            "status_device_id": "Status device ID (optional)",
+            "status_enum": "Status enum (optional)",
+            "invert_direction": "Invert open/close direction"
           },
           "submit": "Añadir"
         },
@@ -92,6 +96,89 @@
           "title": "Calibración completada",
           "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.",
           "submit": "Hecho"
+        },
+        "pair_test": {
+          "title": "Pair and test",
+          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
+          "submit": "Pair"
+        },
+        "manual_next": {
+          "title": "Manual blind ready",
+          "menu_options": {
+            "test_motor": "Test motor command",
+            "save_manual": "Save without testing"
+          }
+        },
+        "test_motor": {
+          "title": "Test motor command",
+          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
+          "submit": "Test"
+        },
+        "did_motor_move": {
+          "title": "Did the motor move?",
+          "description": "Tested command identity {device_id}/{device_enum}.",
+          "data": {
+            "motor_moved": "The motor moved"
+          },
+          "submit": "Continue"
+        },
+        "test_success": {
+          "title": "Command test successful",
+          "menu_options": {
+            "calibration_close": "Continue to calibration",
+            "manual_times": "Save with manual travel times"
+          }
+        },
+        "manual_times": {
+          "title": "Enter travel times",
+          "description": "Enter the measured full opening and closing times.",
+          "data": {
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time"
+          },
+          "submit": "Save"
+        },
+        "reconfigure": {
+          "title": "Configure blind",
+          "menu_options": {
+            "edit": "Edit identities and travel times",
+            "test_existing": "Test motor command",
+            "developer_tools": "Developer tools",
+            "calibrate": "Calibrate"
+          }
+        },
+        "developer_tools": {
+          "title": "Developer tools",
+          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
+          "menu_options": {
+            "test_open": "Test Open",
+            "test_close": "Test Close",
+            "test_stop": "Test Stop",
+            "copy_diagnostics": "Copy diagnostics"
+          }
+        },
+        "copy_diagnostics": {
+          "title": "Copy diagnostics",
+          "description": "Select and copy the diagnostic text below. Press Submit to return.",
+          "data": {
+            "diagnostics": "Diagnostics"
+          },
+          "submit": "Return"
+        },
+        "edit": {
+          "title": "Edit blind settings",
+          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Command device ID",
+            "device_enum": "Command enum",
+            "status_device_id": "Status device ID (optional)",
+            "status_enum": "Status enum (optional)",
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time",
+            "invert_direction": "Invert open/close direction"
+          },
+          "submit": "Save"
         }
       },
       "error": {
@@ -104,12 +191,14 @@
         "pairing_failed": "Error en el emparejamiento.",
         "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",
         "calibration_start_timeout": "Tiempo de espera agotado para que la persiana comience a moverse. Por favor, asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
-        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo."
+        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
+        "command_failed": "The serial command could not be queued. Check the USB connection and logs."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
         "pairing_failed": "Error en el emparejamiento.",
-        "reconfigure_successful": "Calibración completada con éxito"
+        "reconfigure_successful": "Calibración completada con éxito",
+        "command_test_successful": "The motor command test succeeded."
       }
     }
   },
@@ -151,6 +240,10 @@
     "pair": {
       "name": "Emparejar dispositivo",
       "description": "Active el modo de emparejamiento en la memoria USB Schellenberg para emparejar un nuevo motor de persiana. Después de llamar a este servicio, presione el botón de emparejamiento en su motor de persiana en los próximos 10 segundos."
+    },
+    "test_command": {
+      "name": "Test blind command",
+      "description": "Send open, close, or stop to a device enum without creating a cover."
     }
   }
 }

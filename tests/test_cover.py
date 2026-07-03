@@ -15,12 +15,19 @@ from homeassistant.helpers import device_registry as dr
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
     CONF_CLOSE_TIME,
+    CONF_COMMAND_DEVICE_ID,
+    CONF_COMMAND_ENUM,
+    CONF_DEVICE_ENUM,
+    CONF_DEVICE_ID,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
+    CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_ENUM,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
+    SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.cover import (
     DEFAULT_TRAVEL_TIME,
@@ -57,6 +64,7 @@ def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
     # Create a real subentry dict instead of MagicMock to avoid serialization issues
     subentry = MagicMock()
     subentry.subentry_id = "sub1"
+    subentry.subentry_type = SUBENTRY_TYPE_BLIND
     subentry.data = {
         "device_id": "ABC123",
         "device_enum": "01",
@@ -114,6 +122,60 @@ async def test_async_setup_entry_creates_covers(
     assert isinstance(entities[0], SchellenbergCover)
     assert entities[0]._device_id == "ABC123"
     assert entities[0]._device_enum == "01"
+
+
+@pytest.mark.asyncio
+async def test_setup_restores_manual_cover_from_persisted_subentry(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test a stored manual blind is recreated during platform setup."""
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=DOMAIN,
+        title="Schellenberg USB",
+        data={CONF_SERIAL_PORT: "/dev/ttyUSB0"},
+        options={},
+        source="user",
+        unique_id="/dev/ttyUSB0",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=[
+            {
+                "subentry_id": "manual_blind",
+                "subentry_type": SUBENTRY_TYPE_BLIND,
+                "title": "Sitting room door",
+                "unique_id": "F2B8D5",
+                "data": {
+                    CONF_DEVICE_ID: "F2B8D5",
+                    CONF_DEVICE_ENUM: "23",
+                    CONF_COMMAND_DEVICE_ID: "F2B8D5",
+                    CONF_COMMAND_ENUM: "23",
+                    CONF_STATUS_DEVICE_ID: "3720B8",
+                    CONF_STATUS_ENUM: "08",
+                    CONF_OPEN_TIME: 25.06,
+                    CONF_CLOSE_TIME: 23.05,
+                },
+            }
+        ],
+    )
+    entry.runtime_data = mock_api
+    hass.config_entries._entries[entry.entry_id] = entry
+    add_entities = MagicMock()
+
+    await async_setup_entry(hass, entry, add_entities)
+
+    add_entities.assert_called_once()
+    assert add_entities.call_args.kwargs == {"config_subentry_id": "manual_blind"}
+    cover = add_entities.call_args.args[0][0]
+    assert isinstance(cover, SchellenbergCover)
+    assert cover.name == "Sitting room door"
+    assert cover.unique_id == "schellenberg_F2B8D5"
+    assert cover._command_enum == "23"
+    assert cover._status_device_id == "3720B8"
+    assert cover._status_enum == "08"
+    assert cover._travel_time_open == 25.06
+    assert cover._travel_time_close == 23.05
 
 
 @pytest.mark.asyncio

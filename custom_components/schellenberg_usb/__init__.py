@@ -36,9 +36,6 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
-# Store setup callbacks for each entry so we can track subentries
-_SETUP_CALLBACKS: dict[str, dict] = {}
-
 
 def _validate_device_id(value: str) -> str:
     """Validate and normalize a six-character protocol device ID."""
@@ -199,41 +196,39 @@ async def async_setup_entry(
     # Forward setup to the hub's platforms (cover, sensor, switch)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Reload when subentries are added, removed, renamed, or edited.
+    # Reload when blind subentries are added, removed, renamed, or edited.
+    known_subentries = {
+        subentry_id: (
+            subentry.subentry_type,
+            subentry.title,
+            subentry.unique_id,
+            dict(subentry.data),
+        )
+        for subentry_id, subentry in entry.subentries.items()
+    }
+
     async def _on_entry_updated(
         hass_instance: HomeAssistant, updated_entry: SchellenbergConfigEntry
     ) -> None:
         """Handle changes to the hub's blind subentries."""
+        nonlocal known_subentries
         current_subentries = {
-            subentry_id: (subentry.title, dict(subentry.data))
+            subentry_id: (
+                subentry.subentry_type,
+                subentry.title,
+                subentry.unique_id,
+                dict(subentry.data),
+            )
             for subentry_id, subentry in updated_entry.subentries.items()
         }
-        known_subentries = _SETUP_CALLBACKS.get(entry.entry_id, {}).get(
-            "subentries", {}
-        )
-
-        _LOGGER.debug(
-            "Entry update detected. Current subentries: %s, Known subentries: %s",
-            current_subentries,
-            known_subentries,
-        )
-
         if current_subentries != known_subentries:
             _LOGGER.info(
                 "Subentry configuration changed; reloading entry %s", entry.entry_id
             )
-            _SETUP_CALLBACKS[entry.entry_id]["subentries"] = current_subentries
+            known_subentries = current_subentries
             await hass_instance.config_entries.async_reload(entry.entry_id)
 
-    entry.add_update_listener(_on_entry_updated)
-
-    # Track known subentries
-    if entry.entry_id not in _SETUP_CALLBACKS:
-        _SETUP_CALLBACKS[entry.entry_id] = {}
-    _SETUP_CALLBACKS[entry.entry_id]["subentries"] = {
-        subentry_id: (subentry.title, dict(subentry.data))
-        for subentry_id, subentry in entry.subentries.items()
-    }
+    entry.async_on_unload(entry.add_update_listener(_on_entry_updated))
 
     return True
 

@@ -6,8 +6,10 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from homeassistant.config_entries import ConfigSubentryFlow, SOURCE_USER
+from homeassistant.config_entries import ConfigEntries, ConfigSubentryFlow, SOURCE_USER
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.schellenberg_usb.config_flow import (
     SchellenbergPairingSubentryFlow,
@@ -28,6 +30,8 @@ from custom_components.schellenberg_usb.const import (
     CONF_OPEN_TIME_SECONDS,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    DOMAIN,
+    SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.options_flow_calibration import (
     CalibrationFlowHandler,
@@ -48,6 +52,26 @@ async def test_blind_subentry_flow_shows_setup_method_menu() -> None:
 
     assert result["type"] is FlowResultType.MENU
     assert result["menu_options"] == ["pair_test", "pair_device", "manual"]
+
+
+@pytest.mark.asyncio
+async def test_all_blind_subentry_navigation_menus_expose_expected_options() -> None:
+    """Test every static subentry navigation menu uses the translated keys."""
+    flow = _create_flow()
+
+    manual_next = await flow.async_step_manual_next()
+    reconfigure = await flow.async_step_reconfigure()
+    flow._pairing_workflow = "hybrid"
+    test_success = await flow.async_step_did_motor_move({"motor_moved": True})
+
+    assert manual_next["menu_options"] == ["test_motor", "save_manual"]
+    assert reconfigure["menu_options"] == [
+        "edit",
+        "test_existing",
+        "developer_tools",
+        "calibrate",
+    ]
+    assert test_success["menu_options"] == ["calibration_close", "manual_times"]
 
 
 @pytest.mark.asyncio
@@ -126,6 +150,60 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
         CONF_INVERT_DIRECTION: False,
     }
     assert result["unique_id"] == "F2B8D5"
+
+
+@pytest.mark.asyncio
+async def test_manual_subentry_persists_through_storage_reload(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    """Test manual add is committed by HA and survives config-entry hydration."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"serial_port": "/dev/ttyUSB0"},
+        title="Schellenberg USB",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_TYPE_BLIND),
+        context={"source": SOURCE_USER},
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"next_step_id": "manual"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            CONF_DEVICE_NAME: "Sitting room door",
+            CONF_DEVICE_ID: "F2B8D5",
+            CONF_DEVICE_ENUM: "23",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "08",
+            CONF_OPEN_TIME_SECONDS: 25.06,
+            CONF_CLOSE_TIME_SECONDS: 23.05,
+            CONF_INVERT_DIRECTION: False,
+        },
+    )
+    await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"next_step_id": "save_manual"}
+    )
+    saved_subentry_id = next(iter(entry.subentries))
+
+    await hass.config_entries._store.async_save(hass.config_entries._data_to_save())
+    restarted_config_entries = ConfigEntries(hass, {})
+    await restarted_config_entries.async_initialize()
+    restored = restarted_config_entries.async_get_entry(entry.entry_id)
+
+    assert restored is not None
+    assert len(restored.subentries) == 1
+    subentry = next(iter(restored.subentries.values()))
+    assert subentry.subentry_id == saved_subentry_id
+    assert subentry.subentry_type == SUBENTRY_TYPE_BLIND
+    assert subentry.title == "Sitting room door"
+    assert subentry.unique_id == "F2B8D5"
+    assert subentry.data[CONF_STATUS_DEVICE_ID] == "3720B8"
+    assert subentry.data[CONF_OPEN_TIME] == 25.06
 
 
 @pytest.mark.asyncio
@@ -274,6 +352,12 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["last_device_id"] == "3720B8"
     assert placeholders["command_device_id"] == "F2B8D5"
     assert placeholders["command_enum"] == "23"
+    assert result["menu_options"] == [
+        "test_open",
+        "test_close",
+        "test_stop",
+        "copy_diagnostics",
+    ]
     api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
     command_placeholders = command_result["description_placeholders"]
     assert command_placeholders is not None

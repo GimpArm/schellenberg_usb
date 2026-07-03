@@ -1,0 +1,160 @@
+diff --git a/custom_components/schellenberg_usb/api.py b/custom_components/schellenberg_usb/api.py
+index f760b18..ed7cf41 100644
+--- a/custom_components/schellenberg_usb/api.py
++++ b/custom_components/schellenberg_usb/api.py
+@@ -5,9 +5,10 @@ from __future__ import annotations
+ import asyncio
+ import logging
+ from collections.abc import Callable
+-from typing import Any
++from typing import Any, cast
+ 
+-import serial_asyncio
++import serial
++import serial_asyncio_fast
+ from homeassistant.core import HomeAssistant, callback
+ from homeassistant.helpers.dispatcher import async_dispatcher_send
+ from homeassistant.util import dt as dt_util
+@@ -100,15 +101,15 @@ class SchellenbergUsbApi:
+         self._is_connecting = True
+         _LOGGER.info("Connecting to Schellenberg USB stick at %s", self.port)
+         try:
+-            (
+-                self._transport,
+-                self._protocol,
+-            ) = await serial_asyncio.create_serial_connection(
++            transport, protocol = await serial_asyncio_fast.create_serial_connection(
+                 self.hass.loop,
+                 lambda: SchellenbergProtocol(self._handle_message, self),
+                 self.port,
+                 baudrate=112500,
+             )
++            self._transport = transport
++            # The factory above always creates this concrete protocol type.
++            self._protocol = cast(SchellenbergProtocol, protocol)
+             self._is_connecting = False
+             _LOGGER.info("Successfully connected to Schellenberg USB stick")
+ 
+@@ -149,7 +150,7 @@ class SchellenbergUsbApi:
+                 _LOGGER.info("Hub device ID retrieved: %s", self._hub_id)
+             else:
+                 _LOGGER.warning("Failed to retrieve hub device ID")
+-        except (serial_asyncio.serial.SerialException, OSError) as err:
++        except (serial.SerialException, OSError) as err:
+             _LOGGER.error(
+                 "Failed to connect to %s: %s. Retrying in 5 seconds",
+                 self.port,
+diff --git a/custom_components/schellenberg_usb/manifest.json b/custom_components/schellenberg_usb/manifest.json
+index 0cd6518..0330d1d 100644
+--- a/custom_components/schellenberg_usb/manifest.json
++++ b/custom_components/schellenberg_usb/manifest.json
+@@ -7,7 +7,7 @@
+   "integration_type": "hub",
+   "iot_class": "local_push",
+   "issue_tracker": "https://github.com/GimpArm/schellenberg_usb/issues",
+-  "requirements": ["pyserial-asyncio==0.6"],
++  "requirements": ["pyserial-asyncio-fast==0.16"],
+   "usb": [
+     {
+       "vid": "16C0",
+diff --git a/pyproject.toml b/pyproject.toml
+index 3447bbb..25799c9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ version = "1.0.0"
+ readme = "README.md"
+ requires-python = ">=3.13.2"
+ dependencies = [
+-    "pyserial-asyncio==0.6",
++    "pyserial-asyncio-fast==0.16",
+ ]
+ 
+ [dependency-groups]
+diff --git a/tests/test_api.py b/tests/test_api.py
+index d3909c7..528f61f 100644
+--- a/tests/test_api.py
++++ b/tests/test_api.py
+@@ -75,7 +75,7 @@ async def test_api_connect_success(hass: HomeAssistant) -> None:
+     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+ 
+     with patch(
+-        "serial_asyncio.create_serial_connection", new_callable=AsyncMock
++        "serial_asyncio_fast.create_serial_connection", new_callable=AsyncMock
+     ) as mock_create:
+         mock_transport = MagicMock()
+         mock_protocol = MagicMock()
+@@ -84,7 +84,13 @@ async def test_api_connect_success(hass: HomeAssistant) -> None:
+         await api.connect()
+ 
+         assert api._is_connecting is False
+-        mock_create.assert_called_once()
++        mock_create.assert_awaited_once()
++        serial_call = mock_create.await_args
++        assert serial_call is not None
++        assert serial_call.args[0] is hass.loop
++        assert callable(serial_call.args[1])
++        assert serial_call.args[2] == "/dev/ttyUSB0"
++        assert serial_call.kwargs == {"baudrate": 112500}
+ 
+ 
+ @pytest.mark.asyncio
+@@ -94,7 +100,7 @@ async def test_api_connect_already_connecting(hass: HomeAssistant) -> None:
+     api._is_connecting = True
+ 
+     with patch(
+-        "serial_asyncio.create_serial_connection", new_callable=AsyncMock
++        "serial_asyncio_fast.create_serial_connection", new_callable=AsyncMock
+     ) as mock_create:
+         await api.connect()
+ 
+@@ -153,7 +159,7 @@ async def test_api_send_command_not_connected(hass: HomeAssistant) -> None:
+     api._is_connected = False
+ 
+     # Should not raise but also not send
+-    with patch("serial_asyncio.create_serial_connection", new_callable=AsyncMock):
++    with patch("serial_asyncio_fast.create_serial_connection", new_callable=AsyncMock):
+         await api.send_command("test_command")
+         # This would not raise an error, but wouldn't send either
+ 
+diff --git a/uv.lock b/uv.lock
+index a1259e5..aa894c1 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -2469,15 +2469,15 @@ wheels = [
+ ]
+ 
+ [[package]]
+-name = "pyserial-asyncio"
+-version = "0.6"
++name = "pyserial-asyncio-fast"
++version = "0.16"
+ source = { registry = "https://pypi.org/simple" }
+ dependencies = [
+     { name = "pyserial" },
+ ]
+-sdist = { url = "https://files.pythonhosted.org/packages/4a/9a/8477699dcbc1882ea51dcff4d3c25aa3f2063ed8f7d7a849fd8f610506b6/pyserial-asyncio-0.6.tar.gz", hash = "sha256:b6032923e05e9d75ec17a5af9a98429c46d2839adfaf80604d52e0faacd7a32f", size = 31322, upload-time = "2021-09-30T22:29:02.174Z" }
++sdist = { url = "https://files.pythonhosted.org/packages/74/d1/6c444e0f6b886345a7993d358c6734ccc440521cdca4999601e86f111708/pyserial_asyncio_fast-0.16.tar.gz", hash = "sha256:fd52643380406739d777014b0aea0873d756b542eb62f7556567239cec007115", size = 32696, upload-time = "2025-03-27T02:35:20.624Z" }
+ wheels = [
+-    { url = "https://files.pythonhosted.org/packages/27/24/c820cf15f87f7b164e83710c1852d4f900d9793961579e5ef64189bc0c10/pyserial_asyncio-0.6-py3-none-any.whl", hash = "sha256:de9337922619421b62b9b1a84048634b3ac520e1d690a674ed246a2af7ce1fc5", size = 7594, upload-time = "2021-09-30T22:29:00.12Z" },
++    { url = "https://files.pythonhosted.org/packages/1b/19/f76987bad313bb2dabf21914c1ec7441a1e846f05764f9948f1ccc2640a8/pyserial_asyncio_fast-0.16-py3-none-any.whl", hash = "sha256:88939d94e341a04c0c8bc3c1ed4e874439cb5a1e21ccfb0fd7315a8e45df1687", size = 9729, upload-time = "2025-03-27T02:35:19.062Z" },
+ ]
+ 
+ [[package]]
+@@ -2938,7 +2938,7 @@ name = "schellenber-usb"
+ version = "1.0.0"
+ source = { virtual = "." }
+ dependencies = [
+-    { name = "pyserial-asyncio" },
++    { name = "pyserial-asyncio-fast" },
+ ]
+ 
+ [package.dev-dependencies]
+@@ -2978,7 +2978,7 @@ test = [
+ ]
+ 
+ [package.metadata]
+-requires-dist = [{ name = "pyserial-asyncio", specifier = "==0.6" }]
++requires-dist = [{ name = "pyserial-asyncio-fast", specifier = "==0.16" }]
+ 
+ [package.metadata.requires-dev]
+ dev = [

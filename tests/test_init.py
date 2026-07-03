@@ -6,7 +6,7 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
@@ -20,6 +20,7 @@ from custom_components.schellenberg_usb.const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_TEST_COMMAND,
+    SUBENTRY_TYPE_BLIND,
 )
 
 
@@ -65,6 +66,41 @@ async def test_async_setup_entry_basic(
         # Check that runtime_data was set
         assert mock_config_entry.runtime_data is not None
         assert isinstance(mock_config_entry.runtime_data, SchellenbergUsbApi)
+
+
+@pytest.mark.asyncio
+async def test_subentry_change_listener_reloads_once_and_is_removed_on_unload(
+    hass: HomeAssistant, mock_config_entry: ConfigEntry
+) -> None:
+    """Test subentry reload listeners do not accumulate across reloads."""
+    from custom_components.schellenberg_usb import async_setup_entry
+
+    with (
+        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
+        patch.object(
+            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
+        ),
+        patch.object(
+            hass.config_entries, "async_reload", new_callable=AsyncMock
+        ) as reload_entry,
+    ):
+        await async_setup_entry(hass, mock_config_entry)
+        hass.config_entries.async_add_subentry(
+            mock_config_entry,
+            ConfigSubentry(
+                data=MappingProxyType({CONF_DEVICE_ID: "F2B8D5"}),
+                subentry_type=SUBENTRY_TYPE_BLIND,
+                title="Sitting room door",
+                unique_id="F2B8D5",
+            ),
+        )
+        await hass.async_block_till_done()
+
+        reload_entry.assert_awaited_once_with(mock_config_entry.entry_id)
+        assert len(mock_config_entry.update_listeners) == 1
+        await mock_config_entry._async_process_on_unload(hass)
+
+    assert mock_config_entry.update_listeners == []
 
 
 @pytest.mark.asyncio

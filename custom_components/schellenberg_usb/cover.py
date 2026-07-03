@@ -41,7 +41,7 @@ from .const import (
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_STICK_STATUS_UPDATED,
-    SUBENTRY_TYPE_LED,
+    SUBENTRY_TYPE_BLIND,
     SchellenbergConfigEntry,
 )
 
@@ -72,19 +72,20 @@ async def async_setup_entry(
         api = entry.runtime_data
 
         # Get paired devices from subentries
-        subentries = entry.subentries.values()
-        _LOGGER.info("Hub has %d subentries (paired devices)", len(entry.subentries))
+        subentries = [
+            subentry
+            for subentry in entry.subentries.values()
+            if subentry.subentry_type == SUBENTRY_TYPE_BLIND
+        ]
+        _LOGGER.info("Hub has %d saved blind subentries", len(subentries))
 
-        if not entry.subentries:
-            _LOGGER.info("No subentries (paired devices) found for hub")
+        if not subentries:
+            _LOGGER.info("No saved blind subentries found for hub")
             return
 
-        _LOGGER.info("Loading %d paired Schellenberg devices", len(entry.subentries))
+        _LOGGER.info("Loading %d saved Schellenberg blinds", len(subentries))
 
         for subentry in subentries:
-            # Skip LED subentry; handled by switch platform
-            if subentry.subentry_type == SUBENTRY_TYPE_LED:
-                continue
             legacy_device_id = subentry.data.get(CONF_DEVICE_ID)
             legacy_device_enum = subentry.data.get(CONF_DEVICE_ENUM)
             command_device_id = (

@@ -1,0 +1,545 @@
+diff --git a/custom_components/schellenberg_usb/translations/de.json b/custom_components/schellenberg_usb/translations/de.json
+index 62ed404..f864b25 100644
+--- a/custom_components/schellenberg_usb/translations/de.json
++++ b/custom_components/schellenberg_usb/translations/de.json
+@@ -46,7 +46,8 @@
+           "title": "Rollladen hinzufügen",
+           "menu_options": {
+             "pair_device": "Koppeln und kalibrieren",
+-            "manual": "Manuell hinzufügen"
++            "manual": "Manuell hinzufügen",
++            "pair_test": "Pair and test (recommended)"
+           }
+         },
+         "pair_device": {
+@@ -62,7 +63,10 @@
+             "device_id": "Geräte-ID",
+             "device_enum": "Enum",
+             "open_time_seconds": "Öffnungszeit",
+-            "close_time_seconds": "Schließzeit"
++            "close_time_seconds": "Schließzeit",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "invert_direction": "Invert open/close direction"
+           },
+           "submit": "Hinzufügen"
+         },
+@@ -92,6 +96,89 @@
+           "title": "Kalibrierung abgeschlossen",
+           "description": "Kalibrierung für {device_name} abgeschlossen!\n\nGemessene Zeiten:\n- Öffnungszeit: {open_time} Sekunden\n- Schließzeit: {close_time} Sekunden\n\nDiese Zeiten werden verwendet, um die Rollladenposition genau zu verfolgen.",
+           "submit": "Fertig"
++        },
++        "pair_test": {
++          "title": "Pair and test",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
++          "submit": "Pair"
++        },
++        "manual_next": {
++          "title": "Manual blind ready",
++          "menu_options": {
++            "test_motor": "Test motor command",
++            "save_manual": "Save without testing"
++          }
++        },
++        "test_motor": {
++          "title": "Test motor command",
++          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
++          "submit": "Test"
++        },
++        "did_motor_move": {
++          "title": "Did the motor move?",
++          "description": "Tested command identity {device_id}/{device_enum}.",
++          "data": {
++            "motor_moved": "The motor moved"
++          },
++          "submit": "Continue"
++        },
++        "test_success": {
++          "title": "Command test successful",
++          "menu_options": {
++            "calibration_close": "Continue to calibration",
++            "manual_times": "Save with manual travel times"
++          }
++        },
++        "manual_times": {
++          "title": "Enter travel times",
++          "description": "Enter the measured full opening and closing times.",
++          "data": {
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time"
++          },
++          "submit": "Save"
++        },
++        "reconfigure": {
++          "title": "Configure blind",
++          "menu_options": {
++            "edit": "Edit identities and travel times",
++            "test_existing": "Test motor command",
++            "developer_tools": "Developer tools",
++            "calibrate": "Calibrate"
++          }
++        },
++        "developer_tools": {
++          "title": "Developer tools",
++          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
++          "menu_options": {
++            "test_open": "Test Open",
++            "test_close": "Test Close",
++            "test_stop": "Test Stop",
++            "copy_diagnostics": "Copy diagnostics"
++          }
++        },
++        "copy_diagnostics": {
++          "title": "Copy diagnostics",
++          "description": "Select and copy the diagnostic text below. Press Submit to return.",
++          "data": {
++            "diagnostics": "Diagnostics"
++          },
++          "submit": "Return"
++        },
++        "edit": {
++          "title": "Edit blind settings",
++          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
++          "data": {
++            "device_name": "Name",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
++          },
++          "submit": "Save"
+         }
+       },
+       "error": {
+@@ -104,12 +191,14 @@
+         "pairing_failed": "Kopplung fehlgeschlagen.",
+         "calibration_timeout": "Kalibrierung abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
+         "calibration_start_timeout": "Zeitüberschreitung beim Warten auf die Bewegung des Rollladens. Bitte stellen Sie sicher, dass das Gerät ordnungsgemäß angeschlossen ist, und versuchen Sie es erneut.",
+-        "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut."
++        "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut.",
++        "command_failed": "The serial command could not be queued. Check the USB connection and logs."
+       },
+       "abort": {
+         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
+         "pairing_failed": "Kopplung fehlgeschlagen.",
+-        "reconfigure_successful": "Kalibrierung erfolgreich abgeschlossen"
++        "reconfigure_successful": "Kalibrierung erfolgreich abgeschlossen",
++        "command_test_successful": "The motor command test succeeded."
+       }
+     }
+   },
+@@ -151,6 +240,10 @@
+     "pair": {
+       "name": "Gerät koppeln",
+       "description": "Aktivieren Sie den Kopplungsmodus am Schellenberg USB-Stick, um einen neuen Rollladenmotor zu koppeln. Drücken Sie nach dem Aufrufen dieses Dienstes innerhalb von 10 Sekunden die Kopplungstaste an Ihrem Rollladenmotor."
++    },
++    "test_command": {
++      "name": "Test blind command",
++      "description": "Send open, close, or stop to a device enum without creating a cover."
+     }
+   }
+ }
+diff --git a/custom_components/schellenberg_usb/translations/es.json b/custom_components/schellenberg_usb/translations/es.json
+index 09e86f1..7aa5b47 100644
+--- a/custom_components/schellenberg_usb/translations/es.json
++++ b/custom_components/schellenberg_usb/translations/es.json
+@@ -46,7 +46,8 @@
+           "title": "Añadir una persiana",
+           "menu_options": {
+             "pair_device": "Emparejar y calibrar",
+-            "manual": "Añadir manualmente"
++            "manual": "Añadir manualmente",
++            "pair_test": "Pair and test (recommended)"
+           }
+         },
+         "pair_device": {
+@@ -62,7 +63,10 @@
+             "device_id": "ID del dispositivo",
+             "device_enum": "Enum",
+             "open_time_seconds": "Tiempo de apertura",
+-            "close_time_seconds": "Tiempo de cierre"
++            "close_time_seconds": "Tiempo de cierre",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "invert_direction": "Invert open/close direction"
+           },
+           "submit": "Añadir"
+         },
+@@ -92,6 +96,89 @@
+           "title": "Calibración completada",
+           "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.",
+           "submit": "Hecho"
++        },
++        "pair_test": {
++          "title": "Pair and test",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
++          "submit": "Pair"
++        },
++        "manual_next": {
++          "title": "Manual blind ready",
++          "menu_options": {
++            "test_motor": "Test motor command",
++            "save_manual": "Save without testing"
++          }
++        },
++        "test_motor": {
++          "title": "Test motor command",
++          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
++          "submit": "Test"
++        },
++        "did_motor_move": {
++          "title": "Did the motor move?",
++          "description": "Tested command identity {device_id}/{device_enum}.",
++          "data": {
++            "motor_moved": "The motor moved"
++          },
++          "submit": "Continue"
++        },
++        "test_success": {
++          "title": "Command test successful",
++          "menu_options": {
++            "calibration_close": "Continue to calibration",
++            "manual_times": "Save with manual travel times"
++          }
++        },
++        "manual_times": {
++          "title": "Enter travel times",
++          "description": "Enter the measured full opening and closing times.",
++          "data": {
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time"
++          },
++          "submit": "Save"
++        },
++        "reconfigure": {
++          "title": "Configure blind",
++          "menu_options": {
++            "edit": "Edit identities and travel times",
++            "test_existing": "Test motor command",
++            "developer_tools": "Developer tools",
++            "calibrate": "Calibrate"
++          }
++        },
++        "developer_tools": {
++          "title": "Developer tools",
++          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
++          "menu_options": {
++            "test_open": "Test Open",
++            "test_close": "Test Close",
++            "test_stop": "Test Stop",
++            "copy_diagnostics": "Copy diagnostics"
++          }
++        },
++        "copy_diagnostics": {
++          "title": "Copy diagnostics",
++          "description": "Select and copy the diagnostic text below. Press Submit to return.",
++          "data": {
++            "diagnostics": "Diagnostics"
++          },
++          "submit": "Return"
++        },
++        "edit": {
++          "title": "Edit blind settings",
++          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
++          "data": {
++            "device_name": "Name",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
++          },
++          "submit": "Save"
+         }
+       },
+       "error": {
+@@ -104,12 +191,14 @@
+         "pairing_failed": "Error en el emparejamiento.",
+         "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",
+         "calibration_start_timeout": "Tiempo de espera agotado para que la persiana comience a moverse. Por favor, asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
+-        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo."
++        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
++        "command_failed": "The serial command could not be queued. Check the USB connection and logs."
+       },
+       "abort": {
+         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
+         "pairing_failed": "Error en el emparejamiento.",
+-        "reconfigure_successful": "Calibración completada con éxito"
++        "reconfigure_successful": "Calibración completada con éxito",
++        "command_test_successful": "The motor command test succeeded."
+       }
+     }
+   },
+@@ -151,6 +240,10 @@
+     "pair": {
+       "name": "Emparejar dispositivo",
+       "description": "Active el modo de emparejamiento en la memoria USB Schellenberg para emparejar un nuevo motor de persiana. Después de llamar a este servicio, presione el botón de emparejamiento en su motor de persiana en los próximos 10 segundos."
++    },
++    "test_command": {
++      "name": "Test blind command",
++      "description": "Send open, close, or stop to a device enum without creating a cover."
+     }
+   }
+ }
+diff --git a/custom_components/schellenberg_usb/translations/fr.json b/custom_components/schellenberg_usb/translations/fr.json
+index 3c519d9..4349e99 100644
+--- a/custom_components/schellenberg_usb/translations/fr.json
++++ b/custom_components/schellenberg_usb/translations/fr.json
+@@ -46,7 +46,8 @@
+           "title": "Ajouter un volet",
+           "menu_options": {
+             "pair_device": "Appairer et calibrer",
+-            "manual": "Ajouter manuellement"
++            "manual": "Ajouter manuellement",
++            "pair_test": "Pair and test (recommended)"
+           }
+         },
+         "pair_device": {
+@@ -62,7 +63,10 @@
+             "device_id": "ID de l'appareil",
+             "device_enum": "Énumération",
+             "open_time_seconds": "Durée d'ouverture",
+-            "close_time_seconds": "Durée de fermeture"
++            "close_time_seconds": "Durée de fermeture",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "invert_direction": "Invert open/close direction"
+           },
+           "submit": "Ajouter"
+         },
+@@ -92,6 +96,89 @@
+           "title": "Calibration terminée",
+           "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps seront utilisés pour suivre précisément la position du volet.",
+           "submit": "Terminé"
++        },
++        "pair_test": {
++          "title": "Pair and test",
++          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
++          "submit": "Pair"
++        },
++        "manual_next": {
++          "title": "Manual blind ready",
++          "menu_options": {
++            "test_motor": "Test motor command",
++            "save_manual": "Save without testing"
++          }
++        },
++        "test_motor": {
++          "title": "Test motor command",
++          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
++          "submit": "Test"
++        },
++        "did_motor_move": {
++          "title": "Did the motor move?",
++          "description": "Tested command identity {device_id}/{device_enum}.",
++          "data": {
++            "motor_moved": "The motor moved"
++          },
++          "submit": "Continue"
++        },
++        "test_success": {
++          "title": "Command test successful",
++          "menu_options": {
++            "calibration_close": "Continue to calibration",
++            "manual_times": "Save with manual travel times"
++          }
++        },
++        "manual_times": {
++          "title": "Enter travel times",
++          "description": "Enter the measured full opening and closing times.",
++          "data": {
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time"
++          },
++          "submit": "Save"
++        },
++        "reconfigure": {
++          "title": "Configure blind",
++          "menu_options": {
++            "edit": "Edit identities and travel times",
++            "test_existing": "Test motor command",
++            "developer_tools": "Developer tools",
++            "calibrate": "Calibrate"
++          }
++        },
++        "developer_tools": {
++          "title": "Developer tools",
++          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
++          "menu_options": {
++            "test_open": "Test Open",
++            "test_close": "Test Close",
++            "test_stop": "Test Stop",
++            "copy_diagnostics": "Copy diagnostics"
++          }
++        },
++        "copy_diagnostics": {
++          "title": "Copy diagnostics",
++          "description": "Select and copy the diagnostic text below. Press Submit to return.",
++          "data": {
++            "diagnostics": "Diagnostics"
++          },
++          "submit": "Return"
++        },
++        "edit": {
++          "title": "Edit blind settings",
++          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
++          "data": {
++            "device_name": "Name",
++            "device_id": "Command device ID",
++            "device_enum": "Command enum",
++            "status_device_id": "Status device ID (optional)",
++            "status_enum": "Status enum (optional)",
++            "open_time_seconds": "Open time",
++            "close_time_seconds": "Close time",
++            "invert_direction": "Invert open/close direction"
++          },
++          "submit": "Save"
+         }
+       },
+       "error": {
+@@ -104,12 +191,14 @@
+         "pairing_failed": "Échec de l'appairage.",
+         "calibration_timeout": "Délai de calibration dépassé. Le volet a mis plus de 5 minutes pour terminer le mouvement. Veuillez vérifier l'appareil et réessayer.",
+         "calibration_start_timeout": "Délai d'attente dépassé pour le début du mouvement du volet. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
+-        "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer."
++        "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
++        "command_failed": "The serial command could not be queued. Check the USB connection and logs."
+       },
+       "abort": {
+         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",
+         "pairing_failed": "Échec de l'appairage.",
+-        "reconfigure_successful": "Calibration terminée avec succès"
++        "reconfigure_successful": "Calibration terminée avec succès",
++        "command_test_successful": "The motor command test succeeded."
+       }
+     }
+   },
+@@ -151,6 +240,10 @@
+     "pair": {
+       "name": "Appairer l'appareil",
+       "description": "Activez le mode d'appairage sur la clé USB Schellenberg pour appairer un nouveau moteur de volet. Après avoir appelé ce service, appuyez sur le bouton d'appairage de votre moteur de volet dans les 10 secondes."
++    },
++    "test_command": {
++      "name": "Test blind command",
++      "description": "Send open, close, or stop to a device enum without creating a cover."
+     }
+   }
+ }
+diff --git a/tests/test_config_flow.py b/tests/test_config_flow.py
+index 3e39f78..08b8527 100644
+--- a/tests/test_config_flow.py
++++ b/tests/test_config_flow.py
+@@ -50,6 +50,26 @@ async def test_blind_subentry_flow_shows_setup_method_menu() -> None:
+     assert result["menu_options"] == ["pair_test", "pair_device", "manual"]
+ 
+ 
++@pytest.mark.asyncio
++async def test_all_blind_subentry_navigation_menus_expose_expected_options() -> None:
++    """Test every static subentry navigation menu uses the translated keys."""
++    flow = _create_flow()
++
++    manual_next = await flow.async_step_manual_next()
++    reconfigure = await flow.async_step_reconfigure()
++    flow._pairing_workflow = "hybrid"
++    test_success = await flow.async_step_did_motor_move({"motor_moved": True})
++
++    assert manual_next["menu_options"] == ["test_motor", "save_manual"]
++    assert reconfigure["menu_options"] == [
++        "edit",
++        "test_existing",
++        "developer_tools",
++        "calibrate",
++    ]
++    assert test_success["menu_options"] == ["calibration_close", "manual_times"]
++
++
+ @pytest.mark.asyncio
+ async def test_legacy_pairing_path_is_unchanged() -> None:
+     """Test selecting legacy pairing still reaches naming and calibration."""
+@@ -274,6 +294,12 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
+     assert placeholders["last_device_id"] == "3720B8"
+     assert placeholders["command_device_id"] == "F2B8D5"
+     assert placeholders["command_enum"] == "23"
++    assert result["menu_options"] == [
++        "test_open",
++        "test_close",
++        "test_stop",
++        "copy_diagnostics",
++    ]
+     api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
+     command_placeholders = command_result["description_placeholders"]
+     assert command_placeholders is not None
+diff --git a/tests/test_translations.py b/tests/test_translations.py
+new file mode 100644
+index 0000000..23833a9
+--- /dev/null
++++ b/tests/test_translations.py
+@@ -0,0 +1,63 @@
++"""Test config-flow menu translation coverage."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++COMPONENT_DIR = Path(__file__).parents[1] / "custom_components" / "schellenberg_usb"
++EXPECTED_MENU_OPTIONS = {
++    "user": {"pair_test", "pair_device", "manual"},
++    "manual_next": {"test_motor", "save_manual"},
++    "test_success": {"calibration_close", "manual_times"},
++    "reconfigure": {"edit", "test_existing", "developer_tools", "calibrate"},
++    "developer_tools": {
++        "test_open",
++        "test_close",
++        "test_stop",
++        "copy_diagnostics",
++    },
++}
++
++
++def _load_json(path: Path) -> dict[str, Any]:
++    """Load one integration translation document."""
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def _leaf_paths(value: Any, prefix: str = "") -> set[str]:
++    """Return all leaf paths in a nested translation document."""
++    if not isinstance(value, dict):
++        return {prefix}
++    return {
++        leaf
++        for key, child in value.items()
++        for leaf in _leaf_paths(child, f"{prefix}.{key}" if prefix else key)
++    }
++
++
++def test_all_config_subentry_menu_options_have_labels() -> None:
++    """Every runtime menu option must have a non-empty label in every locale."""
++    paths = [
++        COMPONENT_DIR / "strings.json",
++        *sorted((COMPONENT_DIR / "translations").glob("*.json")),
++    ]
++
++    for path in paths:
++        steps = _load_json(path)["config_subentries"]["blind"]["step"]
++        for step_id, expected_options in EXPECTED_MENU_OPTIONS.items():
++            labels = steps[step_id]["menu_options"]
++            assert set(labels) == expected_options, f"{path.name}: {step_id}"
++            assert all(
++                isinstance(label, str) and label.strip() for label in labels.values()
++            ), f"{path.name}: {step_id} contains a blank label"
++
++
++def test_locale_files_cover_all_source_translation_keys() -> None:
++    """Partial locale files must not hide newer English flow labels."""
++    source_paths = _leaf_paths(_load_json(COMPONENT_DIR / "strings.json"))
++
++    for path in sorted((COMPONENT_DIR / "translations").glob("*.json")):
++        missing = source_paths - _leaf_paths(_load_json(path))
++        assert not missing, f"{path.name} is missing: {sorted(missing)}"
