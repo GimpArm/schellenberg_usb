@@ -125,9 +125,15 @@ async def test_async_setup_entry_creates_covers(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_enum", "status_enum"),
+    [("23", "08"), ("08", "0D"), ("0D", "08")],
+)
 async def test_setup_restores_manual_cover_from_persisted_subentry(
     hass: HomeAssistant,
     mock_api: SchellenbergUsbApi,
+    command_enum: str,
+    status_enum: str,
 ) -> None:
     """Test a stored manual blind is recreated during platform setup."""
     entry = ConfigEntry(
@@ -150,9 +156,9 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
                     CONF_DEVICE_ID: "F2B8D5",
                     CONF_DEVICE_ENUM: "23",
                     CONF_COMMAND_DEVICE_ID: "F2B8D5",
-                    CONF_COMMAND_ENUM: "23",
+                    CONF_COMMAND_ENUM: command_enum,
                     CONF_STATUS_DEVICE_ID: "3720B8",
-                    CONF_STATUS_ENUM: "08",
+                    CONF_STATUS_ENUM: status_enum,
                     CONF_OPEN_TIME: 25.06,
                     CONF_CLOSE_TIME: 23.05,
                 },
@@ -165,15 +171,23 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
 
     await async_setup_entry(hass, entry, add_entities)
 
+    _magic_mock(mock_api.register_entity).assert_called_once_with(
+        "3720B8",
+        status_enum,
+        "Sitting room door",
+        command_device_id="F2B8D5",
+        command_enum=command_enum,
+    )
+
     add_entities.assert_called_once()
     assert add_entities.call_args.kwargs == {"config_subentry_id": "manual_blind"}
     cover = add_entities.call_args.args[0][0]
     assert isinstance(cover, SchellenbergCover)
     assert cover.name == "Sitting room door"
     assert cover.unique_id == "schellenberg_F2B8D5"
-    assert cover._command_enum == "23"
+    assert cover._command_enum == command_enum
     assert cover._status_device_id == "3720B8"
-    assert cover._status_enum == "08"
+    assert cover._status_enum == status_enum
     assert cover._travel_time_open == 25.06
     assert cover._travel_time_close == 23.05
 

@@ -56,6 +56,22 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+TRANSMIT_RETRY_DELAY = 0.05
+TRANSMIT_MAX_RETRIES = 3
+
+
+def _normalize_protocol_enum(value: object) -> str:
+    """Normalize one- or two-digit protocol enums without changing other values."""
+    text = str(value).strip()
+    normalized = text.upper()
+    if (
+        normalized
+        and len(normalized) <= 2
+        and all(character in "0123456789ABCDEF" for character in normalized)
+    ):
+        return normalized.zfill(2)
+    return text
+
 
 class SchellenbergUsbApi:
     """Manages all communication with the Schellenberg USB stick."""
@@ -88,7 +104,10 @@ class SchellenbergUsbApi:
 
         # Retry queue for commands that failed with "stick busy"
         self._pending_retry_command: str | None = None
+        self._transmit_retry_count = 0
         self._retry_task: asyncio.Task[None] | None = None
+        self._transmit_lock = asyncio.Lock()
+        self._transmit_busy = False
 
     async def connect(self) -> None:
         """Establish a connection to the serial port."""
@@ -200,18 +219,61 @@ class SchellenbergUsbApi:
 
         # Handle acknowledgments
         if message in ("t1", "t0"):
-            _LOGGER.debug("Transmit ACK: %s", message)
+            if self._pending_retry_command is not None:
+                _LOGGER.info(
+                    "Serial transmit acknowledged response=%s payload=%s retries=%d",
+                    message,
+                    self._pending_retry_command,
+                    self._transmit_retry_count,
+                )
+            else:
+                _LOGGER.debug(
+                    "Received transmit ACK %s with no pending payload", message
+                )
+            self._clear_pending_transmit()
             return
 
         if message == "tE":
-            _LOGGER.warning("Transmit error - stick busy, will retry in 50ms")
-            # Schedule a retry if we have a pending command
-            if self._pending_retry_command:
-                if self._retry_task and not self._retry_task.done():
-                    self._retry_task.cancel()
-                self._retry_task = asyncio.create_task(
-                    self._retry_command_after_delay()
+            command = self._pending_retry_command
+            if command is None:
+                _LOGGER.warning(
+                    "Serial stick reported busy with no pending transmit payload"
                 )
+                return
+
+            # A burst of duplicate tE responses must not continually cancel and
+            # postpone the retry that is already waiting to run.
+            if self._retry_task is not None and not self._retry_task.done():
+                _LOGGER.debug(
+                    "Serial stick still busy; retry already scheduled payload=%s "
+                    "retry=%d/%d",
+                    command,
+                    self._transmit_retry_count,
+                    TRANSMIT_MAX_RETRIES,
+                )
+                return
+
+            if self._transmit_retry_count >= TRANSMIT_MAX_RETRIES:
+                _LOGGER.error(
+                    "Serial transmit abandoned after %d attempts because the stick "
+                    "remained busy payload=%s",
+                    TRANSMIT_MAX_RETRIES + 1,
+                    command,
+                )
+                self._clear_pending_transmit(cancel_retry=False)
+                return
+
+            self._transmit_retry_count += 1
+            _LOGGER.warning(
+                "Serial stick busy; scheduling retry %d/%d in %dms payload=%s",
+                self._transmit_retry_count,
+                TRANSMIT_MAX_RETRIES,
+                round(TRANSMIT_RETRY_DELAY * 1000),
+                command,
+            )
+            self._retry_task = asyncio.create_task(
+                self._retry_command_after_delay(command)
+            )
             return
 
         # Handle device ID response (format: sr5D3E7C where 5D3E7C is the device ID)
@@ -347,35 +409,118 @@ class SchellenbergUsbApi:
 
     async def send_command(self, command: str) -> bool:
         """Queue a raw command on the serial transport."""
-        if self._transport is None or self._transport.is_closing():
-            _LOGGER.warning("Serial port not connected. Command dropped: %s", command)
-            return False
+        return await self._write_command(command, is_retry=False)
 
-        # Store command for potential retry on "stick busy" error
-        self._pending_retry_command = command
+    async def _write_command(self, command: str, *, is_retry: bool) -> bool:
+        """Write one command while serializing access to the transport."""
+        async with self._transmit_lock:
+            self._transmit_busy = True
+            try:
+                if is_retry and self._pending_retry_command != command:
+                    _LOGGER.debug(
+                        "Skipping stale serial retry payload=%s pending=%s",
+                        command,
+                        self._pending_retry_command,
+                    )
+                    return False
 
-        full_command = f"{command}\r\n".encode("ascii")
-        _LOGGER.debug("Sending to serial device: %s", full_command.strip())
+                if self._transport is None or self._transport.is_closing():
+                    _LOGGER.warning(
+                        "Serial port not connected; command dropped payload=%s",
+                        command,
+                    )
+                    if is_retry or command.startswith(CMD_TRANSMIT):
+                        self._clear_pending_transmit(cancel_retry=False)
+                    return False
+
+                if command.startswith(CMD_TRANSMIT) and not is_retry:
+                    if self._pending_retry_command is not None:
+                        _LOGGER.warning(
+                            "Replacing unacknowledged serial transmit old_payload=%s "
+                            "new_payload=%s",
+                            self._pending_retry_command,
+                            command,
+                        )
+                    self._clear_pending_transmit()
+                    self._pending_retry_command = command
+                    self._transmit_retry_count = 0
+
+                full_command = f"{command}\r\n".encode("ascii")
+                attempt = self._transmit_retry_count + 1 if is_retry else 1
+                max_attempts = TRANSMIT_MAX_RETRIES + 1
+                _LOGGER.debug(
+                    "Writing serial command payload=%s bytes=%d attempt=%d/%d retry=%s",
+                    command,
+                    len(full_command),
+                    attempt,
+                    max_attempts if command.startswith(CMD_TRANSMIT) else 1,
+                    is_retry,
+                )
+                try:
+                    self._transport.write(full_command)
+                except (OSError, RuntimeError):
+                    _LOGGER.exception(
+                        "Serial write failed payload=%s attempt=%d retry=%s",
+                        command,
+                        attempt,
+                        is_retry,
+                    )
+                    if self._pending_retry_command == command:
+                        self._clear_pending_transmit(cancel_retry=False)
+                    return False
+
+                _LOGGER.debug(
+                    "Serial command written payload=%s attempt=%d retry=%s",
+                    command,
+                    attempt,
+                    is_retry,
+                )
+                return True
+            finally:
+                # Never leave local transmit state busy after an exception,
+                # cancellation, disconnected transport, or stale retry.
+                self._transmit_busy = False
+
+    async def _retry_command_after_delay(self, command: str) -> None:
+        """Retry a busy transmit once after the configured delay."""
+        retry_task = asyncio.current_task()
         try:
-            self._transport.write(full_command)
-        except (OSError, RuntimeError):
-            _LOGGER.exception("Serial transmit failed for payload=%s", command)
-            return False
-        _LOGGER.debug("Command sent to serial device: %s", full_command.strip())
-        return True
+            await asyncio.sleep(TRANSMIT_RETRY_DELAY)
+            if self._pending_retry_command != command:
+                _LOGGER.debug("Busy retry no longer pending payload=%s", command)
+                return
 
-    async def _retry_command_after_delay(self) -> None:
-        """Retry sending the pending command after a 100ms delay."""
-        try:
-            await asyncio.sleep(0.1)  # 100 milliseconds
-            if self._pending_retry_command:
-                command = self._pending_retry_command
-                _LOGGER.debug("Retrying command after stick busy: %s", command)
-                await self.send_command(command)
+            # Clear the task reference before writing so a tE response generated
+            # by this attempt can schedule the next bounded retry.
+            if self._retry_task is retry_task:
+                self._retry_task = None
+            _LOGGER.info(
+                "Retrying serial transmit after busy response retry=%d/%d payload=%s",
+                self._transmit_retry_count,
+                TRANSMIT_MAX_RETRIES,
+                command,
+            )
+            await self._write_command(command, is_retry=True)
         except asyncio.CancelledError:
-            _LOGGER.debug("Retry task cancelled")
+            _LOGGER.debug("Serial transmit retry cancelled payload=%s", command)
+            raise
         finally:
-            self._retry_task = None
+            if self._retry_task is retry_task:
+                self._retry_task = None
+
+    def _clear_pending_transmit(self, *, cancel_retry: bool = True) -> None:
+        """Clear retry state and optionally cancel the scheduled retry task."""
+        retry_task = self._retry_task
+        self._retry_task = None
+        if (
+            cancel_retry
+            and retry_task is not None
+            and retry_task is not asyncio.current_task()
+            and not retry_task.done()
+        ):
+            retry_task.cancel()
+        self._pending_retry_command = None
+        self._transmit_retry_count = 0
 
     async def pair_device_and_wait(self) -> tuple[str, str] | None:
         """Put the stick into pairing mode and wait for a device to pair.
@@ -561,7 +706,10 @@ class SchellenbergUsbApi:
                 self._registered_devices[str(command_device_id)] = str(command_enum)
             if status_device_id and status_enum:
                 self._registered_entity_keys[
-                    (str(status_device_id).upper(), str(status_enum).upper())
+                    (
+                        str(status_device_id).upper(),
+                        _normalize_protocol_enum(status_enum),
+                    )
                 ] = entity_name
             _LOGGER.debug(
                 "Registered existing entity=%s command=%s/%s status=%s/%s",
@@ -600,7 +748,7 @@ class SchellenbergUsbApi:
         command_slot = command_enum or status_enum
         self._registered_devices[command_id] = command_slot
         self._registered_entity_keys[
-            (status_device_id.upper(), status_enum.upper())
+            (status_device_id.upper(), _normalize_protocol_enum(status_enum))
         ] = entity_name or status_device_id
         _LOGGER.debug(
             "Registered entity=%s command=%s/%s status=%s/%s",
@@ -617,7 +765,7 @@ class SchellenbergUsbApi:
     ) -> dict[str, str] | None:
         """Return a copy of the latest frame for an exact status identity."""
         message = self._last_received_messages.get(
-            (status_device_id.upper(), status_enum.upper())
+            (status_device_id.upper(), _normalize_protocol_enum(status_enum))
         )
         return dict(message) if message is not None else None
 
@@ -836,10 +984,8 @@ class SchellenbergUsbApi:
 
     async def disconnect(self) -> None:
         """Disconnect from the serial port."""
-        # Cancel any pending retry task
-        if self._retry_task and not self._retry_task.done():
-            self._retry_task.cancel()
-            self._retry_task = None
+        self._clear_pending_transmit()
+        self._transmit_busy = False
 
         if self._transport:
             self._transport.close()

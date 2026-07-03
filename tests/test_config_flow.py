@@ -371,7 +371,13 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
 
 
 @pytest.mark.asyncio
-async def test_pairing_persists_calibrated_protocol_data() -> None:
+@pytest.mark.parametrize(
+    ("command_enum", "status_enum"),
+    [("23", "08"), ("08", "0D"), ("0D", "08")],
+)
+async def test_pairing_persists_calibrated_protocol_data(
+    command_enum: str, status_enum: str
+) -> None:
     """Test paired subentries retain identities and measured times."""
     flow = MagicMock(spec=ConfigSubentryFlow)
     handler = CalibrationFlowHandler(flow)
@@ -380,15 +386,15 @@ async def test_pairing_persists_calibrated_protocol_data() -> None:
             "id": "3720B8",
             "entity_id": "F2B8D5",
             "name": "Sitting room",
-            "enum": "08",
+            "enum": status_enum,
         }
     )
     handler.enable_subentry_creation(
         device_id="F2B8D5",
-        device_enum="23",
+        device_enum=command_enum,
         device_name="Sitting room",
         status_device_id="3720B8",
-        status_enum="08",
+        status_enum=status_enum,
     )
     handler._open_time = 25.064
     handler._close_time = 23.054
@@ -400,11 +406,11 @@ async def test_pairing_persists_calibrated_protocol_data() -> None:
         title="Sitting room",
         data={
             CONF_DEVICE_ID: "F2B8D5",
-            CONF_DEVICE_ENUM: "23",
+            CONF_DEVICE_ENUM: command_enum,
             CONF_COMMAND_DEVICE_ID: "F2B8D5",
-            CONF_COMMAND_ENUM: "23",
+            CONF_COMMAND_ENUM: command_enum,
             CONF_STATUS_DEVICE_ID: "3720B8",
-            CONF_STATUS_ENUM: "08",
+            CONF_STATUS_ENUM: status_enum,
             CONF_OPEN_TIME: 25.06,
             CONF_CLOSE_TIME: 23.05,
             CONF_INVERT_DIRECTION: False,

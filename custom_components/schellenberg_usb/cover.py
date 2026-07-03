@@ -129,10 +129,10 @@ async def async_setup_entry(
                 continue
 
             stable_device_id = str(stable_device_id)
-            command_device_id = str(command_device_id)
-            command_enum = str(command_enum)
-            status_device_id = str(status_device_id)
-            status_enum = str(status_enum)
+            command_device_id = str(command_device_id).strip().upper()
+            command_enum = str(command_enum).strip().upper().zfill(2)
+            status_device_id = str(status_device_id).strip().upper()
+            status_enum = str(status_enum).strip().upper().zfill(2)
 
             # Check if entity already exists to avoid duplicates.
             # Keep the original subentry unique ID stable when editable protocol IDs change.
@@ -176,6 +176,16 @@ async def async_setup_entry(
                 "Created/updated device %s for paired device %s",
                 device.id,
                 stable_device_id,
+            )
+
+            # Register persisted status identities immediately. Incoming frames can
+            # arrive before Home Assistant calls async_added_to_hass on the entity.
+            api.register_entity(
+                status_device_id,
+                status_enum,
+                device_name,
+                command_device_id=command_device_id,
+                command_enum=command_enum,
             )
 
             # Create cover entity linked to this device

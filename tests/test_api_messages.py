@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.schellenberg_usb.api import SchellenbergUsbApi
+from custom_components.schellenberg_usb.api import (
+    TRANSMIT_MAX_RETRIES,
+    SchellenbergUsbApi,
+)
 
 
 @pytest.mark.asyncio
@@ -91,22 +95,87 @@ async def test_handle_message_transmit_ack_t0(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_transmit_error_with_pending_retry(
+async def test_busy_burst_keeps_existing_retry_task(
     hass: HomeAssistant,
 ) -> None:
-    """Test handling transmit error with pending retry command."""
+    """Test duplicate busy responses cannot postpone a scheduled retry forever."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api._pending_retry_command = "test_command"
-
     mock_transport = MagicMock()
     mock_transport.is_closing = MagicMock(return_value=False)
     api._transport = mock_transport
+    payload = "ss089010000"
+    await api.send_command(payload)
 
-    with patch("asyncio.create_task") as mock_create_task:
+    release_retry = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def _wait_for_release(_: float) -> None:
+        await release_retry.wait()
+
+    with patch(
+        "custom_components.schellenberg_usb.api.asyncio.sleep",
+        side_effect=_wait_for_release,
+    ):
+        api._handle_message("tE")
+        first_retry = api._retry_task
+        assert first_retry is not None
+        await real_sleep(0)
+
         api._handle_message("tE")
 
-        # Should schedule a retry task
-        mock_create_task.assert_called_once()
+        assert api._retry_task is first_retry
+        assert not first_retry.cancelled()
+        release_retry.set()
+        await first_retry
+
+    assert mock_transport.write.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_busy_retry_stops_after_max_attempts(hass: HomeAssistant) -> None:
+    """Test a permanently busy stick cannot create an infinite retry loop."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    payload = "ss0D9020000"
+    await api.send_command(payload)
+
+    with patch(
+        "custom_components.schellenberg_usb.api.asyncio.sleep",
+        new_callable=AsyncMock,
+    ):
+        for _ in range(TRANSMIT_MAX_RETRIES):
+            api._handle_message("tE")
+            retry_task = api._retry_task
+            assert retry_task is not None
+            await retry_task
+
+        api._handle_message("tE")
+
+    assert mock_transport.write.call_count == TRANSMIT_MAX_RETRIES + 1
+    assert api._pending_retry_command is None
+    assert api._retry_task is None
+    assert api._transmit_busy is False
+    assert api._transmit_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_serial_write_failure_releases_transmit_state(
+    hass: HomeAssistant,
+) -> None:
+    """Test write errors always release the transmit lock and busy marker."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    mock_transport.write.side_effect = OSError("serial failure")
+    api._transport = mock_transport
+
+    assert await api.send_command("ss089010000") is False
+
+    assert api._transmit_busy is False
+    assert api._transmit_lock.locked() is False
+    assert api._pending_retry_command is None
 
 
 @pytest.mark.asyncio
@@ -159,6 +228,39 @@ async def test_handle_message_device_event_registered_device(
             "schellenberg_usb_device_event_ABC123_10",
             "01",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_enum", ["08", "0D"])
+async def test_handle_message_preserves_leading_zero_status_enum(
+    hass: HomeAssistant,
+    status_enum: str,
+) -> None:
+    """Test leading-zero status enums are normalized and matched exactly."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.register_entity(
+        "3720B8",
+        status_enum.removeprefix("0"),
+        "Sitting room",
+        command_device_id="F2B8D5",
+        command_enum="08",
+    )
+
+    with patch(
+        "custom_components.schellenberg_usb.api.async_dispatcher_send"
+    ) as mock_send:
+        api._handle_message(f"ss{status_enum}3720B8ZZZZ01PP00")
+
+    assert ("3720B8", status_enum) in api._registered_entity_keys
+    assert mock_send.call_count == 2
+    assert mock_send.call_args_list[1].args == (
+        hass,
+        f"schellenberg_usb_device_event_3720B8_{status_enum}",
+        "01",
+    )
+    last_received = api.get_last_received("3720B8", status_enum.removeprefix("0"))
+    assert last_received is not None
+    assert last_received["enum"] == status_enum
 
 
 @pytest.mark.asyncio
