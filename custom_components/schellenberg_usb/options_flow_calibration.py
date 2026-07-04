@@ -20,6 +20,7 @@ from homeassistant.helpers.dispatcher import (
 )
 from homeassistant.helpers.storage import Store
 
+from .api import SchellenbergUsbApi
 from .const import (
     CALIBRATION_TIMEOUT,
     CONF_CLOSE_TIME,
@@ -28,15 +29,19 @@ from .const import (
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
+    STATUS_IDENTITY_SOURCE_CALIBRATION,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,7 +73,117 @@ class CalibrationFlowHandler:
         self._pending_status_device_id: str | None = None
         self._pending_status_enum: str | None = None
         self._pending_secondary_status_identities: list[dict[str, str]] = []
+        self._pending_status_identity_source: str | None = None
+        self._calibration_discovery_result: dict[str, Any] | None = None
         self._pending_invert_direction = False
+
+    def _runtime_api(self) -> SchellenbergUsbApi | None:
+        """Return the loaded hub API when this flow has one."""
+        entry = None
+        get_entry = getattr(self.flow, "_get_entry", None)
+        if callable(get_entry):
+            entry = get_entry()
+        if entry is None:
+            entry = getattr(self.flow, "config_entry", None)
+        api = getattr(entry, "runtime_data", None)
+        return api if isinstance(api, SchellenbergUsbApi) else None
+
+    def _start_calibration_capture(self) -> None:
+        """Begin phase-labelled raw-frame capture for this calibration run."""
+        api = self._runtime_api()
+        if api is None:
+            return
+        try:
+            api.start_status_frame_capture(phase="opening")
+        except RuntimeError:
+            # A stale capture should not break calibration; close it explicitly and
+            # start the calibration-owned window.
+            api.finish_status_frame_capture(end_reason="superseded_by_calibration")
+            api.start_status_frame_capture(phase="opening")
+
+    def _set_calibration_capture_phase(self, phase: str) -> None:
+        """Label future frames with the current calibration leg."""
+        api = self._runtime_api()
+        if api is not None:
+            api.set_status_frame_capture_phase(phase)
+
+    def _finish_calibration_capture(self, end_reason: str) -> None:
+        """Finish capture and retain candidates for persistence and summary."""
+        api = self._runtime_api()
+        if api is None:
+            return
+        self._calibration_discovery_result = api.finish_status_frame_capture(
+            end_reason=end_reason
+        )
+
+    def _apply_calibration_status_candidates(self) -> None:
+        """Apply captured identities to pending subentry fields without guessing."""
+        result = self._calibration_discovery_result
+        if not result:
+            self._pending_status_device_id = None
+            self._pending_status_enum = None
+            self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
+            return
+        primary = result.get("primary")
+        if primary is None:
+            self._pending_status_device_id = None
+            self._pending_status_enum = None
+            self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
+        else:
+            self._pending_status_device_id = str(primary["device_id"])
+            self._pending_status_enum = str(primary["enum"])
+            self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_CALIBRATION
+        self._pending_secondary_status_identities = [
+            {"device_id": str(group["device_id"]), "enum": str(group["enum"])}
+            for group in result.get("secondary", [])
+        ]
+
+    def _calibration_record(self) -> dict[str, Any] | None:
+        """Return JSON-compatible diagnostics for the completed calibration run."""
+        if self._calibration_discovery_result is None:
+            return None
+        return {
+            **self._calibration_discovery_result,
+            "open_time": round(self._open_time, 2) if self._open_time else None,
+            "close_time": round(self._close_time, 2) if self._close_time else None,
+        }
+
+    def _calibration_summary_placeholders(self) -> dict[str, str]:
+        """Build a user-facing summary of measured times and received streams."""
+        result = self._calibration_discovery_result or {}
+        primary = result.get("primary")
+        secondary = result.get("secondary", [])
+        primary_text = (
+            f"{primary['device_id']}/{primary['enum']}"
+            if primary is not None
+            else "Not discovered"
+        )
+        primary_frames = (
+            ", ".join(primary.get("commands", [])) if primary is not None else "None"
+        )
+        secondary_text = (
+            ", ".join(
+                f"{group['device_id']}/{group['enum']} "
+                f"({','.join(group.get('commands', []))})"
+                for group in secondary
+            )
+            or "None"
+        )
+        return {
+            "primary_status_identity": primary_text,
+            "primary_frames": primary_frames,
+            "secondary_status_identities": secondary_text,
+            "position_tracking": (
+                "Available from received status frames"
+                if primary is not None
+                else (
+                    "Unavailable: HA commands can still estimate position, but "
+                    "remote/status tracking was not discovered"
+                )
+            ),
+            "calibration_end_reason": str(result.get("end_reason", "completed")),
+            "observed_frame_count": str(len(result.get("frames", []))),
+        }
 
     async def set_device_by_id(self, device_id: str) -> None:
         """Set the device to calibrate by its ID.
@@ -220,6 +335,7 @@ class CalibrationFlowHandler:
             )
 
         # User clicked Next - wait for movement start and measure timing
+        self._start_calibration_capture()
         try:
             # Wait for the physical direction that corresponds to logical opening.
             open_event = (
@@ -229,6 +345,7 @@ class CalibrationFlowHandler:
             )
             start_ok = await self._wait_for_movement_start(open_event)
             if not start_ok:
+                self._finish_calibration_capture("opening_start_timeout")
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -246,6 +363,7 @@ class CalibrationFlowHandler:
             # Wait for device to stop moving
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
+                self._finish_calibration_capture("opening_stop_timeout")
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -260,11 +378,13 @@ class CalibrationFlowHandler:
             # Record the open time
             self._open_time = time.time() - self._calibration_start_time
             _LOGGER.debug("Calibration open_time: %s seconds", self._open_time)
+            self._set_calibration_capture_phase("idle_between_legs")
 
             # Move to close instruction step
             return await self.async_step_calibration_close_instruction()
 
         except Exception:  # noqa: BLE001
+            self._finish_calibration_capture("opening_error")
             errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_open_instruction",
@@ -297,6 +417,7 @@ class CalibrationFlowHandler:
             )
 
         # User clicked Next - wait for movement start and measure timing
+        self._set_calibration_capture_phase("closing")
         try:
             # Wait for the physical direction that corresponds to logical closing.
             close_event = (
@@ -306,6 +427,7 @@ class CalibrationFlowHandler:
             )
             start_ok = await self._wait_for_movement_start(close_event)
             if not start_ok:
+                self._finish_calibration_capture("closing_start_timeout")
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -323,6 +445,7 @@ class CalibrationFlowHandler:
             # Wait for device to stop moving
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
+                self._finish_calibration_capture("closing_stop_timeout")
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -337,11 +460,14 @@ class CalibrationFlowHandler:
             # Record the close time
             self._close_time = time.time() - self._calibration_start_time
             _LOGGER.debug("Calibration close_time: %s seconds", self._close_time)
+            self._finish_calibration_capture("completed")
+            self._apply_calibration_status_candidates()
 
             # Move to completion step
             return await self.async_step_calibration_complete()
 
         except Exception:  # noqa: BLE001
+            self._finish_calibration_capture("closing_error")
             errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_close_instruction",
@@ -376,22 +502,33 @@ class CalibrationFlowHandler:
                 and self._pending_device_enum
                 and self._pending_device_name
             ):
+                data: dict[str, Any] = {
+                    CONF_DEVICE_ID: self._pending_device_id,
+                    CONF_DEVICE_ENUM: self._pending_device_enum,
+                    CONF_COMMAND_DEVICE_ID: self._pending_device_id,
+                    CONF_COMMAND_ENUM: self._pending_device_enum,
+                    CONF_SECONDARY_STATUS_IDENTITIES: list(
+                        self._pending_secondary_status_identities
+                    ),
+                    CONF_OPEN_TIME: round(self._open_time, 2),
+                    CONF_CLOSE_TIME: round(self._close_time, 2),
+                    CONF_INVERT_DIRECTION: self._pending_invert_direction,
+                }
+                if (
+                    self._pending_status_device_id is not None
+                    and self._pending_status_enum is not None
+                ):
+                    data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
+                    data[CONF_STATUS_ENUM] = self._pending_status_enum
+                if self._pending_status_identity_source is not None:
+                    data[CONF_STATUS_IDENTITY_SOURCE] = (
+                        self._pending_status_identity_source
+                    )
+                if calibration_record := self._calibration_record():
+                    data[CONF_LAST_CALIBRATION] = calibration_record
                 return self.flow.async_create_entry(  # type: ignore[attr-defined]
                     title=self._pending_device_name,
-                    data={
-                        CONF_DEVICE_ID: self._pending_device_id,
-                        CONF_DEVICE_ENUM: self._pending_device_enum,
-                        CONF_COMMAND_DEVICE_ID: self._pending_device_id,
-                        CONF_COMMAND_ENUM: self._pending_device_enum,
-                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
-                        CONF_STATUS_ENUM: self._pending_status_enum,
-                        CONF_SECONDARY_STATUS_IDENTITIES: list(
-                            self._pending_secondary_status_identities
-                        ),
-                        CONF_OPEN_TIME: round(self._open_time, 2),
-                        CONF_CLOSE_TIME: round(self._close_time, 2),
-                        CONF_INVERT_DIRECTION: self._pending_invert_direction,
-                    },
+                    data=data,
                     unique_id=self._pending_device_id,
                 )
 
@@ -400,13 +537,34 @@ class CalibrationFlowHandler:
                 return self.flow.async_create_entry(title="", data={})
 
             if isinstance(self.flow, ConfigSubentryFlow):
+                data_updates: dict[str, Any] = {
+                    CONF_OPEN_TIME: round(self._open_time, 2),
+                    CONF_CLOSE_TIME: round(self._close_time, 2),
+                }
+                if calibration_record := self._calibration_record():
+                    data_updates[CONF_LAST_CALIBRATION] = calibration_record
+                if (
+                    self._pending_status_device_id is not None
+                    and self._pending_status_enum is not None
+                    and self._pending_status_identity_source
+                    == STATUS_IDENTITY_SOURCE_CALIBRATION
+                ):
+                    data_updates.update(
+                        {
+                            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
+                            CONF_STATUS_ENUM: self._pending_status_enum,
+                            CONF_STATUS_IDENTITY_SOURCE: (
+                                STATUS_IDENTITY_SOURCE_CALIBRATION
+                            ),
+                            CONF_SECONDARY_STATUS_IDENTITIES: list(
+                                self._pending_secondary_status_identities
+                            ),
+                        }
+                    )
                 return self.flow.async_update_and_abort(
                     self.flow._get_entry(),
                     self.flow._get_reconfigure_subentry(),
-                    data_updates={
-                        CONF_OPEN_TIME: round(self._open_time, 2),
-                        CONF_CLOSE_TIME: round(self._close_time, 2),
-                    },
+                    data_updates=data_updates,
                 )
 
             # Fallback: abort with success if no creation path triggered
@@ -419,6 +577,7 @@ class CalibrationFlowHandler:
                 "device_name": self._selected_device["name"],
                 "open_time": f"{self._open_time:.2f}",
                 "close_time": f"{self._close_time:.2f}",
+                **self._calibration_summary_placeholders(),
             },
             last_step=True,
         )
@@ -546,6 +705,7 @@ class CalibrationFlowHandler:
         status_device_id: str | None = None,
         status_enum: str | None = None,
         secondary_status_identities: list[dict[str, str]] | None = None,
+        status_identity_source: str | None = None,
         invert_direction: bool = False,
     ) -> None:
         """Enable creating a subentry after calibration completes."""
@@ -553,8 +713,9 @@ class CalibrationFlowHandler:
         self._pending_device_id = device_id
         self._pending_device_enum = device_enum
         self._pending_device_name = device_name
-        self._pending_status_device_id = status_device_id or device_id
-        self._pending_status_enum = status_enum or device_enum
+        self._pending_status_device_id = status_device_id
+        self._pending_status_enum = status_enum
+        self._pending_status_identity_source = status_identity_source
         self._pending_secondary_status_identities = list(
             secondary_status_identities or []
         )
@@ -569,4 +730,6 @@ class CalibrationFlowHandler:
         self._pending_status_device_id = None
         self._pending_status_enum = None
         self._pending_secondary_status_identities = []
+        self._pending_status_identity_source = None
+        self._calibration_discovery_result = None
         self._pending_invert_direction = False

@@ -366,6 +366,68 @@ async def test_primary_and_secondary_status_identities_both_match(
     )
 
 
+def test_phase_labelled_capture_selects_calibration_primary_and_secondary(
+    hass: HomeAssistant,
+) -> None:
+    """Test calibration capture reuses recognized frames instead of command ID."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.start_status_frame_capture(phase="opening")
+
+    api._handle_message("ss083720B8ZZZZ01PP00")
+    api._handle_message("ss2306C5C0ZZZZE1PP00")
+    api._handle_message("ss083720B8ZZZZ00PP00")
+    api.set_status_frame_capture_phase("closing")
+    api._handle_message("ss083720B8ZZZZ02PP00")
+    api._handle_message("ss2306C5C0ZZZZE2PP00")
+    api._handle_message("ss083720B8ZZZZ00PP00")
+
+    result = api.finish_status_frame_capture(end_reason="completed")
+
+    assert result["primary"]["device_id"] == "3720B8"
+    assert result["primary"]["enum"] == "08"
+    assert result["primary"]["commands"] == ["01", "00", "02"]
+    assert [(item["device_id"], item["enum"]) for item in result["secondary"]] == [
+        ("06C5C0", "23")
+    ]
+    assert result["unknown_commands"] == [
+        {"device_id": "06C5C0", "enum": "23", "commands": ["E1", "E2"]}
+    ]
+    assert [frame["phase"] for frame in result["frames"]] == [
+        "opening",
+        "opening",
+        "opening_endstop",
+        "closing",
+        "closing",
+        "closing_endstop",
+    ]
+    assert result["end_reason"] == "completed"
+    assert result["position_tracking_available"] is True
+    recent = api.get_recent_raw_frames(limit=2)
+    assert [(frame["device_id"], frame["enum"]) for frame in recent] == [
+        ("06C5C0", "23"),
+        ("3720B8", "08"),
+    ]
+    assert all(frame["phase"] == "closing" for frame in recent)
+
+
+def test_capture_does_not_promote_unknown_command_identity(
+    hass: HomeAssistant,
+) -> None:
+    """Test E/C/A-family frames remain secondary when no 00/01/02 exists."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.start_status_frame_capture(phase="opening")
+    api._handle_message("ss1106C5C0ZZZZE1PP00")
+    api._handle_message("ss1106C5C0ZZZZC2PP00")
+
+    result = api.finish_status_frame_capture(end_reason="completed_without_status")
+
+    assert result["primary"] is None
+    assert result["position_tracking_available"] is False
+    assert [(item["device_id"], item["enum"]) for item in result["secondary"]] == [
+        ("06C5C0", "11")
+    ]
+
+
 def test_position_update_diagnostics_are_kept_per_command_identity(
     hass: HomeAssistant,
 ) -> None:

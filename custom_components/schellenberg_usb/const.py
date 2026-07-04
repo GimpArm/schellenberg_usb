@@ -32,6 +32,12 @@ CONF_COMMAND_ENUM = "command_enum"
 CONF_STATUS_DEVICE_ID = "status_device_id"
 CONF_STATUS_ENUM = "status_enum"
 CONF_SECONDARY_STATUS_IDENTITIES = "secondary_status_identities"
+CONF_STATUS_IDENTITY_SOURCE = "status_identity_source"
+CONF_LAST_CALIBRATION = "last_calibration"
+STATUS_IDENTITY_SOURCE_CALIBRATION = "calibration"
+STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY = "remote_discovery"
+STATUS_IDENTITY_SOURCE_MANUAL = "manual"
+STATUS_IDENTITY_SOURCE_UNKNOWN = "unknown"
 CONF_INVERT_DIRECTION = "invert_direction"
 CONF_COMMAND = "command"
 CONF_ENUM = "enum"
@@ -115,6 +121,7 @@ VERIFY_TIMEOUT = 5  # seconds to wait for verification response
 # Pairing constants
 PAIRING_TIMEOUT = 120  # seconds to wait for pairing response
 PAIRING_DEVICE_ENUM_START = 0x10  # Start from 0x10 for new devices
+STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 
 # Calibration constants
 CALIBRATION_TIMEOUT = 300  # Maximum 5 minutes (300 seconds) for calibration

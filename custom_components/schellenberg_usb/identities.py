@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 type StatusIdentity = tuple[str, str]
 
@@ -94,3 +95,75 @@ def format_status_identities(value: object) -> str:
         f"{device_id}/{device_enum}"
         for device_id, device_enum in normalize_status_identities(value)
     )
+
+
+def summarize_status_discovery_frames(
+    frames: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Group one bounded remote-capture window and choose its tracking stream."""
+    recognized = {"00", "01", "02"}
+    groups: dict[StatusIdentity, dict[str, Any]] = {}
+    for frame in frames:
+        identity = normalize_status_identity(
+            frame.get("device_id", ""), frame.get("enum", "")
+        )
+        if identity is None:
+            continue
+        command = str(frame.get("command", "")).strip().upper()
+        if len(command) != 2 or any(
+            character not in "0123456789ABCDEF" for character in command
+        ):
+            continue
+        group = groups.setdefault(
+            identity,
+            {
+                "device_id": identity[0],
+                "enum": identity[1],
+                "commands": [],
+                "timestamps": [],
+                "frame_count": 0,
+                "recognized_frame_count": 0,
+            },
+        )
+        group["frame_count"] += 1
+        if command in recognized:
+            group["recognized_frame_count"] += 1
+        if command not in group["commands"]:
+            group["commands"].append(command)
+        timestamp = str(frame.get("time", "")).strip()
+        if timestamp:
+            group["timestamps"].append(timestamp)
+
+    candidates = [
+        group for group in groups.values() if recognized.intersection(group["commands"])
+    ]
+    primary = (
+        max(
+            candidates,
+            key=lambda group: (
+                len(recognized.intersection(group["commands"])),
+                group["recognized_frame_count"],
+            ),
+        )
+        if candidates
+        else None
+    )
+    secondary = [group for group in groups.values() if group is not primary]
+    unknown_commands = [
+        {
+            "device_id": group["device_id"],
+            "enum": group["enum"],
+            "commands": [
+                command for command in group["commands"] if command not in recognized
+            ],
+        }
+        for group in groups.values()
+        if any(command not in recognized for command in group["commands"])
+    ]
+    return {
+        "primary": primary,
+        "secondary": secondary,
+        "groups": list(groups.values()),
+        "unknown_commands": unknown_commands,
+        "position_tracking_available": primary is not None,
+    }

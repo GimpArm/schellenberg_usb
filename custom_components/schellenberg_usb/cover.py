@@ -35,6 +35,7 @@ from .const import (
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
@@ -43,6 +44,7 @@ from .const import (
     SIGNAL_DEVICE_EVENT,
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
     SchellenbergConfigEntry,
 )
@@ -95,16 +97,23 @@ async def async_setup_entry(
                 subentry.data.get(CONF_COMMAND_DEVICE_ID) or legacy_device_id
             )
             command_enum = subentry.data.get(CONF_COMMAND_ENUM) or legacy_device_enum
-            status_device_id = (
-                subentry.data.get(CONF_STATUS_DEVICE_ID)
-                or legacy_device_id
-                or command_device_id
-            )
-            status_enum = (
-                subentry.data.get(CONF_STATUS_ENUM)
-                or legacy_device_enum
-                or command_enum
-            )
+            status_identity_source = subentry.data.get(CONF_STATUS_IDENTITY_SOURCE)
+            if status_identity_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
+                status_device_id = subentry.data.get(CONF_STATUS_DEVICE_ID)
+                status_enum = subentry.data.get(CONF_STATUS_ENUM)
+            else:
+                # Preserve historical behavior only for entries that predate the
+                # explicit unknown/automatic/manual provenance field.
+                status_device_id = (
+                    subentry.data.get(CONF_STATUS_DEVICE_ID)
+                    or legacy_device_id
+                    or command_device_id
+                )
+                status_enum = (
+                    subentry.data.get(CONF_STATUS_ENUM)
+                    or legacy_device_enum
+                    or command_enum
+                )
             secondary_status_identities = normalize_status_identities(
                 subentry.data.get(CONF_SECONDARY_STATUS_IDENTITIES)
             )
@@ -121,14 +130,12 @@ async def async_setup_entry(
                     stable_device_id,
                     command_device_id,
                     command_enum,
-                    status_device_id,
-                    status_enum,
                 )
             ):
                 # This subentry lacks motor identification info; it's likely a non-motor type
                 # or pairing is incomplete. Downgrade to debug to avoid user confusion.
                 _LOGGER.debug(
-                    "Skipping subentry %s (type=%s) with incomplete command/status identity",
+                    "Skipping subentry %s (type=%s) with incomplete command identity",
                     subentry.subentry_id,
                     getattr(subentry, "subentry_type", "unknown"),
                 )
@@ -137,8 +144,12 @@ async def async_setup_entry(
             stable_device_id = str(stable_device_id)
             command_device_id = str(command_device_id).strip().upper()
             command_enum = str(command_enum).strip().upper().zfill(2)
-            status_device_id = str(status_device_id).strip().upper()
-            status_enum = str(status_enum).strip().upper().zfill(2)
+            if status_device_id is not None and status_enum is not None:
+                status_device_id = str(status_device_id).strip().upper()
+                status_enum = str(status_enum).strip().upper().zfill(2)
+            else:
+                status_device_id = None
+                status_enum = None
 
             # Check if entity already exists to avoid duplicates.
             # Keep the original subentry unique ID stable when editable protocol IDs change.
@@ -175,7 +186,8 @@ async def async_setup_entry(
                 manufacturer="Schellenberg",
                 model=(
                     f"USB Stick Motor (command {command_device_id}/{command_enum}, "
-                    f"primary status {status_device_id}/{status_enum}, "
+                    f"primary status "
+                    f"{f'{status_device_id}/{status_enum}' if status_device_id else 'unknown'}, "
                     f"secondary statuses {len(secondary_status_identities)})"
                 ),
             )
@@ -211,6 +223,7 @@ async def async_setup_entry(
                         command_device_id=command_device_id,
                         status_device_id=status_device_id,
                         status_enum=status_enum,
+                        status_identity_source=str(status_identity_source or "legacy"),
                         secondary_status_identities=secondary_status_identities,
                         invert_direction=bool(
                             subentry.data.get(CONF_INVERT_DIRECTION, False)
@@ -249,6 +262,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         command_device_id: str | None = None,
         status_device_id: str | None = None,
         status_enum: str | None = None,
+        status_identity_source: str | None = None,
         secondary_status_identities: object = None,
         invert_direction: bool = False,
     ) -> None:
@@ -264,6 +278,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             command_device_id: Protocol ID associated with outgoing commands
             status_device_id: Protocol ID expected in incoming status messages
             status_enum: Enum expected in primary incoming status messages
+            status_identity_source: How the primary status identity was obtained
             secondary_status_identities: Additional identities matched diagnostically
             invert_direction: Swap physical up/down commands for logical open/close
 
@@ -272,20 +287,27 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._device_id = device_id
         self._command_device_id = command_device_id or device_id
         self._command_enum = device_enum
-        primary_identity = normalize_status_identity(
-            status_device_id or self._command_device_id,
-            status_enum or device_enum,
-        )
-        if primary_identity is None:
-            primary_identity = (
-                str(status_device_id or self._command_device_id).upper(),
-                str(status_enum or device_enum).upper().zfill(2),
+        self._status_identity_source = status_identity_source or "legacy"
+        if self._status_identity_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
+            primary_identity = None
+        else:
+            primary_identity = normalize_status_identity(
+                status_device_id or self._command_device_id,
+                status_enum or device_enum,
             )
-        self._status_device_id, self._status_enum = primary_identity
+        self._status_device_id: str | None
+        self._status_enum: str | None
+        if primary_identity is None:
+            self._status_device_id = None
+            self._status_enum = None
+        else:
+            self._status_device_id, self._status_enum = primary_identity
         secondary_source = secondary_status_identities
         if secondary_source is None and device_data is not None:
             secondary_source = device_data.get(CONF_SECONDARY_STATUS_IDENTITIES)
-        primary_identity = (self._status_device_id, self._status_enum)
+        primary_identity = normalize_status_identity(
+            self._status_device_id, self._status_enum
+        )
         self._secondary_status_identities = tuple(
             identity
             for identity in normalize_status_identities(secondary_source)
@@ -434,14 +456,16 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             status="estimated",
         )
 
-        # Register listeners for events and status updates
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{SIGNAL_DEVICE_EVENT}_{self._status_device_id}_{self._status_enum}",
-                self._handle_event,
+        # Only an observed or manually supplied primary status identity may drive
+        # received-frame position tracking. Unknown status never aliases command ID.
+        if self._status_device_id is not None and self._status_enum is not None:
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    f"{SIGNAL_DEVICE_EVENT}_{self._status_device_id}_{self._status_enum}",
+                    self._handle_event,
+                )
             )
-        )
 
         # Developer Tools position corrections target the command identity because it
         # is unique per configured cover and does not depend on a received RF frame.

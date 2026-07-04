@@ -30,19 +30,26 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
     CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     DOMAIN,
+    STATUS_IDENTITY_SOURCE_CALIBRATION,
+    STATUS_IDENTITY_SOURCE_MANUAL,
+    STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
     TEST_COMMAND_DELAY,
 )
 from .identities import (
     format_status_identities,
     normalize_status_identities,
+    normalize_status_identity,
     parse_status_identities_text,
     serialize_status_identities,
 )
@@ -55,6 +62,7 @@ DEVELOPER_TOOLS_MENU_OPTIONS = {
     "test_open": "Test Open",
     "test_close": "Test Close",
     "test_stop": "Test Stop",
+    "discover_status": "Discover status from original remote",
     "set_position_open": "Set position fully open",
     "set_position_closed": "Set position fully closed",
     "set_position_manual": "Set position manually",
@@ -239,6 +247,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_status_device_id: str | None = None
         self._pending_status_enum: str | None = None
         self._pending_secondary_status_identities: list[dict[str, str]] = []
+        self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
+        self._status_discovery_result: dict[str, Any] | None = None
+        self._status_discovery_updates_existing = False
         self._pending_open_time: float | None = None
         self._pending_close_time: float | None = None
         self._pending_invert_direction = False
@@ -318,8 +329,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         device_id, device_enum = pairing_result
         self._pending_device_id = device_id
         self._pending_device_enum = device_enum
-        self._pending_status_device_id = device_id
-        self._pending_status_enum = device_enum
+        self._pending_status_device_id = None
+        self._pending_status_enum = None
+        self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
         self._pending_secondary_status_identities = []
         self._pending_device_name = None
         return await self.async_step_name_device()
@@ -336,12 +348,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             command_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
             status_device_id = (
                 str(user_input.get(CONF_STATUS_DEVICE_ID, "")).strip().upper()
-                or command_device_id
             )
-            status_enum = (
-                str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
-                or command_enum
-            )
+            status_enum = str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
             try:
                 secondary_identities = parse_status_identities_text(
                     user_input.get(CONF_SECONDARY_STATUS_IDENTITIES, "")
@@ -349,11 +357,15 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             except ValueError:
                 secondary_identities = ()
                 errors[CONF_SECONDARY_STATUS_IDENTITIES] = "invalid_status_identities"
-            primary_identity = (status_device_id, status_enum)
+            primary_identity = (
+                (status_device_id, status_enum)
+                if status_device_id and status_enum
+                else None
+            )
             secondary_identities = tuple(
                 identity
                 for identity in secondary_identities
-                if identity != primary_identity
+                if primary_identity is None or identity != primary_identity
             )
             open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
             close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
@@ -364,9 +376,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 errors[CONF_DEVICE_ID] = "invalid_device_id"
             if not self._is_hex_value(command_enum, 2):
                 errors[CONF_DEVICE_ENUM] = "invalid_device_enum"
-            if not self._is_hex_value(status_device_id, 6):
+            if bool(status_device_id) != bool(status_enum):
+                errors[
+                    CONF_STATUS_ENUM if status_device_id else CONF_STATUS_DEVICE_ID
+                ] = "status_identity_incomplete"
+            if status_device_id and not self._is_hex_value(status_device_id, 6):
                 errors[CONF_STATUS_DEVICE_ID] = "invalid_device_id"
-            if not self._is_hex_value(status_enum, 2):
+            if status_enum and not self._is_hex_value(status_enum, 2):
                 errors[CONF_STATUS_ENUM] = "invalid_device_enum"
             if open_time <= 0:
                 errors[CONF_OPEN_TIME_SECONDS] = "invalid_travel_time"
@@ -388,8 +404,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 self._pending_device_name = device_name
                 self._pending_device_id = command_device_id
                 self._pending_device_enum = command_enum
-                self._pending_status_device_id = status_device_id
-                self._pending_status_enum = status_enum
+                self._pending_status_enum = status_enum or None
+                self._pending_status_device_id = status_device_id or None
+                self._pending_status_identity_source = (
+                    STATUS_IDENTITY_SOURCE_MANUAL
+                    if status_device_id and status_enum
+                    else STATUS_IDENTITY_SOURCE_UNKNOWN
+                )
                 self._pending_secondary_status_identities = serialize_status_identities(
                     secondary_identities
                 )
@@ -487,18 +508,16 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         """Return config-subentry data for the pending blind."""
         assert self._pending_device_id is not None
         assert self._pending_device_enum is not None
-        assert self._pending_status_device_id is not None
-        assert self._pending_status_enum is not None
+
         assert self._pending_open_time is not None
         assert self._pending_close_time is not None
-        return {
-            # Legacy keys stay populated for backward compatibility.
+        data: dict[str, Any] = {
+            # Legacy command keys stay populated for backward compatibility.
             CONF_DEVICE_ID: self._pending_device_id,
             CONF_DEVICE_ENUM: self._pending_device_enum,
             CONF_COMMAND_DEVICE_ID: self._pending_device_id,
             CONF_COMMAND_ENUM: self._pending_device_enum,
-            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
-            CONF_STATUS_ENUM: self._pending_status_enum,
+            CONF_STATUS_IDENTITY_SOURCE: self._pending_status_identity_source,
             CONF_SECONDARY_STATUS_IDENTITIES: list(
                 self._pending_secondary_status_identities
             ),
@@ -506,6 +525,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             CONF_CLOSE_TIME: self._pending_close_time,
             CONF_INVERT_DIRECTION: self._pending_invert_direction,
         }
+        if (
+            self._pending_status_device_id is not None
+            and self._pending_status_enum is not None
+        ):
+            data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
+            data[CONF_STATUS_ENUM] = self._pending_status_enum
+        return data
 
     async def async_step_manual_next(
         self, user_input: dict[str, Any] | None = None
@@ -622,7 +648,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
             self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
-            return await self.async_step_save_manual()
+            return await self.async_step_discover_status()
 
         return self.async_show_form(
             step_id="manual_times",
@@ -684,19 +710,22 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         # Provide minimal device to handler
         handler.set_selected_device(
             {
-                "id": self._pending_status_device_id or device_id,
+                # Pairing identity is used transiently to preserve the existing
+                # calibration listener; it is not persisted as primary status.
+                "id": device_id,
                 "entity_id": device_id,
                 "name": device_name,
-                "enum": self._pending_status_enum or device_enum,
+                "enum": device_enum,
             }
         )
         handler.enable_subentry_creation(
             device_id=device_id,
             device_enum=device_enum,
             device_name=device_name,
-            status_device_id=self._pending_status_device_id or device_id,
-            status_enum=self._pending_status_enum or device_enum,
+            status_device_id=self._pending_status_device_id,
+            status_enum=self._pending_status_enum,
             secondary_status_identities=(self._pending_secondary_status_identities),
+            status_identity_source=self._pending_status_identity_source,
             invert_direction=self._pending_invert_direction,
         )
         if self._pairing_workflow == "hybrid":
@@ -730,18 +759,61 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         command_enum = str(
             data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, "")
         ).upper()
-        primary_status_device_id = str(
-            data.get(CONF_STATUS_DEVICE_ID) or command_device_id
-        ).upper()
+        configured_source = str(data.get(CONF_STATUS_IDENTITY_SOURCE) or "legacy")
+        if configured_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
+            primary_identity = None
+        else:
+            primary_identity = normalize_status_identity(
+                data.get(CONF_STATUS_DEVICE_ID) or command_device_id,
+                data.get(CONF_STATUS_ENUM) or command_enum,
+            )
+        primary_status_device_id = (
+            primary_identity[0] if primary_identity is not None else "Unknown"
+        )
         primary_status_enum = (
-            str(data.get(CONF_STATUS_ENUM) or command_enum).upper().zfill(2)
+            primary_identity[1] if primary_identity is not None else "--"
         )
         secondary_status_identities = normalize_status_identities(
             data.get(CONF_SECONDARY_STATUS_IDENTITIES)
         )
         status_identities = (
-            (primary_status_device_id, primary_status_enum),
+            *((primary_identity,) if primary_identity is not None else ()),
             *secondary_status_identities,
+        )
+        source_label = {
+            STATUS_IDENTITY_SOURCE_MANUAL: "manually entered",
+            STATUS_IDENTITY_SOURCE_CALIBRATION: (
+                "automatically discovered during calibration"
+            ),
+            STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY: (
+                "automatically discovered from original remote"
+            ),
+            STATUS_IDENTITY_SOURCE_UNKNOWN: "unknown / not discovered",
+        }.get(configured_source, "legacy configuration / unverified")
+        last_calibration_value = data.get(CONF_LAST_CALIBRATION)
+        last_calibration = (
+            last_calibration_value if isinstance(last_calibration_value, dict) else {}
+        )
+        calibration_frames = last_calibration.get("frames", [])
+        calibration_groups = last_calibration.get("groups", [])
+        calibration_frames_text = (
+            "\n".join(
+                f"{frame.get('time', '--')} "
+                f"{frame.get('device_id', 'Unknown')}/{frame.get('enum', '--')} "
+                f"cmd={frame.get('command', '--')} phase={frame.get('phase', 'unknown')}"
+                for frame in calibration_frames
+                if isinstance(frame, dict)
+            )
+            or "None recorded"
+        )
+        calibration_candidates_text = (
+            "\n".join(
+                f"{group.get('device_id', 'Unknown')}/{group.get('enum', '--')}: "
+                f"{','.join(group.get('commands', []))}"
+                for group in calibration_groups
+                if isinstance(group, dict)
+            )
+            or "None"
         )
         return {
             "name": subentry.title,
@@ -752,6 +824,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "status_enum": primary_status_enum,
             "primary_status_device_id": primary_status_device_id,
             "primary_status_enum": primary_status_enum,
+            "status_identity_source": source_label,
             "secondary_status_identities": secondary_status_identities,
             "secondary_status_identities_text": (
                 format_status_identities(secondary_status_identities) or "None"
@@ -760,6 +833,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "invert_direction": bool(data.get(CONF_INVERT_DIRECTION, False)),
             "open_time": float(data.get(CONF_OPEN_TIME, 60.0)),
             "close_time": float(data.get(CONF_CLOSE_TIME, 60.0)),
+            "last_calibration_time": str(last_calibration.get("completed_at", "Never")),
+            "calibration_end_reason": str(
+                last_calibration.get("end_reason", "Not recorded")
+            ),
+            "calibration_frames_text": calibration_frames_text,
+            "calibration_candidates_text": calibration_candidates_text,
         }
 
     def _developer_snapshot(
@@ -845,6 +924,11 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "command_enum": details["command_enum"],
                 "primary_status_device_id": details["primary_status_device_id"],
                 "primary_status_enum": details["primary_status_enum"],
+                "status_identity_source": details["status_identity_source"],
+                "last_calibration_time": details["last_calibration_time"],
+                "calibration_end_reason": details["calibration_end_reason"],
+                "calibration_frames": details["calibration_frames_text"],
+                "calibration_candidates": details["calibration_candidates_text"],
                 "secondary_status_identities": details[
                     "secondary_status_identities_text"
                 ],
@@ -1086,6 +1170,187 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             },
         )
 
+    def _prepare_existing_status_discovery(self) -> None:
+        """Load the selected persisted blind as a discovery update target."""
+        subentry = self._get_reconfigure_subentry()
+        data = subentry.data
+        self._pending_device_name = subentry.title
+        self._pending_device_id = str(
+            data.get(CONF_COMMAND_DEVICE_ID) or data.get(CONF_DEVICE_ID, "")
+        ).upper()
+        self._pending_device_enum = (
+            str(data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, ""))
+            .upper()
+            .zfill(2)
+        )
+        self._status_discovery_updates_existing = True
+
+    def _apply_remote_status_discovery(self, result: dict[str, Any]) -> None:
+        """Apply one guided capture result without aliasing transmit identity."""
+        self._status_discovery_result = result
+        primary = result.get("primary")
+        if primary is None:
+            self._pending_status_device_id = None
+            self._pending_status_enum = None
+            self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
+        else:
+            self._pending_status_device_id = str(primary["device_id"])
+            self._pending_status_enum = str(primary["enum"])
+            self._pending_status_identity_source = (
+                STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY
+            )
+        self._pending_secondary_status_identities = [
+            {"device_id": str(group["device_id"]), "enum": str(group["enum"])}
+            for group in result.get("secondary", [])
+        ]
+
+    def _status_discovery_placeholders(self) -> dict[str, str]:
+        """Format a complete confirmation summary without requiring log access."""
+        result = self._status_discovery_result or {}
+        primary = result.get("primary")
+        secondary = result.get("secondary", [])
+        unknown = result.get("unknown_commands", [])
+        return {
+            "command_identity": (
+                f"{self._pending_device_id or 'Unknown'}/"
+                f"{self._pending_device_enum or '--'}"
+            ),
+            "primary_identity": (
+                f"{primary['device_id']}/{primary['enum']}"
+                if primary is not None
+                else "Not discovered"
+            ),
+            "primary_commands": (
+                ", ".join(primary.get("commands", []))
+                if primary is not None
+                else "None"
+            ),
+            "primary_timestamps": (
+                ", ".join(primary.get("timestamps", []))
+                if primary is not None
+                else "None"
+            ),
+            "secondary_identities": (
+                "\n".join(
+                    f"{group['device_id']}/{group['enum']}: "
+                    f"{','.join(group.get('commands', []))}"
+                    for group in secondary
+                )
+                or "None"
+            ),
+            "unknown_commands": (
+                "\n".join(
+                    f"{group['device_id']}/{group['enum']}: "
+                    f"{','.join(group.get('commands', []))}"
+                    for group in unknown
+                )
+                or "None"
+            ),
+            "position_tracking": (
+                "Available from received 00/01/02 status frames"
+                if primary is not None
+                else (
+                    "No remote/status tracking identity was discovered. The blind "
+                    "can still be controlled, but position tracking will use Home "
+                    "Assistant commands only."
+                )
+            ),
+            "frame_count": str(len(result.get("frames", []))),
+        }
+
+    async def async_step_discover_status(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Guide an original-remote sequence and capture all received identities."""
+        if not self._pending_device_id:
+            self._prepare_existing_status_discovery()
+        if user_input is None:
+            return self.async_show_form(
+                step_id="discover_status",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "selected_blind": self._pending_device_name or "Blind",
+                    "command_identity": (
+                        f"{self._pending_device_id or 'Unknown'}/"
+                        f"{self._pending_device_enum or '--'}"
+                    ),
+                },
+            )
+
+        api = self._get_entry().runtime_data
+        try:
+            result = await api.async_discover_status_identities()
+        except ConnectionError:
+            return self.async_show_form(
+                step_id="discover_status",
+                data_schema=vol.Schema({}),
+                errors={"base": "status_discovery_unavailable"},
+                description_placeholders={
+                    "selected_blind": self._pending_device_name or "Blind",
+                    "command_identity": (
+                        f"{self._pending_device_id or 'Unknown'}/"
+                        f"{self._pending_device_enum or '--'}"
+                    ),
+                },
+            )
+        except RuntimeError:
+            return self.async_show_form(
+                step_id="discover_status",
+                data_schema=vol.Schema({}),
+                errors={"base": "status_discovery_busy"},
+                description_placeholders={
+                    "selected_blind": self._pending_device_name or "Blind",
+                    "command_identity": (
+                        f"{self._pending_device_id or 'Unknown'}/"
+                        f"{self._pending_device_enum or '--'}"
+                    ),
+                },
+            )
+        self._apply_remote_status_discovery(result)
+        return await self.async_step_confirm_status_discovery()
+
+    async def async_step_confirm_status_discovery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Confirm detected primary/secondary identities before persistence."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="confirm_status_discovery",
+                data_schema=vol.Schema({}),
+                description_placeholders=self._status_discovery_placeholders(),
+            )
+
+        if self._status_discovery_updates_existing:
+            entry = self._get_entry()
+            subentry = self._get_reconfigure_subentry()
+            data = dict(subentry.data)
+            data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+            data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                self._pending_secondary_status_identities
+            )
+            if (
+                self._pending_status_device_id is not None
+                and self._pending_status_enum is not None
+            ):
+                data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
+                data[CONF_STATUS_ENUM] = self._pending_status_enum
+            else:
+                data.pop(CONF_STATUS_DEVICE_ID, None)
+                data.pop(CONF_STATUS_ENUM, None)
+            return self.async_update_and_abort(entry, subentry, data=data)
+
+        if (
+            not self._pending_device_name
+            or self._pending_open_time is None
+            or self._pending_close_time is None
+        ):
+            return self.async_abort(reason="device_not_found")
+        return self.async_create_entry(
+            title=self._pending_device_name,
+            data=self._pending_data(),
+            unique_id=self._pending_device_id,
+        )
+
     async def async_step_teach_motor(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -1311,8 +1576,17 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "Configured primary status identity:",
                 f"Device ID: {details['primary_status_device_id']}",
                 f"Enum: {details['primary_status_enum']}",
+                f"Source: {details['status_identity_source']}",
                 "Configured secondary status identities:",
                 details["secondary_status_identities_text"],
+                "",
+                "Last calibration run:",
+                f"Completed: {details['last_calibration_time']}",
+                f"End reason: {details['calibration_end_reason']}",
+                "Frames observed during calibration:",
+                details["calibration_frames_text"],
+                "Candidate status identities:",
+                details["calibration_candidates_text"],
                 f"Open time: {details['open_time']:.2f} seconds",
                 f"Close time: {details['close_time']:.2f} seconds",
                 f"Invert direction: {details['invert_direction']}",
@@ -1374,10 +1648,15 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             current_data.get(CONF_COMMAND_ENUM)
             or current_data.get(CONF_DEVICE_ENUM, "")
         )
-        status_device_id = str(
-            current_data.get(CONF_STATUS_DEVICE_ID) or command_device_id
-        )
-        status_enum = str(current_data.get(CONF_STATUS_ENUM) or command_enum)
+        current_status_source = current_data.get(CONF_STATUS_IDENTITY_SOURCE)
+        if current_status_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
+            status_device_id = str(current_data.get(CONF_STATUS_DEVICE_ID) or "")
+            status_enum = str(current_data.get(CONF_STATUS_ENUM) or "")
+        else:
+            status_device_id = str(
+                current_data.get(CONF_STATUS_DEVICE_ID) or command_device_id
+            )
+            status_enum = str(current_data.get(CONF_STATUS_ENUM) or command_enum)
         secondary_status_text = format_status_identities(
             current_data.get(CONF_SECONDARY_STATUS_IDENTITIES)
         )
@@ -1389,12 +1668,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             command_enum = str(user_input[CONF_DEVICE_ENUM]).strip().upper()
             status_device_id = (
                 str(user_input.get(CONF_STATUS_DEVICE_ID, "")).strip().upper()
-                or command_device_id
             )
-            status_enum = (
-                str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
-                or command_enum
-            )
+            status_enum = str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
             secondary_status_text = str(
                 user_input.get(CONF_SECONDARY_STATUS_IDENTITIES, "")
             )
@@ -1405,11 +1680,15 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             except ValueError:
                 secondary_identities = ()
                 errors[CONF_SECONDARY_STATUS_IDENTITIES] = "invalid_status_identities"
-            primary_identity = (status_device_id, status_enum)
+            primary_identity = (
+                (status_device_id, status_enum)
+                if status_device_id and status_enum
+                else None
+            )
             secondary_identities = tuple(
                 identity
                 for identity in secondary_identities
-                if identity != primary_identity
+                if primary_identity is None or identity != primary_identity
             )
             open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
             close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
@@ -1420,9 +1699,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 errors[CONF_DEVICE_ID] = "invalid_device_id"
             if not self._is_hex_value(command_enum, 2):
                 errors[CONF_DEVICE_ENUM] = "invalid_device_enum"
-            if not self._is_hex_value(status_device_id, 6):
+            if bool(status_device_id) != bool(status_enum):
+                errors[
+                    CONF_STATUS_ENUM if status_device_id else CONF_STATUS_DEVICE_ID
+                ] = "status_identity_incomplete"
+            if status_device_id and not self._is_hex_value(status_device_id, 6):
                 errors[CONF_STATUS_DEVICE_ID] = "invalid_device_id"
-            if not self._is_hex_value(status_enum, 2):
+            if status_enum and not self._is_hex_value(status_enum, 2):
                 errors[CONF_STATUS_ENUM] = "invalid_device_enum"
             if open_time <= 0:
                 errors[CONF_OPEN_TIME_SECONDS] = "invalid_travel_time"
@@ -1447,8 +1730,11 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                         CONF_DEVICE_ENUM: command_enum,
                         CONF_COMMAND_DEVICE_ID: command_device_id,
                         CONF_COMMAND_ENUM: command_enum,
-                        CONF_STATUS_DEVICE_ID: status_device_id,
-                        CONF_STATUS_ENUM: status_enum,
+                        CONF_STATUS_IDENTITY_SOURCE: (
+                            STATUS_IDENTITY_SOURCE_MANUAL
+                            if status_device_id and status_enum
+                            else STATUS_IDENTITY_SOURCE_UNKNOWN
+                        ),
                         CONF_SECONDARY_STATUS_IDENTITIES: (
                             serialize_status_identities(secondary_identities)
                         ),
@@ -1459,6 +1745,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                         ),
                     }
                 )
+                if status_device_id and status_enum:
+                    current_data[CONF_STATUS_DEVICE_ID] = status_device_id
+                    current_data[CONF_STATUS_ENUM] = status_enum
+                else:
+                    current_data.pop(CONF_STATUS_DEVICE_ID, None)
+                    current_data.pop(CONF_STATUS_ENUM, None)
                 return self.async_update_and_abort(
                     entry,
                     subentry,

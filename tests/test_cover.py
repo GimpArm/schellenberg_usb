@@ -28,6 +28,7 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.cover import (
@@ -823,6 +824,47 @@ def test_manual_position_sync_updates_cover_and_stops_estimator(
         previous_position=50,
         new_position=position,
         status="confirmed/manual",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_status_does_not_alias_command_identity(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test a controllable cover loads without registering transmit ID as status."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="06C5C0",
+        device_enum="11",
+        device_name="Garden",
+        command_device_id="06C5C0",
+        status_identity_source=STATUS_IDENTITY_SOURCE_UNKNOWN,
+    )
+    cover.hass = hass
+
+    with (
+        patch.object(cover, "async_get_last_state", return_value=None),
+        patch(
+            "custom_components.schellenberg_usb.cover.async_dispatcher_connect"
+        ) as dispatcher_connect,
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_added_to_hass()
+
+    assert cover._status_device_id is None
+    assert cover._status_enum is None
+    _magic_mock(mock_api.register_entity).assert_called_once_with(
+        None,
+        None,
+        "Garden",
+        command_device_id="06C5C0",
+        command_enum="11",
+        secondary_status_identities=(),
+    )
+    assert not any(
+        str(call.args[1]).startswith("schellenberg_usb_device_event_")
+        for call in dispatcher_connect.call_args_list
     )
 
 

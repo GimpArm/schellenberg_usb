@@ -57,7 +57,7 @@
         },
         "manual": {
           "title": "Añadir una persiana manualmente",
-          "description": "Introduzca el ID del dispositivo y el enum que aparecen en los registros, además de los tiempos de recorrido completo medidos. La calibración se puede ejecutar más adelante. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position.",
+          "description": "Introduzca el ID del dispositivo y el enum que aparecen en los registros, además de los tiempos de recorrido completo medidos. La calibración se puede ejecutar más adelante. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position. Leave both primary status fields blank when unknown; the transmit identity will not be used as status unless it was actually observed or you enter it manually.",
           "data": {
             "device_name": "Nombre",
             "device_id": "ID del dispositivo",
@@ -95,7 +95,7 @@
         },
         "calibration_complete": {
           "title": "Calibración completada",
-          "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.",
+          "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.\n\nStatus discovery from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Frames observed: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the blind can still be controlled and its position estimated from Home Assistant commands.",
           "submit": "Hecho"
         },
         "pair_test": {
@@ -150,11 +150,12 @@
         },
         "developer_tools": {
           "title": "Developer tools",
-          "description": "Selected blind: {selected_blind}\n\nLast matched frame (any identity):\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nLast primary tracking frame:\nDevice ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nCommand: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nTime: {primary_last_time}\n\nLast secondary frame:\nDevice ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nCommand: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nTime: {secondary_last_time}\n\nLast position update:\nSource: {position_source}\nDirection: {position_direction}\nPrevious position: {position_previous}\nNew position: {position_new}\nStatus: {position_status}\nTime: {position_time}\n\nCurrent position diagnostics:\nCurrent estimated position: {current_position}\nLast manual sync time: {last_manual_sync_time}\nEstimated or manually confirmed: {position_confidence}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSecondary:\n{secondary_status_identities}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
+          "description": "Selected blind: {selected_blind}\n\nLast matched frame (any identity):\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nLast primary tracking frame:\nDevice ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nCommand: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nTime: {primary_last_time}\n\nLast secondary frame:\nDevice ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nCommand: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nTime: {secondary_last_time}\n\nLast position update:\nSource: {position_source}\nDirection: {position_direction}\nPrevious position: {position_previous}\nNew position: {position_new}\nStatus: {position_status}\nTime: {position_time}\n\nCurrent position diagnostics:\nCurrent estimated position: {current_position}\nLast manual sync time: {last_manual_sync_time}\nEstimated or manually confirmed: {position_confidence}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSource: {status_identity_source}\nSecondary:\n{secondary_status_identities}\n\nLast calibration run:\nCompleted: {last_calibration_time}\nEnd reason: {calibration_end_reason}\nCandidate identities:\n{calibration_candidates}\nFrames observed:\n{calibration_frames}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
           "menu_options": {
             "test_open": "Test Open",
             "test_close": "Test Close",
             "test_stop": "Test Stop",
+            "discover_status": "Detectar estado desde el mando original",
             "set_position_open": "Establecer posición totalmente abierta",
             "set_position_closed": "Establecer posición totalmente cerrada",
             "set_position_manual": "Establecer posición manualmente",
@@ -164,7 +165,16 @@
             "send_raw_command": "Enviar trama RF sin procesar"
           }
         },
-        "set_position_manual": {
+        "discover_status": {
+          "title": "Detectar estado desde el mando original",
+          "description": "Selected blind: {selected_blind}\nCommand/transmit identity: {command_identity}\n\nAfter pressing Start listening, use the original Schellenberg remote for this shutter channel: press OPEN, STOP, CLOSE, STOP. Home Assistant listens for 45 seconds and groups every received device ID, enum, command, and timestamp.",
+          "submit": "Start listening"
+        },
+        "confirm_status_discovery": {
+          "title": "Confirmar identidades de estado detectadas",
+          "description": "Command/transmit identity: {command_identity}\nFrames observed: {frame_count}\n\nDetected primary status identity: {primary_identity}\nPrimary commands observed: {primary_commands}\nPrimary timestamps: {primary_timestamps}\n\nDetected secondary identities:\n{secondary_identities}\n\nUnknown commands observed:\n{unknown_commands}\n\nPosition tracking: {position_tracking}",
+          "submit": "Save detected identities"
+        },        "set_position_manual": {
           "title": "Establecer posición manualmente",
           "description": "Establezca la posición actual de {selected_blind} sin mover el motor. Posición registrada actualmente: {current_position}.",
           "data": {
@@ -185,7 +195,7 @@
         },
         "edit": {
           "title": "Edit blind settings",
-          "description": "Changing protocol identities does not change the Home Assistant entity unique ID. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position.",
+          "description": "Changing protocol identities does not change the Home Assistant entity unique ID. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position. Leave both primary status fields blank when unknown; the transmit identity will not be used as status unless it was actually observed or you enter it manually.",
           "data": {
             "device_name": "Name",
             "device_id": "Command device ID",
@@ -227,7 +237,10 @@
         "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
         "invalid_raw_payload": "Introduzca exactamente 11 caracteres: 'ss' seguido de 9 caracteres hexadecimales.",
         "transmit_failed": "No se pudo transmitir la trama sin procesar. Compruebe el estado del dispositivo USB y los registros.",
-        "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_DISPOSITIVO/ENUM, separada por comas o líneas nuevas (por ejemplo F2B8D5/23)."
+        "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_DISPOSITIVO/ENUM, separada por comas o líneas nuevas (por ejemplo F2B8D5/23).",
+        "status_identity_incomplete": "Enter both primary status fields or leave both blank.",
+        "status_discovery_unavailable": "The USB stick is not connected. Reconnect it and try again.",
+        "status_discovery_busy": "Another frame capture is already active. Wait for it to finish and try again."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",

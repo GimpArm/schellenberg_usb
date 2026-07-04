@@ -79,7 +79,14 @@ diagnostic logging. The primary status ID and enum are matched exactly against i
 messages and are the only identity used for position tracking. Additional status
 identities can be entered as `DEVICE_ID/ENUM`, one per line or comma-separated.
 They are matched for logging and diagnostics, but cannot alter position until their
-command family is explicitly mapped.
+command family is explicitly mapped. New pairing no longer assumes that the
+command/transmit identity is also the receive/status identity. During automatic
+calibration, received frames are grouped by device ID and enum and labelled with
+the opening, closing, idle, or end-stop phase. A group that emits `00`, `01`, or
+`02` is saved as the calibration-derived primary status identity; companion
+unknown-command groups are saved as secondary identities. If no recognized stream
+is heard, primary status remains explicitly unknown and position is estimated from
+Home Assistant commands.
 
 To edit an existing blind, open its configuration action from the Schellenberg USB
 integration and choose **Edit identities and travel times**. The same menu also
@@ -94,8 +101,12 @@ closed**, and **Set position manually** (0–100). These corrections stop the ac
 estimator, update Home Assistant immediately, and are marked manually confirmed;
 later movement is estimated again and may drift until the next correction. The
 menu also shows the current transmit target, direct Open, Close, and Stop actions,
-a guided **Teach motor / activate USB transmitter** action, validated raw RF
-payload sending, and copyable diagnostics.
+a guided **Teach motor / activate USB transmitter** action, **Discover status from
+original remote** (OPEN, STOP, CLOSE, STOP during a 45-second capture), validated
+raw RF payload sending, and copyable diagnostics. Diagnostics retain the last
+calibration end reason, phase-labelled frames, candidate identities, and whether
+the saved primary came from calibration, remote discovery, manual entry, or is
+still unknown.
 
 Receiving frames from a physical remote proves only that the stick can listen. It
 does not mean the motor has authorized the stick as a transmitter. Likewise,

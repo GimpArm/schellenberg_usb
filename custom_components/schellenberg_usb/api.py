@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -48,18 +49,22 @@ from .const import (
     CONF_COMMAND_ENUM,
     CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
+    CONF_STATUS_IDENTITY_SOURCE,
     CONF_STATUS_ENUM,
     PAIRING_DEVICE_ENUM_START,
     PAIRING_TIMEOUT,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
+    STATUS_DISCOVERY_TIMEOUT,
     VERIFY_TIMEOUT,
 )
 from .identities import (
     StatusIdentity,
     normalize_status_identities,
     normalize_status_identity,
+    summarize_status_discovery_frames,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,6 +129,10 @@ class SchellenbergUsbApi:
         self._last_position_updates: dict[str, dict[str, Any]] = {}
         self._last_manual_position_syncs: dict[str, dict[str, Any]] = {}
         self._last_received_sequence = 0
+        self._raw_received_frames: deque[dict[str, Any]] = deque(maxlen=1000)
+        self._status_discovery_frames: list[dict[str, Any]] | None = None
+        self._status_discovery_phase = "idle"
+        self._status_discovery_started_at: str | None = None
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
         self._pairing_active = False
@@ -513,6 +522,23 @@ class SchellenbergUsbApi:
                     "position_tracking": position_tracking,
                 }
                 self._last_received_messages[identity] = frame
+                raw_frame = dict(frame)
+                raw_frame["phase"] = (
+                    self._status_discovery_phase
+                    if self._status_discovery_frames is not None
+                    else "pairing"
+                    if self._pairing_active
+                    else "idle"
+                )
+                self._raw_received_frames.append(raw_frame)
+                if self._status_discovery_frames is not None:
+                    captured_frame = dict(raw_frame)
+                    if normalized_command == CMD_STOP and captured_frame["phase"] in {
+                        "opening",
+                        "closing",
+                    }:
+                        captured_frame["phase"] = f"{captured_frame['phase']}_endstop"
+                    self._status_discovery_frames.append(captured_frame)
                 if position_tracking:
                     # Secondary and unknown primary frames must never overwrite the
                     # last frame that can legitimately drive the position model.
@@ -793,6 +819,84 @@ class SchellenbergUsbApi:
         self._pending_retry_command = None
         self._pending_transmit_source = None
         self._transmit_retry_count = 0
+
+    @callback
+    def get_recent_raw_frames(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent raw receive frames across pairing, tests, and idle listening."""
+        if limit <= 0:
+            return []
+        return [dict(frame) for frame in list(self._raw_received_frames)[-limit:]]
+
+    @callback
+    def start_status_frame_capture(self, *, phase: str) -> None:
+        """Start one bounded receive-frame capture for pairing or calibration."""
+        if self._status_discovery_frames is not None:
+            raise RuntimeError("status frame capture is already active")
+        self._status_discovery_frames = []
+        self._status_discovery_phase = phase
+        self._status_discovery_started_at = dt_util.now().isoformat()
+
+    @callback
+    def set_status_frame_capture_phase(self, phase: str) -> None:
+        """Label subsequently received frames with the current workflow phase."""
+        if self._status_discovery_frames is not None:
+            self._status_discovery_phase = phase
+
+    @callback
+    def finish_status_frame_capture(self, *, end_reason: str) -> dict[str, Any]:
+        """Stop capture and return grouped candidates plus raw phase-labelled frames."""
+        frames = list(self._status_discovery_frames or [])
+        started_at = self._status_discovery_started_at
+        self._status_discovery_frames = None
+        self._status_discovery_phase = "idle"
+        self._status_discovery_started_at = None
+        result = summarize_status_discovery_frames(frames)
+        result.update(
+            {
+                "frames": frames,
+                "started_at": started_at,
+                "completed_at": dt_util.now().isoformat(),
+                "end_reason": end_reason,
+            }
+        )
+        return result
+
+    async def async_discover_status_identities(
+        self, *, timeout: float = STATUS_DISCOVERY_TIMEOUT
+    ) -> dict[str, Any]:
+        """Capture and classify frames from one guided original-remote sequence."""
+        if not self._is_connected:
+            raise ConnectionError("USB stick is not connected")
+        if timeout <= 0:
+            raise ValueError("status discovery timeout must be positive")
+
+        self.start_status_frame_capture(phase="remote_discovery")
+        _LOGGER.warning(
+            "Status discovery started timeout=%.1fs; listening for original remote",
+            timeout,
+        )
+        try:
+            await asyncio.sleep(timeout)
+        except BaseException:
+            self.finish_status_frame_capture(end_reason="cancelled")
+            raise
+        result = self.finish_status_frame_capture(end_reason="capture_timeout_complete")
+
+        primary = result["primary"]
+        _LOGGER.warning(
+            "Status discovery completed frames=%d groups=%d primary=%s "
+            "secondary_count=%d position_tracking=%s",
+            len(result["frames"]),
+            len(result["groups"]),
+            (
+                f"{primary['device_id']}/{primary['enum']}"
+                if primary is not None
+                else "unknown"
+            ),
+            len(result["secondary"]),
+            result["position_tracking_available"],
+        )
+        return result
 
     async def pair_device_and_wait(self) -> tuple[str, str] | None:
         """Put the stick into pairing mode and wait for a device to pair."""
@@ -1223,15 +1327,24 @@ class SchellenbergUsbApi:
                 or device.get("enum")
                 or device.get(CONF_STATUS_ENUM)
             )
-            status_device_id = (
-                device.get(CONF_STATUS_DEVICE_ID)
-                or device.get("id")
-                or command_device_id
+            status_source = device.get(CONF_STATUS_IDENTITY_SOURCE)
+            if status_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
+                status_device_id = device.get(CONF_STATUS_DEVICE_ID)
+                status_enum = device.get(CONF_STATUS_ENUM)
+            else:
+                # Entries created before status provenance existed retain their
+                # historical fallback until the user runs discovery or edits them.
+                status_device_id = (
+                    device.get(CONF_STATUS_DEVICE_ID)
+                    or device.get("id")
+                    or command_device_id
+                )
+                status_enum = (
+                    device.get(CONF_STATUS_ENUM) or device.get("enum") or command_enum
+                )
+            entity_name = str(
+                device.get("name") or status_device_id or command_device_id or "Blind"
             )
-            status_enum = (
-                device.get(CONF_STATUS_ENUM) or device.get("enum") or command_enum
-            )
-            entity_name = str(device.get("name") or status_device_id)
             if command_device_id and command_enum:
                 self._registered_devices[str(command_device_id)] = str(command_enum)
             primary_identity = normalize_status_identity(status_device_id, status_enum)
@@ -1277,8 +1390,8 @@ class SchellenbergUsbApi:
 
     def register_entity(
         self,
-        status_device_id: str,
-        status_enum: str,
+        status_device_id: str | None,
+        status_enum: str | None,
         entity_name: str | None = None,
         *,
         command_device_id: str | None = None,
@@ -1288,7 +1401,13 @@ class SchellenbergUsbApi:
         """Register command, primary status, and diagnostic secondary identities."""
         command_id = command_device_id or status_device_id
         command_slot = command_enum or status_enum
-        display_name = entity_name or status_device_id
+        if command_id is None or command_slot is None:
+            _LOGGER.error(
+                "Cannot register cover without command identity entity=%s",
+                entity_name or "unknown",
+            )
+            return
+        display_name = entity_name or status_device_id or command_id
         self._registered_devices[command_id] = command_slot
         primary_identity = normalize_status_identity(status_device_id, status_enum)
         if primary_identity is not None:

@@ -33,12 +33,18 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
     CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     DOMAIN,
+    STATUS_IDENTITY_SOURCE_CALIBRATION,
+    STATUS_IDENTITY_SOURCE_MANUAL,
+    STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.cover import SchellenbergCover
@@ -99,6 +105,9 @@ async def test_legacy_pairing_path_is_unchanged() -> None:
 
     assert result["step_id"] == "name_device"
     assert flow._pairing_workflow == "legacy"
+    assert flow._pending_status_device_id is None
+    assert flow._pending_status_enum is None
+    assert flow._pending_status_identity_source == STATUS_IDENTITY_SOURCE_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -155,6 +164,7 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
         CONF_COMMAND_ENUM: "23",
         CONF_STATUS_DEVICE_ID: "3720B8",
         CONF_STATUS_ENUM: "08",
+        CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_MANUAL,
         CONF_SECONDARY_STATUS_IDENTITIES: [
             {"device_id": "F2B8D5", "enum": "23"},
             {"device_id": "ABCDEF", "enum": "0D"},
@@ -347,6 +357,27 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
             CONF_COMMAND_ENUM: "23",
             CONF_STATUS_DEVICE_ID: "3720B8",
             CONF_STATUS_ENUM: "08",
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_CALIBRATION,
+            CONF_LAST_CALIBRATION: {
+                "completed_at": "2026-07-04T12:00:55+02:00",
+                "end_reason": "completed",
+                "frames": [
+                    {
+                        "device_id": "3720B8",
+                        "enum": "08",
+                        "command": "00",
+                        "time": "12:00:25",
+                        "phase": "opening_endstop",
+                    }
+                ],
+                "groups": [
+                    {
+                        "device_id": "3720B8",
+                        "enum": "08",
+                        "commands": ["01", "00", "02"],
+                    }
+                ],
+            },
             CONF_SECONDARY_STATUS_IDENTITIES: [{"device_id": "F2B8D5", "enum": "23"}],
             CONF_OPEN_TIME: 25.06,
             CONF_CLOSE_TIME: 23.05,
@@ -439,6 +470,13 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["position_confidence"] == "estimated"
     assert placeholders["primary_status_device_id"] == "3720B8"
     assert placeholders["primary_status_enum"] == "08"
+    assert placeholders["status_identity_source"] == (
+        "automatically discovered during calibration"
+    )
+    assert placeholders["last_calibration_time"] == ("2026-07-04T12:00:55+02:00")
+    assert placeholders["calibration_end_reason"] == "completed"
+    assert "opening_endstop" in placeholders["calibration_frames"]
+    assert "3720B8/08: 01,00,02" in placeholders["calibration_candidates"]
     assert placeholders["secondary_status_identities"] == "F2B8D5/23"
     assert placeholders["command_device_id"] == "F2B8D5"
     assert placeholders["command_enum"] == "23"
@@ -458,6 +496,10 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     diagnostics = schema({})["diagnostics"]
     assert "Selected blind: Sitting room door" in diagnostics
     assert "Configured primary status identity:" in diagnostics
+    assert "Source: automatically discovered during calibration" in diagnostics
+    assert "Last calibration run:" in diagnostics
+    assert "End reason: completed" in diagnostics
+    assert "phase=opening_endstop" in diagnostics
     assert "Device ID: 3720B8" in diagnostics
     assert "Configured secondary status identities:" in diagnostics
     assert "F2B8D5/23" in diagnostics
@@ -578,6 +620,128 @@ async def test_developer_manual_position_form_uses_current_position_and_submits(
     api.manual_sync_position.assert_called_once_with("F2B8D5", 63)
     assert result["step_id"] == "developer_tools"
     assert "confirmed at 63%" in result["description_placeholders"]["result"]
+
+
+@pytest.mark.asyncio
+async def test_original_remote_discovery_saves_primary_secondary_and_provenance() -> (
+    None
+):
+    """Test guided discovery updates an existing blind without transmit fallback."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Garden",
+        data={
+            CONF_COMMAND_DEVICE_ID: "06C5C0",
+            CONF_COMMAND_ENUM: "11",
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_UNKNOWN,
+            CONF_OPEN_TIME: 24.86,
+            CONF_CLOSE_TIME: 22.59,
+        },
+    )
+    entry = MagicMock()
+    result_data = {
+        "primary": {
+            "device_id": "3720B8",
+            "enum": "08",
+            "commands": ["01", "00", "02"],
+            "timestamps": ["12:00:01", "12:00:02", "12:00:03"],
+        },
+        "secondary": [
+            {
+                "device_id": "06C5C0",
+                "enum": "23",
+                "commands": ["E1", "E2"],
+                "timestamps": ["12:00:01", "12:00:03"],
+            }
+        ],
+        "unknown_commands": [
+            {"device_id": "06C5C0", "enum": "23", "commands": ["E1", "E2"]}
+        ],
+        "frames": [{"device_id": "3720B8", "enum": "08", "command": "01"}],
+        "position_tracking_available": True,
+    }
+    api = MagicMock()
+    api.async_discover_status_identities = AsyncMock(return_value=result_data)
+    entry.runtime_data = api
+    expected = {"type": FlowResultType.ABORT}
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+        patch.object(flow, "async_update_and_abort", return_value=expected) as update,
+    ):
+        form = await flow.async_step_discover_status()
+        confirmation = await flow.async_step_discover_status({})
+        result = await flow.async_step_confirm_status_discovery({})
+
+    assert form["step_id"] == "discover_status"
+    assert confirmation["step_id"] == "confirm_status_discovery"
+    placeholders = confirmation["description_placeholders"]
+    assert placeholders["command_identity"] == "06C5C0/11"
+    assert placeholders["primary_identity"] == "3720B8/08"
+    assert placeholders["primary_commands"] == "01, 00, 02"
+    assert "06C5C0/23" in placeholders["secondary_identities"]
+    assert result is expected
+    data = update.call_args.kwargs["data"]
+    assert data[CONF_STATUS_DEVICE_ID] == "3720B8"
+    assert data[CONF_STATUS_ENUM] == "08"
+    assert data[CONF_STATUS_IDENTITY_SOURCE] == (
+        STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY
+    )
+    assert data[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "06C5C0", "enum": "23"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_original_remote_discovery_keeps_status_unknown_when_unrecognized() -> (
+    None
+):
+    """Test unknown-only frames never turn command identity into primary status."""
+    flow = _create_flow()
+    flow._pending_device_name = "Garden"
+    flow._pending_device_id = "06C5C0"
+    flow._pending_device_enum = "11"
+    flow._pending_open_time = 24.86
+    flow._pending_close_time = 22.59
+    api = MagicMock()
+    api.async_discover_status_identities = AsyncMock(
+        return_value={
+            "primary": None,
+            "secondary": [
+                {
+                    "device_id": "06C5C0",
+                    "enum": "23",
+                    "commands": ["E1"],
+                    "timestamps": ["12:00:01"],
+                }
+            ],
+            "unknown_commands": [
+                {"device_id": "06C5C0", "enum": "23", "commands": ["E1"]}
+            ],
+            "frames": [{"device_id": "06C5C0", "enum": "23", "command": "E1"}],
+            "position_tracking_available": False,
+        }
+    )
+    entry = MagicMock(runtime_data=api)
+
+    with patch.object(flow, "_get_entry", return_value=entry):
+        confirmation = await flow.async_step_discover_status({})
+        result = await flow.async_step_confirm_status_discovery({})
+
+    assert (
+        "No remote/status tracking identity"
+        in confirmation["description_placeholders"]["position_tracking"]
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert CONF_STATUS_DEVICE_ID not in result["data"]
+    assert CONF_STATUS_ENUM not in result["data"]
+    assert result["data"][CONF_STATUS_IDENTITY_SOURCE] == (
+        STATUS_IDENTITY_SOURCE_UNKNOWN
+    )
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "06C5C0", "enum": "23"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -973,6 +1137,73 @@ async def test_pairing_persists_calibrated_protocol_data(
         },
         unique_id="F2B8D5",
     )
+
+
+@pytest.mark.asyncio
+async def test_calibration_candidates_are_persisted_with_frame_diagnostics() -> None:
+    """Test calibration-derived primary, secondary, phases, and provenance persist."""
+    flow = MagicMock(spec=ConfigSubentryFlow)
+    handler = CalibrationFlowHandler(flow)
+    handler.set_selected_device(
+        {"id": "06C5C0", "entity_id": "06C5C0", "name": "Garden", "enum": "11"}
+    )
+    handler.enable_subentry_creation(
+        device_id="06C5C0",
+        device_enum="11",
+        device_name="Garden",
+        status_identity_source=STATUS_IDENTITY_SOURCE_UNKNOWN,
+    )
+    handler._open_time = 24.864
+    handler._close_time = 22.594
+    handler._calibration_discovery_result = {
+        "primary": {
+            "device_id": "3720B8",
+            "enum": "08",
+            "commands": ["01", "00", "02"],
+            "timestamps": ["12:00:01", "12:00:25", "12:00:30"],
+        },
+        "secondary": [
+            {
+                "device_id": "06C5C0",
+                "enum": "23",
+                "commands": ["E1", "E2"],
+                "timestamps": ["12:00:01", "12:00:30"],
+            }
+        ],
+        "groups": [],
+        "unknown_commands": [
+            {"device_id": "06C5C0", "enum": "23", "commands": ["E1", "E2"]}
+        ],
+        "position_tracking_available": True,
+        "frames": [
+            {
+                "device_id": "3720B8",
+                "enum": "08",
+                "command": "00",
+                "time": "12:00:25",
+                "phase": "opening_endstop",
+            }
+        ],
+        "started_at": "2026-07-04T12:00:00+02:00",
+        "completed_at": "2026-07-04T12:00:55+02:00",
+        "end_reason": "completed",
+    }
+    handler._apply_calibration_status_candidates()
+
+    with patch.object(handler, "_save_calibration_data", new=AsyncMock()):
+        await handler.async_step_calibration_complete({})
+
+    data = flow.async_create_entry.call_args.kwargs["data"]
+    assert data[CONF_STATUS_DEVICE_ID] == "3720B8"
+    assert data[CONF_STATUS_ENUM] == "08"
+    assert data[CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_CALIBRATION
+    assert data[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "06C5C0", "enum": "23"}
+    ]
+    assert data[CONF_LAST_CALIBRATION]["end_reason"] == "completed"
+    assert data[CONF_LAST_CALIBRATION]["frames"][0]["phase"] == ("opening_endstop")
+    assert data[CONF_OPEN_TIME] == 24.86
+    assert data[CONF_CLOSE_TIME] == 22.59
 
 
 @pytest.mark.asyncio
