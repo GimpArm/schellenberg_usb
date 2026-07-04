@@ -32,12 +32,19 @@ from .const import (
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
     DOMAIN,
     SUBENTRY_TYPE_BLIND,
     TEST_COMMAND_DELAY,
+)
+from .identities import (
+    format_status_identities,
+    normalize_status_identities,
+    parse_status_identities_text,
+    serialize_status_identities,
 )
 from .options_flow import SchellenbergOptionsFlowHandler
 from .options_flow_calibration import CalibrationFlowHandler
@@ -228,6 +235,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_device_name: str | None = None
         self._pending_status_device_id: str | None = None
         self._pending_status_enum: str | None = None
+        self._pending_secondary_status_identities: list[dict[str, str]] = []
         self._pending_open_time: float | None = None
         self._pending_close_time: float | None = None
         self._pending_invert_direction = False
@@ -309,13 +317,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_device_enum = device_enum
         self._pending_status_device_id = device_id
         self._pending_status_enum = device_enum
+        self._pending_secondary_status_identities = []
         self._pending_device_name = None
         return await self.async_step_name_device()
 
     async def async_step_manual(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Collect manual command/status identities and travel times."""
+        """Collect manual command and primary/secondary status identities."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -329,6 +338,19 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             status_enum = (
                 str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
                 or command_enum
+            )
+            try:
+                secondary_identities = parse_status_identities_text(
+                    user_input.get(CONF_SECONDARY_STATUS_IDENTITIES, "")
+                )
+            except ValueError:
+                secondary_identities = ()
+                errors[CONF_SECONDARY_STATUS_IDENTITIES] = "invalid_status_identities"
+            primary_identity = (status_device_id, status_enum)
+            secondary_identities = tuple(
+                identity
+                for identity in secondary_identities
+                if identity != primary_identity
             )
             open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
             close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
@@ -365,6 +387,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 self._pending_device_enum = command_enum
                 self._pending_status_device_id = status_device_id
                 self._pending_status_enum = status_enum
+                self._pending_secondary_status_identities = serialize_status_identities(
+                    secondary_identities
+                )
                 self._pending_open_time = open_time
                 self._pending_close_time = close_time
                 self._pending_invert_direction = bool(
@@ -426,6 +451,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                     CONF_STATUS_ENUM,
                     default=self._pending_status_enum or "",
                 ): selector.TextSelector(),
+                vol.Optional(
+                    CONF_SECONDARY_STATUS_IDENTITIES,
+                    default=format_status_identities(
+                        self._pending_secondary_status_identities
+                    ),
+                ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
                 open_time_key: selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.1,
@@ -465,6 +496,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             CONF_COMMAND_ENUM: self._pending_device_enum,
             CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
             CONF_STATUS_ENUM: self._pending_status_enum,
+            CONF_SECONDARY_STATUS_IDENTITIES: list(
+                self._pending_secondary_status_identities
+            ),
             CONF_OPEN_TIME: self._pending_open_time,
             CONF_CLOSE_TIME: self._pending_close_time,
             CONF_INVERT_DIRECTION: self._pending_invert_direction,
@@ -659,6 +693,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             device_name=device_name,
             status_device_id=self._pending_status_device_id or device_id,
             status_enum=self._pending_status_enum or device_enum,
+            secondary_status_identities=(self._pending_secondary_status_identities),
             invert_direction=self._pending_invert_direction,
         )
         if self._pairing_workflow == "hybrid":
@@ -692,14 +727,33 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         command_enum = str(
             data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, "")
         ).upper()
+        primary_status_device_id = str(
+            data.get(CONF_STATUS_DEVICE_ID) or command_device_id
+        ).upper()
+        primary_status_enum = (
+            str(data.get(CONF_STATUS_ENUM) or command_enum).upper().zfill(2)
+        )
+        secondary_status_identities = normalize_status_identities(
+            data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+        )
+        status_identities = (
+            (primary_status_device_id, primary_status_enum),
+            *secondary_status_identities,
+        )
         return {
             "name": subentry.title,
             "command_device_id": command_device_id,
             "command_enum": command_enum,
-            "status_device_id": str(
-                data.get(CONF_STATUS_DEVICE_ID) or command_device_id
-            ).upper(),
-            "status_enum": str(data.get(CONF_STATUS_ENUM) or command_enum).upper(),
+            # Backward-compatible names used in existing command logs/tests.
+            "status_device_id": primary_status_device_id,
+            "status_enum": primary_status_enum,
+            "primary_status_device_id": primary_status_device_id,
+            "primary_status_enum": primary_status_enum,
+            "secondary_status_identities": secondary_status_identities,
+            "secondary_status_identities_text": (
+                format_status_identities(secondary_status_identities) or "None"
+            ),
+            "status_identities": status_identities,
             "invert_direction": bool(data.get(CONF_INVERT_DIRECTION, False)),
             "open_time": float(data.get(CONF_OPEN_TIME, 60.0)),
             "close_time": float(data.get(CONF_CLOSE_TIME, 60.0)),
@@ -707,17 +761,20 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
     def _developer_snapshot(
         self,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Return current blind details and its latest received frame."""
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return blind details and its newest primary or secondary frame."""
         details = self._developer_details()
         api = self._get_entry().runtime_data
-        last_received = api.get_last_received(
-            details["status_device_id"], details["status_enum"]
+        last_received = api.get_last_received_for_identities(
+            details["status_identities"]
         ) or {
             "device_id": "No matching frame received",
             "enum": "--",
             "command": "--",
             "time": "--",
+            "identity_role": "none",
+            "interpreted_command": "unknown",
+            "position_tracking": False,
         }
         return details, last_received
 
@@ -738,6 +795,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "last_time": last_received["time"],
                 "command_device_id": details["command_device_id"],
                 "command_enum": details["command_enum"],
+                "primary_status_device_id": details["primary_status_device_id"],
+                "primary_status_enum": details["primary_status_enum"],
+                "secondary_status_identities": details[
+                    "secondary_status_identities_text"
+                ],
+                "last_identity_role": last_received["identity_role"],
+                "last_interpretation": last_received["interpreted_command"],
+                "last_position_tracking": str(last_received["position_tracking"]),
                 "stick_connected": str(api.is_connected),
                 "stick_mode": str(api.device_mode or "unknown"),
                 "stick_ready": str(api.transmit_ready),
@@ -753,8 +818,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         _LOGGER.warning(
             "Developer Tools command clicked selected_blind=%s "
             "command_requested=%s command_device_id=%s command_enum=%s "
-            "status_device_id=%s status_enum=%s stick_connected=%s "
-            "stick_mode=%s stick_ready=%s pairing=%s transmitter_active=%s "
+            "status_device_id=%s status_enum=%s secondary_statuses=%s "
+            "stick_connected=%s stick_mode=%s stick_ready=%s pairing=%s "
+            "transmitter_active=%s "
             "busy_latched=%s",
             details["name"],
             command,
@@ -762,6 +828,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             details["command_enum"],
             details["status_device_id"],
             details["status_enum"],
+            details["secondary_status_identities_text"],
             api.is_connected,
             api.device_mode or "unknown",
             api.transmit_ready,
@@ -1020,19 +1087,24 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "t1/t0 confirm only that the USB stick transmitter turned on/off.",
                 "Motor reception and movement remain unverified (unidirectional RF).",
                 "",
-                "Last received:",
+                "Last matched frame:",
                 f"Device ID: {last_received['device_id']}",
                 f"Enum: {last_received['enum']}",
+                f"Identity role: {last_received['identity_role']}",
                 f"Command: {last_received['command']}",
+                f"Interpretation: {last_received['interpreted_command']}",
+                f"Position tracking: {last_received['position_tracking']}",
                 f"Time: {last_received['time']}",
                 "",
                 "Current transmit target:",
                 f"Device ID: {details['command_device_id']}",
                 f"Enum: {details['command_enum']}",
                 "",
-                "Configured status identity:",
-                f"Device ID: {details['status_device_id']}",
-                f"Enum: {details['status_enum']}",
+                "Configured primary status identity:",
+                f"Device ID: {details['primary_status_device_id']}",
+                f"Enum: {details['primary_status_enum']}",
+                "Configured secondary status identities:",
+                details["secondary_status_identities_text"],
                 f"Open time: {details['open_time']:.2f} seconds",
                 f"Close time: {details['close_time']:.2f} seconds",
                 f"Invert direction: {details['invert_direction']}",
@@ -1070,6 +1142,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_status_enum = str(
             data.get(CONF_STATUS_ENUM) or self._pending_device_enum
         )
+        self._pending_secondary_status_identities = serialize_status_identities(
+            normalize_status_identities(data.get(CONF_SECONDARY_STATUS_IDENTITIES))
+        )
         self._pending_open_time = float(data.get(CONF_OPEN_TIME, 60.0))
         self._pending_close_time = float(data.get(CONF_CLOSE_TIME, 60.0))
         self._pending_invert_direction = bool(data.get(CONF_INVERT_DIRECTION, False))
@@ -1095,6 +1170,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             current_data.get(CONF_STATUS_DEVICE_ID) or command_device_id
         )
         status_enum = str(current_data.get(CONF_STATUS_ENUM) or command_enum)
+        secondary_status_text = format_status_identities(
+            current_data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+        )
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -1108,6 +1186,22 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             status_enum = (
                 str(user_input.get(CONF_STATUS_ENUM, "")).strip().upper()
                 or command_enum
+            )
+            secondary_status_text = str(
+                user_input.get(CONF_SECONDARY_STATUS_IDENTITIES, "")
+            )
+            try:
+                secondary_identities = parse_status_identities_text(
+                    secondary_status_text
+                )
+            except ValueError:
+                secondary_identities = ()
+                errors[CONF_SECONDARY_STATUS_IDENTITIES] = "invalid_status_identities"
+            primary_identity = (status_device_id, status_enum)
+            secondary_identities = tuple(
+                identity
+                for identity in secondary_identities
+                if identity != primary_identity
             )
             open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
             close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
@@ -1147,6 +1241,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                         CONF_COMMAND_ENUM: command_enum,
                         CONF_STATUS_DEVICE_ID: status_device_id,
                         CONF_STATUS_ENUM: status_enum,
+                        CONF_SECONDARY_STATUS_IDENTITIES: (
+                            serialize_status_identities(secondary_identities)
+                        ),
                         CONF_OPEN_TIME: open_time,
                         CONF_CLOSE_TIME: close_time,
                         CONF_INVERT_DIRECTION: bool(
@@ -1185,6 +1282,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                         CONF_STATUS_ENUM,
                         default=status_enum,
                     ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_SECONDARY_STATUS_IDENTITIES,
+                        default=secondary_status_text,
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(multiline=True)
+                    ),
                     vol.Required(
                         CONF_OPEN_TIME_SECONDS,
                         default=current_data.get(CONF_OPEN_TIME, 60.0),

@@ -57,16 +57,17 @@
         },
         "manual": {
           "title": "Ajouter un volet manuellement",
-          "description": "Saisissez l'ID de l'appareil et l'énumération affichés dans les journaux, ainsi que les durées de course complètes mesurées. Le calibrage pourra être effectué ultérieurement.",
+          "description": "Saisissez l'ID de l'appareil et l'énumération affichés dans les journaux, ainsi que les durées de course complètes mesurées. Le calibrage pourra être effectué ultérieurement. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position.",
           "data": {
             "device_name": "Nom",
             "device_id": "ID de l'appareil",
             "device_enum": "Énumération",
             "open_time_seconds": "Durée d'ouverture",
             "close_time_seconds": "Durée de fermeture",
-            "status_device_id": "Status device ID (optional)",
-            "status_enum": "Status enum (optional)",
-            "invert_direction": "Invert open/close direction"
+            "status_device_id": "ID d’état principale (facultatif)",
+            "status_enum": "Énumération d’état principale (facultatif)",
+            "invert_direction": "Invert open/close direction",
+            "secondary_status_identities": "Identités d’état supplémentaires (facultatif)"
           },
           "submit": "Ajouter"
         },
@@ -149,7 +150,7 @@
         },
         "developer_tools": {
           "title": "Developer tools",
-          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
+          "description": "Selected blind: {selected_blind}\n\nLast matched frame:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSecondary:\n{secondary_status_identities}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
           "menu_options": {
             "test_open": "Test Open",
             "test_close": "Test Close",
@@ -173,16 +174,17 @@
         },
         "edit": {
           "title": "Edit blind settings",
-          "description": "Changing protocol identities does not change the Home Assistant entity unique ID.",
+          "description": "Changing protocol identities does not change the Home Assistant entity unique ID. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position.",
           "data": {
             "device_name": "Name",
             "device_id": "Command device ID",
             "device_enum": "Command enum",
-            "status_device_id": "Status device ID (optional)",
-            "status_enum": "Status enum (optional)",
+            "status_device_id": "ID d’état principale (facultatif)",
+            "status_enum": "Énumération d’état principale (facultatif)",
             "open_time_seconds": "Open time",
             "close_time_seconds": "Close time",
-            "invert_direction": "Invert open/close direction"
+            "invert_direction": "Invert open/close direction",
+            "secondary_status_identities": "Identités d’état supplémentaires (facultatif)"
           },
           "submit": "Save"
         },
@@ -213,7 +215,8 @@
         "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
         "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
         "invalid_raw_payload": "Saisissez exactement 11 caractères : 'ss' suivi de 9 caractères hexadécimaux.",
-        "transmit_failed": "La trame brute n’a pas pu être transmise. Vérifiez l’état de la clé et les journaux."
+        "transmit_failed": "La trame brute n’a pas pu être transmise. Vérifiez l’état de la clé et les journaux.",
+        "invalid_status_identities": "Saisissez chaque identité d’état supplémentaire sous la forme ID_APPAREIL/ENUM, séparée par une virgule ou une nouvelle ligne (par exemple F2B8D5/23)."
       },
       "abort": {
         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",

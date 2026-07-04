@@ -68,21 +68,26 @@ Select it, and the schellenberg usb integration is ready for use.
      calibration or save with manual travel times. A failed test opens the detected
      values for editing.
    - **Pair and calibrate (legacy)** keeps the original guided setup unchanged.
-   - **Add manually** creates a cover from a name, command ID/enum, optional separate
-     status ID/enum, and measured open/close travel times. Calibration is optional.
+   - **Add manually** creates a cover from a name, command ID/enum, primary status
+     ID/enum, optional additional status identities, and measured open/close travel
+     times. Calibration is optional.
 
 
 The command enum selects the paired slot in the USB stick and is inserted into the
 outgoing serial packet. The command device ID is retained for identification and
-diagnostic logging. The status ID and enum are matched exactly against incoming
-movement messages.
+diagnostic logging. The primary status ID and enum are matched exactly against incoming movement
+messages and are the only identity used for position tracking. Additional status
+identities can be entered as `DEVICE_ID/ENUM`, one per line or comma-separated.
+They are matched for logging and diagnostics, but cannot alter position until their
+command family is explicitly mapped.
 
 To edit an existing blind, open its configuration action from the Schellenberg USB
 integration and choose **Edit identities and travel times**. The same menu also
 offers a short motor command test and recalibration. Editing protocol values keeps
 the existing Home Assistant entity unique ID.
-Choose **Developer tools** in the same blind configuration menu to see the last
-frame matching its status identity, the current transmit target, direct Open,
+Choose **Developer tools** in the same blind configuration menu to see the newest
+frame matching any primary or secondary status identity, its identity role and
+command interpretation, the current transmit target, direct Open,
 Close, and Stop actions, a guided **Teach motor / activate USB transmitter**
 action, validated raw RF payload sending, and a copyable diagnostics snapshot.
 

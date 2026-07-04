@@ -31,6 +31,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
@@ -44,6 +45,7 @@ from .const import (
     SUBENTRY_TYPE_BLIND,
     SchellenbergConfigEntry,
 )
+from .identities import normalize_status_identities, normalize_status_identity
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_TRAVEL_TIME = 60.0  # seconds, a sensible default
@@ -101,6 +103,9 @@ async def async_setup_entry(
                 subentry.data.get(CONF_STATUS_ENUM)
                 or legacy_device_enum
                 or command_enum
+            )
+            secondary_status_identities = normalize_status_identities(
+                subentry.data.get(CONF_SECONDARY_STATUS_IDENTITIES)
             )
             subentry_unique_id = getattr(subentry, "unique_id", None)
             stable_device_id = (
@@ -169,7 +174,8 @@ async def async_setup_entry(
                 manufacturer="Schellenberg",
                 model=(
                     f"USB Stick Motor (command {command_device_id}/{command_enum}, "
-                    f"status {status_device_id}/{status_enum})"
+                    f"primary status {status_device_id}/{status_enum}, "
+                    f"secondary statuses {len(secondary_status_identities)})"
                 ),
             )
             _LOGGER.debug(
@@ -186,6 +192,7 @@ async def async_setup_entry(
                 device_name,
                 command_device_id=command_device_id,
                 command_enum=command_enum,
+                secondary_status_identities=secondary_status_identities,
             )
 
             # Create cover entity linked to this device
@@ -203,6 +210,7 @@ async def async_setup_entry(
                         command_device_id=command_device_id,
                         status_device_id=status_device_id,
                         status_enum=status_enum,
+                        secondary_status_identities=secondary_status_identities,
                         invert_direction=bool(
                             subentry.data.get(CONF_INVERT_DIRECTION, False)
                         ),
@@ -240,6 +248,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         command_device_id: str | None = None,
         status_device_id: str | None = None,
         status_enum: str | None = None,
+        secondary_status_identities: object = None,
         invert_direction: bool = False,
     ) -> None:
         """Initialize the Schellenberg cover entity.
@@ -253,7 +262,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             config_entry_id: The config entry ID for linking to device
             command_device_id: Protocol ID associated with outgoing commands
             status_device_id: Protocol ID expected in incoming status messages
-            status_enum: Enum expected in incoming status messages
+            status_enum: Enum expected in primary incoming status messages
+            secondary_status_identities: Additional identities matched diagnostically
             invert_direction: Swap physical up/down commands for logical open/close
 
         """
@@ -261,8 +271,25 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._device_id = device_id
         self._command_device_id = command_device_id or device_id
         self._command_enum = device_enum
-        self._status_device_id = status_device_id or self._command_device_id
-        self._status_enum = status_enum or device_enum
+        primary_identity = normalize_status_identity(
+            status_device_id or self._command_device_id,
+            status_enum or device_enum,
+        )
+        if primary_identity is None:
+            primary_identity = (
+                str(status_device_id or self._command_device_id).upper(),
+                str(status_enum or device_enum).upper().zfill(2),
+            )
+        self._status_device_id, self._status_enum = primary_identity
+        secondary_source = secondary_status_identities
+        if secondary_source is None and device_data is not None:
+            secondary_source = device_data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+        primary_identity = (self._status_device_id, self._status_enum)
+        self._secondary_status_identities = tuple(
+            identity
+            for identity in normalize_status_identities(secondary_source)
+            if identity != primary_identity
+        )
         self._invert_direction = invert_direction
         # Backward-compatible alias retained for diagnostics.
         self._device_enum = self._command_enum
@@ -341,6 +368,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_name,
             command_device_id=self._command_device_id,
             command_enum=self._command_enum,
+            secondary_status_identities=self._secondary_status_identities,
         )
 
         # Restore the last known state

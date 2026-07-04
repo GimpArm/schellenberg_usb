@@ -20,6 +20,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_OPEN_TIME,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
@@ -159,6 +160,9 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
                     CONF_COMMAND_ENUM: command_enum,
                     CONF_STATUS_DEVICE_ID: "3720B8",
                     CONF_STATUS_ENUM: status_enum,
+                    CONF_SECONDARY_STATUS_IDENTITIES: [
+                        {"device_id": "F2B8D5", "enum": "23"}
+                    ],
                     CONF_OPEN_TIME: 25.06,
                     CONF_CLOSE_TIME: 23.05,
                 },
@@ -177,6 +181,7 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
         "Sitting room door",
         command_device_id="F2B8D5",
         command_enum=command_enum,
+        secondary_status_identities=(("F2B8D5", "23"),),
     )
 
     add_entities.assert_called_once()
@@ -188,6 +193,7 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
     assert cover._command_enum == command_enum
     assert cover._status_device_id == "3720B8"
     assert cover._status_enum == status_enum
+    assert cover._secondary_status_identities == (("F2B8D5", "23"),)
     assert cover._travel_time_open == 25.06
     assert cover._travel_time_close == 23.05
 
@@ -347,6 +353,39 @@ async def test_cover_uses_split_identity_and_inverted_direction(
     )
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["C1", "C2", "C3"])
+async def test_unknown_secondary_commands_do_not_change_position_tracking(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+    event: str,
+) -> None:
+    """Test opaque secondary commands leave movement and position unchanged."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="F2B8D5",
+        device_enum="10",
+        device_name="Sitting room",
+        status_device_id="3720B8",
+        status_enum="08",
+        secondary_status_identities=(("F2B8D5", "23"),),
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = 50
+
+    with (
+        patch.object(cover, "_start_position_tracking") as start_tracking,
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        cover._handle_event(event)
+
+    start_tracking.assert_not_called()
+    assert cover._attr_current_cover_position == 50
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
 
 
 @pytest.mark.asyncio
@@ -746,6 +785,7 @@ async def test_cover_registers_with_api(
         "Test Cover",
         command_device_id="ABC123",
         command_enum="01",
+        secondary_status_identities=(),
     )
 
 

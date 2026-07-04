@@ -317,6 +317,73 @@ async def test_handle_message_preserves_leading_zero_status_enum(
 
 
 @pytest.mark.asyncio
+async def test_primary_and_secondary_status_identities_both_match(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test primary movement and opaque secondary frames match one cover."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.register_entity(
+        "3720B8",
+        "08",
+        "Sitting room",
+        command_device_id="F2B8D5",
+        command_enum="10",
+        secondary_status_identities=[{"device_id": "F2B8D5", "enum": "23"}],
+    )
+
+    with (
+        caplog.at_level("DEBUG"),
+        patch(
+            "custom_components.schellenberg_usb.api.async_dispatcher_send"
+        ) as mock_send,
+    ):
+        api._handle_message("ss083720B8ZZZZ01PP00")
+        primary = api.get_last_received("3720B8", "08")
+        api._handle_message("ss23F2B8D5ZZZZC1PP00")
+        secondary = api.get_last_received("F2B8D5", "23")
+
+    assert primary is not None
+    assert primary["matched"] is True
+    assert primary["identity_role"] == "primary"
+    assert primary["interpreted_command"] == "open"
+    assert primary["position_tracking"] is True
+    assert secondary is not None
+    assert secondary["matched"] is True
+    assert secondary["identity_role"] == "secondary"
+    assert secondary["interpreted_command"] == "unknown"
+    assert secondary["position_tracking"] is False
+    newest = api.get_last_received_for_identities((("3720B8", "08"), ("F2B8D5", "23")))
+    assert newest is not None
+    assert newest["device_id"] == "F2B8D5"
+    assert newest["command"] == "C1"
+    assert "matched=True entity=Sitting room" in caplog.text
+    assert "identity_role=secondary interpreted=unknown" in caplog.text
+    assert mock_send.call_args_list[-1].args == (
+        hass,
+        "schellenberg_usb_device_event_F2B8D5_23",
+        "C1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unmatched_frames_are_not_warnings_when_a_cover_is_registered(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test ambient unmatched RF frames are debug-only once covers exist."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.register_entity("3720B8", "08", "Sitting room")
+
+    with caplog.at_level("WARNING"):
+        api._handle_message("ss23ABCDEFZZZZC1PP00")
+
+    assert "no cover has this status identity" not in caplog.text
+    last = api.get_last_received("ABCDEF", "23")
+    assert last is not None
+    assert last["matched"] is False
+    assert last["interpreted_command"] == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_requires_exact_status_pair(
     hass: HomeAssistant,
 ) -> None:

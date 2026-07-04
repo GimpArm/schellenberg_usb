@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 import serial
@@ -45,6 +46,7 @@ from .const import (
     CMD_VERIFY,
     CONF_COMMAND_DEVICE_ID,
     CONF_COMMAND_ENUM,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
     PAIRING_DEVICE_ENUM_START,
@@ -52,6 +54,11 @@ from .const import (
     SIGNAL_DEVICE_EVENT,
     SIGNAL_STICK_STATUS_UPDATED,
     VERIFY_TIMEOUT,
+)
+from .identities import (
+    StatusIdentity,
+    normalize_status_identities,
+    normalize_status_identity,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +69,24 @@ TRANSMIT_IDLE_TIMEOUT = 3.0
 RECONNECT_DELAY = 5.0
 RESET_SETTLE_DELAY = 0.25
 DIAGNOSTIC_TRANSMIT_SOURCES = frozenset({"developer_tools", "service"})
+
+
+@dataclass(frozen=True, slots=True)
+class _StatusIdentityRegistration:
+    """One status identity mapped to a configured cover."""
+
+    entity_name: str
+    command_device_id: str
+    primary: bool
+
+
+def _interpret_status_command(command: str) -> str:
+    """Return the diagnostic meaning of one received command byte."""
+    return {
+        CMD_STOP: "stop",
+        CMD_UP: "open",
+        CMD_DOWN: "close",
+    }.get(command.upper(), "unknown")
 
 
 def _normalize_protocol_enum(value: object) -> str:
@@ -89,9 +114,12 @@ class SchellenbergUsbApi:
         self._registered_devices: dict[
             str, str
         ] = {}  # Dict[device_id, device_enum] for registered entities
-        self._registered_entity_keys: dict[tuple[str, str], str] = {}
-        # Exact (status_device_id, status_enum) -> entity name for event matching.
-        self._last_received_messages: dict[tuple[str, str], dict[str, str]] = {}
+        self._registered_entity_keys: dict[
+            StatusIdentity, _StatusIdentityRegistration
+        ] = {}
+        # Exact status identity -> latest raw frame and diagnostic interpretation.
+        self._last_received_messages: dict[StatusIdentity, dict[str, Any]] = {}
+        self._last_received_sequence = 0
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
         self._pairing_active = False
@@ -452,19 +480,39 @@ class SchellenbergUsbApi:
                 )
                 normalized_device_id = device_id.upper()
                 normalized_device_enum = device_enum.upper()
-                self._last_received_messages[
-                    (normalized_device_id, normalized_device_enum)
-                ] = {
+                normalized_command = command.upper()
+                identity = (normalized_device_id, normalized_device_enum)
+                registration = self._registered_entity_keys.get(identity)
+                interpretation = _interpret_status_command(normalized_command)
+                identity_role = (
+                    "primary"
+                    if registration is not None and registration.primary
+                    else "secondary"
+                    if registration is not None
+                    else "unmatched"
+                )
+                position_tracking = bool(
+                    registration is not None
+                    and registration.primary
+                    and interpretation != "unknown"
+                )
+                self._last_received_sequence += 1
+                self._last_received_messages[identity] = {
                     "device_id": normalized_device_id,
                     "enum": normalized_device_enum,
-                    "command": command.upper(),
+                    "command": normalized_command,
                     "time": dt_util.now().strftime("%H:%M:%S"),
+                    "sequence": self._last_received_sequence,
+                    "matched": registration is not None,
+                    "identity_role": identity_role,
+                    "interpreted_command": interpretation,
+                    "position_tracking": position_tracking,
                 }
 
                 # If we're in pairing mode and this is a new device
                 if self._pairing_future and not self._pairing_future.done():
                     known_status_id = any(
-                        key[0] == device_id.upper()
+                        key[0] == normalized_device_id
                         for key in self._registered_entity_keys
                     )
                     if (
@@ -478,38 +526,46 @@ class SchellenbergUsbApi:
                         # Don't send dispatcher signal here - let the caller handle persistence
                         return
 
-                entity_name = self._registered_entity_keys.get(
-                    (normalized_device_id, normalized_device_enum)
-                )
-                if entity_name is None:
-                    _LOGGER.warning(
-                        "Received device_id=%s enum=%s cmd=%s matched=False; no "
-                        "cover has this status identity",
-                        device_id,
-                        device_enum,
-                        command,
+                if registration is None:
+                    level = (
+                        logging.DEBUG
+                        if self._registered_entity_keys
+                        else logging.WARNING
+                    )
+                    _LOGGER.log(
+                        level,
+                        "Received device_id=%s enum=%s cmd=%s matched=False "
+                        "interpreted=%s; no cover has this status identity",
+                        normalized_device_id,
+                        normalized_device_enum,
+                        normalized_command,
+                        interpretation,
                     )
                 else:
                     _LOGGER.debug(
-                        "Received device_id=%s enum=%s cmd=%s matched=True entity=%s",
-                        device_id,
-                        device_enum,
-                        command,
-                        entity_name,
+                        "Received device_id=%s enum=%s cmd=%s matched=True entity=%s "
+                        "identity_role=%s interpreted=%s position_tracking=%s",
+                        normalized_device_id,
+                        normalized_device_enum,
+                        normalized_command,
+                        registration.entity_name,
+                        identity_role,
+                        interpretation,
+                        position_tracking,
                     )
 
                 # Retain the ID-only signal for calibration before an entity exists.
                 async_dispatcher_send(
                     self.hass,
                     f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}",
-                    command,
+                    normalized_command,
                 )
-                if entity_name is not None:
+                if registration is not None:
                     async_dispatcher_send(
                         self.hass,
                         f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
                         f"{normalized_device_enum}",
-                        command,
+                        normalized_command,
                     )
             except (IndexError, ValueError) as err:
                 _LOGGER.debug("Failed to parse message %s: %s", message, err)
@@ -1110,12 +1166,41 @@ class SchellenbergUsbApi:
         )
         return result
 
-    def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
-        """Register existing devices from storage.
+    def _register_status_identity(
+        self,
+        identity: StatusIdentity,
+        *,
+        entity_name: str,
+        command_device_id: str,
+        primary: bool,
+    ) -> None:
+        """Register one normalized primary or secondary status identity."""
+        existing = self._registered_entity_keys.get(identity)
+        if existing is not None and existing.entity_name != entity_name:
+            _LOGGER.warning(
+                "Status identity %s/%s reassigned from entity=%s to entity=%s",
+                identity[0],
+                identity[1],
+                existing.entity_name,
+                entity_name,
+            )
+        self._registered_entity_keys[identity] = _StatusIdentityRegistration(
+            entity_name=entity_name,
+            command_device_id=command_device_id.upper(),
+            primary=primary,
+        )
+        if last_message := self._last_received_messages.get(identity):
+            interpretation = str(last_message["interpreted_command"])
+            last_message.update(
+                {
+                    "matched": True,
+                    "identity_role": "primary" if primary else "secondary",
+                    "position_tracking": primary and interpretation != "unknown",
+                }
+            )
 
-        Args:
-            devices: List of device dicts with 'id' and 'enum' keys
-        """
+    def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
+        """Register existing devices and all persisted status identities."""
         for device in devices:
             command_device_id = (
                 device.get(CONF_COMMAND_DEVICE_ID)
@@ -1138,33 +1223,44 @@ class SchellenbergUsbApi:
             entity_name = str(device.get("name") or status_device_id)
             if command_device_id and command_enum:
                 self._registered_devices[str(command_device_id)] = str(command_enum)
-            if status_device_id and status_enum:
-                self._registered_entity_keys[
-                    (
-                        str(status_device_id).upper(),
-                        _normalize_protocol_enum(status_enum),
+            primary_identity = normalize_status_identity(status_device_id, status_enum)
+            if primary_identity is not None and command_device_id:
+                self._register_status_identity(
+                    primary_identity,
+                    entity_name=entity_name,
+                    command_device_id=str(command_device_id),
+                    primary=True,
+                )
+            secondary_identities = normalize_status_identities(
+                device.get(CONF_SECONDARY_STATUS_IDENTITIES)
+            )
+            for identity in secondary_identities:
+                if identity != primary_identity and command_device_id:
+                    self._register_status_identity(
+                        identity,
+                        entity_name=entity_name,
+                        command_device_id=str(command_device_id),
+                        primary=False,
                     )
-                ] = entity_name
             _LOGGER.debug(
-                "Registered existing entity=%s command=%s/%s status=%s/%s",
+                "Registered existing entity=%s command=%s/%s primary_status=%s/%s "
+                "secondary_statuses=%s",
                 entity_name,
                 command_device_id,
                 command_enum,
                 status_device_id,
                 status_enum,
+                secondary_identities,
             )
 
     def remove_known_device(self, device_id: str) -> None:
-        """Remove a device from the registered entities.
-
-        After removal, messages from this device will be treated as unknown.
-        """
+        """Remove a command device and all of its registered status identities."""
         self._registered_devices.pop(device_id, None)
         normalized_id = device_id.upper()
         self._registered_entity_keys = {
-            key: name
-            for key, name in self._registered_entity_keys.items()
-            if key[0] != normalized_id
+            key: registration
+            for key, registration in self._registered_entity_keys.items()
+            if registration.command_device_id != normalized_id
         }
         _LOGGER.debug("Removed device %s from registered entities", device_id)
 
@@ -1176,32 +1272,63 @@ class SchellenbergUsbApi:
         *,
         command_device_id: str | None = None,
         command_enum: str | None = None,
+        secondary_status_identities: object = None,
     ) -> None:
-        """Register command and exact incoming status identities for an entity."""
+        """Register command, primary status, and diagnostic secondary identities."""
         command_id = command_device_id or status_device_id
         command_slot = command_enum or status_enum
+        display_name = entity_name or status_device_id
         self._registered_devices[command_id] = command_slot
-        self._registered_entity_keys[
-            (status_device_id.upper(), _normalize_protocol_enum(status_enum))
-        ] = entity_name or status_device_id
+        primary_identity = normalize_status_identity(status_device_id, status_enum)
+        if primary_identity is not None:
+            self._register_status_identity(
+                primary_identity,
+                entity_name=display_name,
+                command_device_id=command_id,
+                primary=True,
+            )
+        secondary_identities = normalize_status_identities(secondary_status_identities)
+        for identity in secondary_identities:
+            if identity != primary_identity:
+                self._register_status_identity(
+                    identity,
+                    entity_name=display_name,
+                    command_device_id=command_id,
+                    primary=False,
+                )
         _LOGGER.debug(
-            "Registered entity=%s command=%s/%s status=%s/%s",
-            entity_name or status_device_id,
+            "Registered entity=%s command=%s/%s primary_status=%s/%s "
+            "secondary_statuses=%s",
+            display_name,
             command_id,
             command_slot,
             status_device_id,
             status_enum,
+            secondary_identities,
         )
 
     @callback
     def get_last_received(
         self, status_device_id: str, status_enum: str
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
         """Return a copy of the latest frame for an exact status identity."""
-        message = self._last_received_messages.get(
-            (status_device_id.upper(), _normalize_protocol_enum(status_enum))
-        )
+        identity = normalize_status_identity(status_device_id, status_enum)
+        message = self._last_received_messages.get(identity) if identity else None
         return dict(message) if message is not None else None
+
+    @callback
+    def get_last_received_for_identities(
+        self, identities: object
+    ) -> dict[str, Any] | None:
+        """Return the newest frame matching any supplied status identity."""
+        candidates = [
+            self._last_received_messages[identity]
+            for identity in normalize_status_identities(identities)
+            if identity in self._last_received_messages
+        ]
+        if not candidates:
+            return None
+        return dict(max(candidates, key=lambda message: int(message["sequence"])))
 
     async def verify_device(self) -> bool:
         """Verify that the connected serial device is a Schellenberg stick."""

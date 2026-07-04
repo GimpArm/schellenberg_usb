@@ -29,6 +29,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
     EVENT_STARTED_MOVING_DOWN,
@@ -66,6 +67,7 @@ class CalibrationFlowHandler:
         self._pending_device_name: str | None = None
         self._pending_status_device_id: str | None = None
         self._pending_status_enum: str | None = None
+        self._pending_secondary_status_identities: list[dict[str, str]] = []
         self._pending_invert_direction = False
 
     async def set_device_by_id(self, device_id: str) -> None:
@@ -383,6 +385,9 @@ class CalibrationFlowHandler:
                         CONF_COMMAND_ENUM: self._pending_device_enum,
                         CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
                         CONF_STATUS_ENUM: self._pending_status_enum,
+                        CONF_SECONDARY_STATUS_IDENTITIES: list(
+                            self._pending_secondary_status_identities
+                        ),
                         CONF_OPEN_TIME: round(self._open_time, 2),
                         CONF_CLOSE_TIME: round(self._close_time, 2),
                         CONF_INVERT_DIRECTION: self._pending_invert_direction,
@@ -540,6 +545,7 @@ class CalibrationFlowHandler:
         device_name: str,
         status_device_id: str | None = None,
         status_enum: str | None = None,
+        secondary_status_identities: list[dict[str, str]] | None = None,
         invert_direction: bool = False,
     ) -> None:
         """Enable creating a subentry after calibration completes."""
@@ -549,6 +555,9 @@ class CalibrationFlowHandler:
         self._pending_device_name = device_name
         self._pending_status_device_id = status_device_id or device_id
         self._pending_status_enum = status_enum or device_enum
+        self._pending_secondary_status_identities = list(
+            secondary_status_identities or []
+        )
         self._pending_invert_direction = invert_direction
 
     def disable_subentry_creation(self) -> None:
@@ -559,4 +568,5 @@ class CalibrationFlowHandler:
         self._pending_device_name = None
         self._pending_status_device_id = None
         self._pending_status_enum = None
+        self._pending_secondary_status_identities = []
         self._pending_invert_direction = False

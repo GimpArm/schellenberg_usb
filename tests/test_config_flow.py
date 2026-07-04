@@ -35,6 +35,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
     DOMAIN,
@@ -134,6 +135,7 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
                 CONF_DEVICE_ENUM: "23",
                 CONF_STATUS_DEVICE_ID: "3720b8",
                 CONF_STATUS_ENUM: "08",
+                CONF_SECONDARY_STATUS_IDENTITIES: "F2B8D5/23\nABCDEF/0d",
                 CONF_OPEN_TIME_SECONDS: 25.06,
                 CONF_CLOSE_TIME_SECONDS: 23.05,
                 CONF_INVERT_DIRECTION: False,
@@ -153,6 +155,10 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
         CONF_COMMAND_ENUM: "23",
         CONF_STATUS_DEVICE_ID: "3720B8",
         CONF_STATUS_ENUM: "08",
+        CONF_SECONDARY_STATUS_IDENTITIES: [
+            {"device_id": "F2B8D5", "enum": "23"},
+            {"device_id": "ABCDEF", "enum": "0D"},
+        ],
         CONF_OPEN_TIME: 25.06,
         CONF_CLOSE_TIME: 23.05,
         CONF_INVERT_DIRECTION: False,
@@ -188,6 +194,7 @@ async def test_manual_subentry_persists_through_storage_reload(
             CONF_DEVICE_ENUM: "23",
             CONF_STATUS_DEVICE_ID: "3720B8",
             CONF_STATUS_ENUM: "08",
+            CONF_SECONDARY_STATUS_IDENTITIES: "F2B8D5/23",
             CONF_OPEN_TIME_SECONDS: 25.06,
             CONF_CLOSE_TIME_SECONDS: 23.05,
             CONF_INVERT_DIRECTION: False,
@@ -211,6 +218,9 @@ async def test_manual_subentry_persists_through_storage_reload(
     assert subentry.title == "Sitting room door"
     assert subentry.unique_id == "F2B8D5"
     assert subentry.data[CONF_STATUS_DEVICE_ID] == "3720B8"
+    assert subentry.data[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "F2B8D5", "enum": "23"}
+    ]
     assert subentry.data[CONF_OPEN_TIME] == 25.06
 
 
@@ -228,6 +238,7 @@ async def test_manual_setup_validates_protocol_values() -> None:
                 CONF_DEVICE_ENUM: "123",
                 CONF_STATUS_DEVICE_ID: "also-bad",
                 CONF_STATUS_ENUM: "x",
+                CONF_SECONDARY_STATUS_IDENTITIES: "not-an-identity",
                 CONF_OPEN_TIME_SECONDS: 0,
                 CONF_CLOSE_TIME_SECONDS: -1,
             }
@@ -240,6 +251,7 @@ async def test_manual_setup_validates_protocol_values() -> None:
         CONF_DEVICE_ENUM: "invalid_device_enum",
         CONF_STATUS_DEVICE_ID: "invalid_device_id",
         CONF_STATUS_ENUM: "invalid_device_enum",
+        CONF_SECONDARY_STATUS_IDENTITIES: "invalid_status_identities",
         CONF_OPEN_TIME_SECONDS: "invalid_travel_time",
         CONF_CLOSE_TIME_SECONDS: "invalid_travel_time",
     }
@@ -303,6 +315,7 @@ async def test_edit_updates_protocol_data_without_unique_id_change() -> None:
                 CONF_DEVICE_ENUM: "13",
                 CONF_STATUS_DEVICE_ID: "3720b8",
                 CONF_STATUS_ENUM: "08",
+                CONF_SECONDARY_STATUS_IDENTITIES: "F2B8D5/23",
                 CONF_OPEN_TIME_SECONDS: 25.06,
                 CONF_CLOSE_TIME_SECONDS: 23.05,
                 CONF_INVERT_DIRECTION: True,
@@ -316,6 +329,9 @@ async def test_edit_updates_protocol_data_without_unique_id_change() -> None:
     assert kwargs["data"][CONF_COMMAND_ENUM] == "13"
     assert kwargs["data"][CONF_STATUS_DEVICE_ID] == "3720B8"
     assert kwargs["data"][CONF_STATUS_ENUM] == "08"
+    assert kwargs["data"][CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "F2B8D5", "enum": "23"}
+    ]
     assert kwargs["data"][CONF_INVERT_DIRECTION] is True
     assert "unique_id" not in kwargs
 
@@ -331,17 +347,21 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
             CONF_COMMAND_ENUM: "23",
             CONF_STATUS_DEVICE_ID: "3720B8",
             CONF_STATUS_ENUM: "08",
+            CONF_SECONDARY_STATUS_IDENTITIES: [{"device_id": "F2B8D5", "enum": "23"}],
             CONF_OPEN_TIME: 25.06,
             CONF_CLOSE_TIME: 23.05,
             CONF_INVERT_DIRECTION: True,
         },
     )
     api = MagicMock()
-    api.get_last_received.return_value = {
-        "device_id": "3720B8",
-        "enum": "08",
-        "command": "01",
+    api.get_last_received_for_identities.return_value = {
+        "device_id": "F2B8D5",
+        "enum": "23",
+        "command": "C1",
         "time": "17:32:14",
+        "identity_role": "secondary",
+        "interpreted_command": "unknown",
+        "position_tracking": False,
     }
     api.control_blind = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
@@ -366,7 +386,13 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     placeholders = result["description_placeholders"]
     assert placeholders is not None
     assert placeholders["selected_blind"] == "Sitting room door"
-    assert placeholders["last_device_id"] == "3720B8"
+    assert placeholders["last_device_id"] == "F2B8D5"
+    assert placeholders["last_identity_role"] == "secondary"
+    assert placeholders["last_interpretation"] == "unknown"
+    assert placeholders["last_position_tracking"] == "False"
+    assert placeholders["primary_status_device_id"] == "3720B8"
+    assert placeholders["primary_status_enum"] == "08"
+    assert placeholders["secondary_status_identities"] == "F2B8D5/23"
     assert placeholders["command_device_id"] == "F2B8D5"
     assert placeholders["command_enum"] == "23"
     assert result["menu_options"] == DEVELOPER_TOOLS_MENU_OPTIONS
@@ -384,8 +410,12 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert schema is not None
     diagnostics = schema({})["diagnostics"]
     assert "Selected blind: Sitting room door" in diagnostics
+    assert "Configured primary status identity:" in diagnostics
     assert "Device ID: 3720B8" in diagnostics
-    assert "Device ID: F2B8D5" in diagnostics
+    assert "Configured secondary status identities:" in diagnostics
+    assert "F2B8D5/23" in diagnostics
+    assert "Identity role: secondary" in diagnostics
+    assert "Interpretation: unknown" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
     assert "t1/t0 confirm only" in diagnostics
@@ -407,7 +437,7 @@ async def test_developer_teach_motor_sends_60_then_open_and_stop() -> None:
         },
     )
     api = MagicMock()
-    api.get_last_received.return_value = None
+    api.get_last_received_for_identities.return_value = None
     api.teach_motor = AsyncMock(return_value=True)
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
@@ -471,7 +501,7 @@ async def test_developer_raw_command_validates_and_uses_api() -> None:
         },
     )
     api = MagicMock()
-    api.get_last_received.return_value = None
+    api.get_last_received_for_identities.return_value = None
     api.send_raw_transmit = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -564,7 +594,7 @@ async def test_developer_menu_navigation_dispatches_every_command(
     )
     hass.config_entries.async_add_subentry(entry, subentry)
     api = MagicMock()
-    api.get_last_received.return_value = None
+    api.get_last_received_for_identities.return_value = None
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -639,7 +669,7 @@ async def test_developer_and_cover_actions_share_control_blind_path(
         },
     )
     api = MagicMock()
-    api.get_last_received.return_value = None
+    api.get_last_received_for_identities.return_value = None
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -698,7 +728,7 @@ async def test_developer_command_is_blocked_when_stick_is_not_ready() -> None:
         },
     )
     api = MagicMock()
-    api.get_last_received.return_value = None
+    api.get_last_received_for_identities.return_value = None
     api.control_blind = AsyncMock()
     api.is_connected = True
     api.device_mode = "pairing"
@@ -763,6 +793,7 @@ async def test_pairing_persists_calibrated_protocol_data(
             CONF_COMMAND_ENUM: command_enum,
             CONF_STATUS_DEVICE_ID: "3720B8",
             CONF_STATUS_ENUM: status_enum,
+            CONF_SECONDARY_STATUS_IDENTITIES: [],
             CONF_OPEN_TIME: 25.06,
             CONF_CLOSE_TIME: 23.05,
             CONF_INVERT_DIRECTION: False,
