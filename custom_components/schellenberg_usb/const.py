@@ -102,6 +102,7 @@ SIGNAL_PAIRING_STARTED = f"{DOMAIN}_pairing_started"
 SIGNAL_PAIRING_TIMEOUT = f"{DOMAIN}_pairing_timeout"
 SIGNAL_STICK_STATUS_UPDATED = f"{DOMAIN}_stick_status_updated"
 SIGNAL_CALIBRATION_COMPLETED = f"{DOMAIN}_calibration_completed"
+SIGNAL_MANUAL_POSITION_SYNC = f"{DOMAIN}_manual_position_sync"
 
 # Services
 SERVICE_TEST_COMMAND = "test_command"

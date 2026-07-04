@@ -88,9 +88,14 @@ the existing Home Assistant entity unique ID.
 Choose **Developer tools** in the same blind configuration menu to see separate
 snapshots for the newest matched frame, last recognized primary tracking frame,
 last secondary frame, and latest position calculation with its source and
-estimated/confirmed status. The menu also shows the current transmit target,
-direct Open, Close, and Stop actions, a guided **Teach motor / activate USB
-transmitter** action, validated raw RF payload sending, and copyable diagnostics.
+estimated/confirmed status. Because the motor provides no absolute position
+feedback, the menu also provides **Set position fully open**, **Set position fully
+closed**, and **Set position manually** (0–100). These corrections stop the active
+estimator, update Home Assistant immediately, and are marked manually confirmed;
+later movement is estimated again and may drift until the next correction. The
+menu also shows the current transmit target, direct Open, Close, and Stop actions,
+a guided **Teach motor / activate USB transmitter** action, validated raw RF
+payload sending, and copyable diagnostics.
 
 Receiving frames from a physical remote proves only that the stick can listen. It
 does not mean the motor has authorized the stick as a transmitter. Likewise,

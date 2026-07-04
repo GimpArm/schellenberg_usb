@@ -389,6 +389,14 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
         "status": "estimated",
         "time": "17:32:15",
     }
+    api.get_last_manual_position_sync.return_value = {
+        "source": "Developer Tools manual position sync",
+        "direction": "manual",
+        "previous_position": 0,
+        "new_position": 40,
+        "status": "confirmed/manual",
+        "time": "17:30:00",
+    }
     api.control_blind = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.is_connected = True
@@ -426,6 +434,9 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["position_previous"] == "40%"
     assert placeholders["position_new"] == "44%"
     assert placeholders["position_status"] == "estimated"
+    assert placeholders["current_position"] == "44%"
+    assert placeholders["last_manual_sync_time"] == "17:30:00"
+    assert placeholders["position_confidence"] == "estimated"
     assert placeholders["primary_status_device_id"] == "3720B8"
     assert placeholders["primary_status_enum"] == "08"
     assert placeholders["secondary_status_identities"] == "F2B8D5/23"
@@ -458,10 +469,115 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert "Previous position: 40" in diagnostics
     assert "New position: 44" in diagnostics
     assert "Status: estimated" in diagnostics
+    assert "Current estimated position: 44" in diagnostics
+    assert "Last manual sync time: 17:30:00" in diagnostics
+    assert "Estimated or manually confirmed: estimated" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
     assert "t1/t0 confirm only" in diagnostics
     assert "Motor reception and movement remain unverified" in diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step_method", "expected_position"),
+    [
+        ("async_step_set_position_open", 100),
+        ("async_step_set_position_closed", 0),
+    ],
+)
+async def test_developer_position_endpoint_actions_update_live_cover(
+    step_method: str,
+    expected_position: int,
+) -> None:
+    """Test fully-open and fully-closed actions dispatch exact positions."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting room door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "08",
+        },
+    )
+    api = MagicMock()
+    api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
+    api.get_last_manual_position_sync.return_value = None
+    api.manual_sync_position.return_value = True
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        result = await getattr(flow, step_method)()
+
+    api.manual_sync_position.assert_called_once_with("F2B8D5", expected_position)
+    assert result["step_id"] == "developer_tools"
+    placeholders = result["description_placeholders"]
+    assert placeholders is not None
+    assert f"confirmed at {expected_position}%" in placeholders["result"]
+
+
+@pytest.mark.asyncio
+async def test_developer_manual_position_form_uses_current_position_and_submits() -> (
+    None
+):
+    """Test the numeric manual-sync form defaults to and applies tracked position."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting room door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "3720B8",
+            CONF_STATUS_ENUM: "08",
+        },
+    )
+    api = MagicMock()
+    api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = {
+        "source": "restored Home Assistant state",
+        "direction": "idle",
+        "previous_position": None,
+        "new_position": 37,
+        "status": "estimated",
+        "time": "18:00:00",
+    }
+    api.get_last_manual_position_sync.return_value = None
+    api.manual_sync_position.return_value = True
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        form = await flow.async_step_set_position_manual()
+        result = await flow.async_step_set_position_manual({"position": 63})
+
+    assert form["step_id"] == "set_position_manual"
+    assert form["data_schema"]({})["position"] == 37
+    assert form["description_placeholders"] == {
+        "selected_blind": "Sitting room door",
+        "current_position": "37%",
+    }
+    api.manual_sync_position.assert_called_once_with("F2B8D5", 63)
+    assert result["step_id"] == "developer_tools"
+    assert "confirmed at 63%" in result["description_placeholders"]["result"]
 
 
 @pytest.mark.asyncio

@@ -776,6 +776,56 @@ async def test_cover_calibration_different_device(
     assert cover._attr_current_cover_position == 50
 
 
+@pytest.mark.parametrize("position", [0, 42, 100])
+def test_manual_position_sync_updates_cover_and_stops_estimator(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+    position: int,
+) -> None:
+    """Test a manual sync immediately becomes the cover's confirmed state."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="stable-id",
+        device_enum="10",
+        device_name="Test Cover",
+        command_device_id="F2B8D5",
+        status_device_id="3720B8",
+        status_enum="08",
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = 50
+    cover._attr_is_opening = True
+    cover._attr_is_closing = False
+    cover._move_start_time = 123.0
+    cover._move_start_position = 50
+    cover._target_position = 75
+    _magic_mock(mock_api.record_position_update).reset_mock()
+
+    with (
+        patch.object(cover, "_stop_position_tracking") as stop_tracking,
+        patch.object(cover, "async_write_ha_state") as write_state,
+    ):
+        cover._handle_manual_position_sync(position)
+
+    stop_tracking.assert_called_once_with()
+    write_state.assert_called_once_with()
+    assert cover._attr_current_cover_position == position
+    assert cover._attr_is_closed is (position == 0)
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
+    assert cover._move_start_position is None
+    assert cover._target_position is None
+    _magic_mock(mock_api.record_position_update).assert_called_once_with(
+        "F2B8D5",
+        source="Developer Tools manual position sync",
+        direction="manual",
+        previous_position=50,
+        new_position=position,
+        status="confirmed/manual",
+    )
+
+
 @pytest.mark.asyncio
 async def test_cover_registers_with_api(
     hass: HomeAssistant,
@@ -790,11 +840,20 @@ async def test_cover_registers_with_api(
     )
     cover.hass = hass
 
-    with patch.object(cover, "async_get_last_state", return_value=None):
-        with patch("custom_components.schellenberg_usb.cover.async_dispatcher_connect"):
-            with patch.object(cover, "async_write_ha_state"):
-                await cover.async_added_to_hass()
+    with (
+        patch.object(cover, "async_get_last_state", return_value=None),
+        patch(
+            "custom_components.schellenberg_usb.cover.async_dispatcher_connect"
+        ) as dispatcher_connect,
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_added_to_hass()
 
+    assert any(
+        call.args[1] == "schellenberg_usb_manual_position_sync_ABC123"
+        and call.args[2] == cover._handle_manual_position_sync
+        for call in dispatcher_connect.call_args_list
+    )
     _magic_mock(mock_api.register_entity).assert_called_once_with(
         "ABC123",
         "01",

@@ -41,6 +41,7 @@ from .const import (
     EVENT_STOPPED,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
+    SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
     SUBENTRY_TYPE_BLIND,
     SchellenbergConfigEntry,
@@ -442,6 +443,16 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
         )
 
+        # Developer Tools position corrections target the command identity because it
+        # is unique per configured cover and does not depend on a received RF frame.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{SIGNAL_MANUAL_POSITION_SYNC}_{self._command_device_id.upper()}",
+                self._handle_manual_position_sync,
+            )
+        )
+
         # Subscribe to connection status updates so availability changes are reflected
         self.async_on_remove(
             async_dispatcher_connect(
@@ -482,6 +493,37 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
     @callback
     def _handle_status_update(self) -> None:
         """Handle status update from API (connection state changed)."""
+        self.async_write_ha_state()
+
+    @callback
+    def _handle_manual_position_sync(self, position: int) -> None:
+        """Apply an exact user-provided position without transmitting to the motor."""
+        normalized_position = max(0, min(100, int(position)))
+        previous_position = self._attr_current_cover_position
+        self._stop_position_tracking()
+        self._attr_current_cover_position = normalized_position
+        self._attr_is_closed = normalized_position == 0
+        self._attr_is_opening = False
+        self._attr_is_closing = False
+        self._move_start_time = None
+        self._move_start_position = None
+        self._target_position = None
+        self._position_update_source = "Developer Tools manual position sync"
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="manual",
+            previous_position=previous_position,
+            new_position=normalized_position,
+            status="confirmed/manual",
+        )
+        _LOGGER.warning(
+            "Manual position sync applied cover=%s command_device_id=%s "
+            "previous_position=%s new_position=%d status=confirmed/manual",
+            self._attr_name,
+            self._command_device_id,
+            previous_position,
+            normalized_position,
+        )
         self.async_write_ha_state()
 
     @callback

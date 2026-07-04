@@ -52,6 +52,7 @@ from .const import (
     PAIRING_DEVICE_ENUM_START,
     PAIRING_TIMEOUT,
     SIGNAL_DEVICE_EVENT,
+    SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
     VERIFY_TIMEOUT,
 )
@@ -121,6 +122,7 @@ class SchellenbergUsbApi:
         self._last_received_messages: dict[StatusIdentity, dict[str, Any]] = {}
         self._last_primary_tracking_messages: dict[StatusIdentity, dict[str, Any]] = {}
         self._last_position_updates: dict[str, dict[str, Any]] = {}
+        self._last_manual_position_syncs: dict[str, dict[str, Any]] = {}
         self._last_received_sequence = 0
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
@@ -1374,7 +1376,7 @@ class SchellenbergUsbApi:
         status: str,
     ) -> None:
         """Store the latest cover position calculation for diagnostics."""
-        self._last_position_updates[command_device_id.upper()] = {
+        update = {
             "source": source,
             "direction": direction,
             "previous_position": previous_position,
@@ -1382,12 +1384,53 @@ class SchellenbergUsbApi:
             "status": status,
             "time": dt_util.now().strftime("%H:%M:%S"),
         }
+        normalized_id = command_device_id.upper()
+        self._last_position_updates[normalized_id] = update
+        if status == "confirmed/manual":
+            self._last_manual_position_syncs[normalized_id] = dict(update)
 
     @callback
     def get_last_position_update(self, command_device_id: str) -> dict[str, Any] | None:
         """Return the latest position calculation for a command identity."""
         update = self._last_position_updates.get(command_device_id.upper())
         return dict(update) if update is not None else None
+
+    @callback
+    def get_last_manual_position_sync(
+        self, command_device_id: str
+    ) -> dict[str, Any] | None:
+        """Return the most recent manual position correction for a cover."""
+        update = self._last_manual_position_syncs.get(command_device_id.upper())
+        return dict(update) if update is not None else None
+
+    @callback
+    def manual_sync_position(self, command_device_id: str, position: int) -> bool:
+        """Request an immediate manual position correction on a live cover."""
+        if position < 0 or position > 100:
+            raise ValueError("manual position must be between 0 and 100")
+        normalized_id = command_device_id.upper()
+        if not any(
+            registered_id.upper() == normalized_id
+            for registered_id in self._registered_devices
+        ):
+            _LOGGER.error(
+                "Manual position sync blocked command_device_id=%s position=%d "
+                "reason=cover_not_registered",
+                normalized_id,
+                position,
+            )
+            return False
+        _LOGGER.warning(
+            "Manual position sync requested command_device_id=%s position=%d",
+            normalized_id,
+            position,
+        )
+        async_dispatcher_send(
+            self.hass,
+            f"{SIGNAL_MANUAL_POSITION_SYNC}_{normalized_id}",
+            position,
+        )
+        return True
 
     async def verify_device(self) -> bool:
         """Verify that the connected serial device is a Schellenberg stick."""

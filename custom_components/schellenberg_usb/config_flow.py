@@ -55,6 +55,9 @@ DEVELOPER_TOOLS_MENU_OPTIONS = {
     "test_open": "Test Open",
     "test_close": "Test Close",
     "test_stop": "Test Stop",
+    "set_position_open": "Set position fully open",
+    "set_position_closed": "Set position fully closed",
+    "set_position_manual": "Set position manually",
     "teach_motor": "Teach motor / activate USB transmitter",
     "send_raw_command": "Send raw RF payload",
     "reset_stick": "Reset stick / reconnect serial",
@@ -767,6 +770,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         dict[str, Any],
         dict[str, Any],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Return separated frame and position diagnostics for one blind."""
         details = self._developer_details()
@@ -798,12 +802,21 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "status": "--",
             "time": "--",
         }
+        last_manual_sync = api.get_last_manual_position_sync(
+            details["command_device_id"]
+        )
+        if not isinstance(last_manual_sync, dict):
+            last_manual_sync = {
+                "new_position": None,
+                "time": "Never",
+            }
         return (
             details,
             last_matched,
             last_primary,
             last_secondary,
             last_position,
+            last_manual_sync,
         )
 
     async def async_step_developer_tools(
@@ -816,6 +829,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             last_primary,
             last_secondary,
             last_position,
+            last_manual_sync,
         ) = self._developer_snapshot()
         api = self._get_entry().runtime_data
         return self.async_show_menu(
@@ -861,6 +875,21 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 ),
                 "position_status": last_position["status"],
                 "position_time": last_position["time"],
+                "current_position": (
+                    "--"
+                    if last_position["new_position"] is None
+                    else f"{last_position['new_position']}%"
+                ),
+                "last_manual_sync_time": last_manual_sync["time"],
+                "position_confidence": (
+                    "manually confirmed"
+                    if last_position["status"] == "confirmed/manual"
+                    else (
+                        "estimated"
+                        if last_position["new_position"] is not None
+                        else "unknown"
+                    )
+                ),
                 "stick_connected": str(api.is_connected),
                 "stick_mode": str(api.device_mode or "unknown"),
                 "stick_ready": str(api.transmit_ready),
@@ -978,6 +1007,84 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Send a direct stop test command."""
         return await self._async_developer_command("stop")
+
+    async def _async_manual_position_sync(self, position: int) -> SubentryFlowResult:
+        """Apply one Developer Tools position correction to the live cover."""
+        api = self._get_entry().runtime_data
+        details = self._developer_details()
+        _LOGGER.warning(
+            "Developer Tools manual position sync clicked selected_blind=%s "
+            "command_device_id=%s position=%d",
+            details["name"],
+            details["command_device_id"],
+            position,
+        )
+        try:
+            synced = api.manual_sync_position(details["command_device_id"], position)
+        except (TypeError, ValueError):
+            _LOGGER.exception(
+                "Developer Tools manual position sync rejected "
+                "selected_blind=%s position=%s",
+                details["name"],
+                position,
+            )
+            synced = False
+
+        if synced:
+            self._developer_notice = (
+                f"Position manually confirmed at {position}%. No RF command was sent."
+            )
+        else:
+            self._developer_notice = (
+                "Manual position sync failed because the live cover entity is not "
+                "registered. Reload the integration and try again."
+            )
+        return await self.async_step_developer_tools()
+
+    async def async_step_set_position_open(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Manually confirm that the blind is fully open."""
+        return await self._async_manual_position_sync(100)
+
+    async def async_step_set_position_closed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Manually confirm that the blind is fully closed."""
+        return await self._async_manual_position_sync(0)
+
+    async def async_step_set_position_manual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Accept and apply an exact manual blind position."""
+        if user_input is not None:
+            return await self._async_manual_position_sync(int(user_input["position"]))
+
+        *_, last_position, _last_manual_sync = self._developer_snapshot()
+        default_position = last_position["new_position"]
+        if not isinstance(default_position, int):
+            default_position = 50
+        return self.async_show_form(
+            step_id="set_position_manual",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("position", default=default_position): (
+                        selector.NumberSelector(
+                            selector.NumberSelectorConfig(
+                                min=0,
+                                max=100,
+                                step=1,
+                                mode=selector.NumberSelectorMode.BOX,
+                            )
+                        )
+                    )
+                }
+            ),
+            description_placeholders={
+                "selected_blind": str(self._developer_details()["name"]),
+                "current_position": f"{default_position}%",
+            },
+        )
 
     async def async_step_teach_motor(
         self, user_input: dict[str, Any] | None = None
@@ -1132,6 +1239,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             last_primary,
             last_secondary,
             last_position,
+            last_manual_sync,
         ) = self._developer_snapshot()
         api = self._get_entry().runtime_data
         diagnostics = "\n".join(
@@ -1181,6 +1289,20 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 f"New position: {last_position['new_position']}",
                 f"Status: {last_position['status']}",
                 f"Time: {last_position['time']}",
+                "",
+                "Position confidence:",
+                f"Current estimated position: {last_position['new_position']}",
+                f"Last manual sync time: {last_manual_sync['time']}",
+                "Estimated or manually confirmed: "
+                + (
+                    "manually confirmed"
+                    if last_position["status"] == "confirmed/manual"
+                    else (
+                        "estimated"
+                        if last_position["new_position"] is not None
+                        else "unknown"
+                    )
+                ),
                 "",
                 "Current transmit target:",
                 f"Device ID: {details['command_device_id']}",

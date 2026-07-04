@@ -130,16 +130,27 @@
         },
         "developer_tools": {
           "title": "Developer tools",
-          "description": "Selected blind: {selected_blind}\n\nLast matched frame (any identity):\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nLast primary tracking frame:\nDevice ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nCommand: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nTime: {primary_last_time}\n\nLast secondary frame:\nDevice ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nCommand: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nTime: {secondary_last_time}\n\nLast position update:\nSource: {position_source}\nDirection: {position_direction}\nPrevious position: {position_previous}\nNew position: {position_new}\nStatus: {position_status}\nTime: {position_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSecondary:\n{secondary_status_identities}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
+          "description": "Selected blind: {selected_blind}\n\nLast matched frame (any identity):\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nLast primary tracking frame:\nDevice ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nCommand: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nTime: {primary_last_time}\n\nLast secondary frame:\nDevice ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nCommand: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nTime: {secondary_last_time}\n\nLast position update:\nSource: {position_source}\nDirection: {position_direction}\nPrevious position: {position_previous}\nNew position: {position_new}\nStatus: {position_status}\nTime: {position_time}\n\nCurrent position diagnostics:\nCurrent estimated position: {current_position}\nLast manual sync time: {last_manual_sync_time}\nEstimated or manually confirmed: {position_confidence}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSecondary:\n{secondary_status_identities}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
           "menu_options": {
             "test_open": "Test Open",
             "test_close": "Test Close",
             "test_stop": "Test Stop",
+            "set_position_open": "Set position fully open",
+            "set_position_closed": "Set position fully closed",
+            "set_position_manual": "Set position manually",
             "reset_stick": "Reset stick / reconnect serial",
             "copy_diagnostics": "Copy diagnostics",
             "teach_motor": "Teach motor / activate USB transmitter",
             "send_raw_command": "Send raw RF payload"
           }
+        },
+        "set_position_manual": {
+          "title": "Set position manually",
+          "description": "Set the current position for {selected_blind} without moving the motor. Current tracked position: {current_position}.",
+          "data": {
+            "position": "Position"
+          },
+          "submit": "Confirm position"
         },
         "reset_stick": {
           "title": "Reset stick / reconnect serial"

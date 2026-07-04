@@ -391,6 +391,71 @@ def test_position_update_diagnostics_are_kept_per_command_identity(
     assert api.get_last_position_update("ABCDEF") is None
 
 
+def test_manual_position_sync_dispatches_and_retains_last_confirmation(
+    hass: HomeAssistant,
+) -> None:
+    """Test manual position corrections reach the live cover and remain diagnostic."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    api.register_entity(
+        "3720B8",
+        "08",
+        "Sitting room",
+        command_device_id="F2B8D5",
+        command_enum="10",
+    )
+
+    with patch(
+        "custom_components.schellenberg_usb.api.async_dispatcher_send"
+    ) as mock_send:
+        assert api.manual_sync_position("f2b8d5", 42) is True
+
+    mock_send.assert_called_once_with(
+        hass,
+        "schellenberg_usb_manual_position_sync_F2B8D5",
+        42,
+    )
+
+    api.record_position_update(
+        "F2B8D5",
+        source="Developer Tools manual position sync",
+        direction="manual",
+        previous_position=40,
+        new_position=42,
+        status="confirmed/manual",
+    )
+    manual_update = api.get_last_manual_position_sync("f2b8d5")
+    assert manual_update is not None
+    assert manual_update["new_position"] == 42
+    assert manual_update["status"] == "confirmed/manual"
+
+    api.record_position_update(
+        "F2B8D5",
+        source="primary status 3720B8/08 command 01",
+        direction="opening",
+        previous_position=42,
+        new_position=45,
+        status="estimated",
+    )
+    assert api.get_last_position_update("F2B8D5")["new_position"] == 45
+    assert api.get_last_manual_position_sync("F2B8D5") == manual_update
+
+
+def test_manual_position_sync_rejects_invalid_or_unknown_targets(
+    hass: HomeAssistant,
+) -> None:
+    """Test manual correction is bounded and requires a registered live cover."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+
+    with patch(
+        "custom_components.schellenberg_usb.api.async_dispatcher_send"
+    ) as mock_send:
+        assert api.manual_sync_position("ABCDEF", 50) is False
+        with pytest.raises(ValueError, match="between 0 and 100"):
+            api.manual_sync_position("ABCDEF", 101)
+
+    mock_send.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_unmatched_frames_are_not_warnings_when_a_cover_is_registered(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
