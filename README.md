@@ -85,11 +85,12 @@ To edit an existing blind, open its configuration action from the Schellenberg U
 integration and choose **Edit identities and travel times**. The same menu also
 offers a short motor command test and recalibration. Editing protocol values keeps
 the existing Home Assistant entity unique ID.
-Choose **Developer tools** in the same blind configuration menu to see the newest
-frame matching any primary or secondary status identity, its identity role and
-command interpretation, the current transmit target, direct Open,
-Close, and Stop actions, a guided **Teach motor / activate USB transmitter**
-action, validated raw RF payload sending, and a copyable diagnostics snapshot.
+Choose **Developer tools** in the same blind configuration menu to see separate
+snapshots for the newest matched frame, last recognized primary tracking frame,
+last secondary frame, and latest position calculation with its source and
+estimated/confirmed status. The menu also shows the current transmit target,
+direct Open, Close, and Stop actions, a guided **Teach motor / activate USB
+transmitter** action, validated raw RF payload sending, and copyable diagnostics.
 
 Receiving frames from a physical remote proves only that the stick can listen. It
 does not mean the motor has authorized the stick as a transmitter. Likewise,

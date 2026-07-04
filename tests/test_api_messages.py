@@ -339,6 +339,7 @@ async def test_primary_and_secondary_status_identities_both_match(
     ):
         api._handle_message("ss083720B8ZZZZ01PP00")
         primary = api.get_last_received("3720B8", "08")
+        api._handle_message("ss083720B8ZZZZE1PP00")
         api._handle_message("ss23F2B8D5ZZZZC1PP00")
         secondary = api.get_last_received("F2B8D5", "23")
 
@@ -363,6 +364,31 @@ async def test_primary_and_secondary_status_identities_both_match(
         "schellenberg_usb_device_event_F2B8D5_23",
         "C1",
     )
+
+
+def test_position_update_diagnostics_are_kept_per_command_identity(
+    hass: HomeAssistant,
+) -> None:
+    """Test cover position provenance can be recorded and retrieved."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+
+    api.record_position_update(
+        "f2b8d5",
+        source="primary status 3720B8/08 command 01",
+        direction="opening",
+        previous_position=40,
+        new_position=44,
+        status="estimated",
+    )
+
+    update = api.get_last_position_update("F2B8D5")
+    assert update is not None
+    assert update["source"] == "primary status 3720B8/08 command 01"
+    assert update["direction"] == "opening"
+    assert update["previous_position"] == 40
+    assert update["new_position"] == 44
+    assert update["status"] == "estimated"
+    assert api.get_last_position_update("ABCDEF") is None
 
 
 @pytest.mark.asyncio

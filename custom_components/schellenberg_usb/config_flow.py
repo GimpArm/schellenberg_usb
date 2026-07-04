@@ -761,13 +761,17 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
     def _developer_snapshot(
         self,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Return blind details and its newest primary or secondary frame."""
+    ) -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
+        """Return separated frame and position diagnostics for one blind."""
         details = self._developer_details()
         api = self._get_entry().runtime_data
-        last_received = api.get_last_received_for_identities(
-            details["status_identities"]
-        ) or {
+        empty_frame = {
             "device_id": "No matching frame received",
             "enum": "--",
             "command": "--",
@@ -776,13 +780,43 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "interpreted_command": "unknown",
             "position_tracking": False,
         }
-        return details, last_received
+        last_matched = api.get_last_received_for_identities(
+            details["status_identities"]
+        ) or dict(empty_frame)
+        last_primary = api.get_last_primary_tracking_frame(
+            details["primary_status_device_id"],
+            details["primary_status_enum"],
+        ) or dict(empty_frame)
+        last_secondary = api.get_last_secondary_frame(
+            details["secondary_status_identities"]
+        ) or dict(empty_frame)
+        last_position = api.get_last_position_update(details["command_device_id"]) or {
+            "source": "No position update recorded",
+            "direction": "--",
+            "previous_position": None,
+            "new_position": None,
+            "status": "--",
+            "time": "--",
+        }
+        return (
+            details,
+            last_matched,
+            last_primary,
+            last_secondary,
+            last_position,
+        )
 
     async def async_step_developer_tools(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Show live protocol diagnostics and direct test actions."""
-        details, last_received = self._developer_snapshot()
+        (
+            details,
+            last_received,
+            last_primary,
+            last_secondary,
+            last_position,
+        ) = self._developer_snapshot()
         api = self._get_entry().runtime_data
         return self.async_show_menu(
             step_id="developer_tools",
@@ -803,6 +837,30 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "last_identity_role": last_received["identity_role"],
                 "last_interpretation": last_received["interpreted_command"],
                 "last_position_tracking": str(last_received["position_tracking"]),
+                "primary_last_device_id": last_primary["device_id"],
+                "primary_last_enum": last_primary["enum"],
+                "primary_last_command": last_primary["command"],
+                "primary_last_interpretation": last_primary["interpreted_command"],
+                "primary_last_time": last_primary["time"],
+                "secondary_last_device_id": last_secondary["device_id"],
+                "secondary_last_enum": last_secondary["enum"],
+                "secondary_last_command": last_secondary["command"],
+                "secondary_last_interpretation": last_secondary["interpreted_command"],
+                "secondary_last_time": last_secondary["time"],
+                "position_source": last_position["source"],
+                "position_direction": last_position["direction"],
+                "position_previous": (
+                    "--"
+                    if last_position["previous_position"] is None
+                    else f"{last_position['previous_position']}%"
+                ),
+                "position_new": (
+                    "--"
+                    if last_position["new_position"] is None
+                    else f"{last_position['new_position']}%"
+                ),
+                "position_status": last_position["status"],
+                "position_time": last_position["time"],
                 "stick_connected": str(api.is_connected),
                 "stick_mode": str(api.device_mode or "unknown"),
                 "stick_ready": str(api.transmit_ready),
@@ -1068,7 +1126,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             return await self.async_step_developer_tools()
 
-        details, last_received = self._developer_snapshot()
+        (
+            details,
+            last_received,
+            last_primary,
+            last_secondary,
+            last_position,
+        ) = self._developer_snapshot()
         api = self._get_entry().runtime_data
         diagnostics = "\n".join(
             (
@@ -1095,6 +1159,28 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 f"Interpretation: {last_received['interpreted_command']}",
                 f"Position tracking: {last_received['position_tracking']}",
                 f"Time: {last_received['time']}",
+                "",
+                "Last primary tracking frame:",
+                f"Device ID: {last_primary['device_id']}",
+                f"Enum: {last_primary['enum']}",
+                f"Command: {last_primary['command']}",
+                f"Interpretation: {last_primary['interpreted_command']}",
+                f"Time: {last_primary['time']}",
+                "",
+                "Last secondary frame:",
+                f"Device ID: {last_secondary['device_id']}",
+                f"Enum: {last_secondary['enum']}",
+                f"Command: {last_secondary['command']}",
+                f"Interpretation: {last_secondary['interpreted_command']}",
+                f"Time: {last_secondary['time']}",
+                "",
+                "Last position update:",
+                f"Source: {last_position['source']}",
+                f"Direction: {last_position['direction']}",
+                f"Previous position: {last_position['previous_position']}",
+                f"New position: {last_position['new_position']}",
+                f"Status: {last_position['status']}",
+                f"Time: {last_position['time']}",
                 "",
                 "Current transmit target:",
                 f"Device ID: {details['command_device_id']}",

@@ -119,6 +119,8 @@ class SchellenbergUsbApi:
         ] = {}
         # Exact status identity -> latest raw frame and diagnostic interpretation.
         self._last_received_messages: dict[StatusIdentity, dict[str, Any]] = {}
+        self._last_primary_tracking_messages: dict[StatusIdentity, dict[str, Any]] = {}
+        self._last_position_updates: dict[str, dict[str, Any]] = {}
         self._last_received_sequence = 0
         self._is_connecting = False
         self._pairing_future: asyncio.Future[str] | None = None
@@ -497,7 +499,7 @@ class SchellenbergUsbApi:
                     and interpretation != "unknown"
                 )
                 self._last_received_sequence += 1
-                self._last_received_messages[identity] = {
+                frame = {
                     "device_id": normalized_device_id,
                     "enum": normalized_device_enum,
                     "command": normalized_command,
@@ -508,6 +510,11 @@ class SchellenbergUsbApi:
                     "interpreted_command": interpretation,
                     "position_tracking": position_tracking,
                 }
+                self._last_received_messages[identity] = frame
+                if position_tracking:
+                    # Secondary and unknown primary frames must never overwrite the
+                    # last frame that can legitimately drive the position model.
+                    self._last_primary_tracking_messages[identity] = dict(frame)
 
                 # If we're in pairing mode and this is a new device
                 if self._pairing_future and not self._pairing_future.done():
@@ -1198,6 +1205,8 @@ class SchellenbergUsbApi:
                     "position_tracking": primary and interpretation != "unknown",
                 }
             )
+            if bool(last_message["position_tracking"]):
+                self._last_primary_tracking_messages[identity] = dict(last_message)
 
     def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
         """Register existing devices and all persisted status identities."""
@@ -1329,6 +1338,56 @@ class SchellenbergUsbApi:
         if not candidates:
             return None
         return dict(max(candidates, key=lambda message: int(message["sequence"])))
+
+    @callback
+    def get_last_primary_tracking_frame(
+        self, status_device_id: str, status_enum: str
+    ) -> dict[str, Any] | None:
+        """Return the last recognized 00/01/02 frame on the primary identity."""
+        identity = normalize_status_identity(status_device_id, status_enum)
+        message = (
+            self._last_primary_tracking_messages.get(identity) if identity else None
+        )
+        return dict(message) if message is not None else None
+
+    @callback
+    def get_last_secondary_frame(self, identities: object) -> dict[str, Any] | None:
+        """Return the newest frame among configured secondary identities."""
+        candidates = [
+            self._last_received_messages[identity]
+            for identity in normalize_status_identities(identities)
+            if identity in self._last_received_messages
+        ]
+        if not candidates:
+            return None
+        return dict(max(candidates, key=lambda message: int(message["sequence"])))
+
+    @callback
+    def record_position_update(
+        self,
+        command_device_id: str,
+        *,
+        source: str,
+        direction: str,
+        previous_position: int | None,
+        new_position: int | None,
+        status: str,
+    ) -> None:
+        """Store the latest cover position calculation for diagnostics."""
+        self._last_position_updates[command_device_id.upper()] = {
+            "source": source,
+            "direction": direction,
+            "previous_position": previous_position,
+            "new_position": new_position,
+            "status": status,
+            "time": dt_util.now().strftime("%H:%M:%S"),
+        }
+
+    @callback
+    def get_last_position_update(self, command_device_id: str) -> dict[str, Any] | None:
+        """Return the latest position calculation for a command identity."""
+        update = self._last_position_updates.get(command_device_id.upper())
+        return dict(update) if update is not None else None
 
     async def verify_device(self) -> bool:
         """Verify that the connected serial device is a Schellenberg stick."""

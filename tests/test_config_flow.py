@@ -363,6 +363,32 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
         "interpreted_command": "unknown",
         "position_tracking": False,
     }
+    api.get_last_primary_tracking_frame.return_value = {
+        "device_id": "3720B8",
+        "enum": "08",
+        "command": "01",
+        "time": "17:31:50",
+        "identity_role": "primary",
+        "interpreted_command": "open",
+        "position_tracking": True,
+    }
+    api.get_last_secondary_frame.return_value = {
+        "device_id": "F2B8D5",
+        "enum": "23",
+        "command": "C1",
+        "time": "17:32:14",
+        "identity_role": "secondary",
+        "interpreted_command": "unknown",
+        "position_tracking": False,
+    }
+    api.get_last_position_update.return_value = {
+        "source": "primary status 3720B8/08 command 01",
+        "direction": "opening",
+        "previous_position": 40,
+        "new_position": 44,
+        "status": "estimated",
+        "time": "17:32:15",
+    }
     api.control_blind = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.is_connected = True
@@ -390,6 +416,16 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["last_identity_role"] == "secondary"
     assert placeholders["last_interpretation"] == "unknown"
     assert placeholders["last_position_tracking"] == "False"
+    assert placeholders["primary_last_device_id"] == "3720B8"
+    assert placeholders["primary_last_command"] == "01"
+    assert placeholders["primary_last_interpretation"] == "open"
+    assert placeholders["secondary_last_device_id"] == "F2B8D5"
+    assert placeholders["secondary_last_command"] == "C1"
+    assert placeholders["position_source"] == ("primary status 3720B8/08 command 01")
+    assert placeholders["position_direction"] == "opening"
+    assert placeholders["position_previous"] == "40%"
+    assert placeholders["position_new"] == "44%"
+    assert placeholders["position_status"] == "estimated"
     assert placeholders["primary_status_device_id"] == "3720B8"
     assert placeholders["primary_status_enum"] == "08"
     assert placeholders["secondary_status_identities"] == "F2B8D5/23"
@@ -416,6 +452,12 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert "F2B8D5/23" in diagnostics
     assert "Identity role: secondary" in diagnostics
     assert "Interpretation: unknown" in diagnostics
+    assert "Last primary tracking frame:" in diagnostics
+    assert "Last secondary frame:" in diagnostics
+    assert "Last position update:" in diagnostics
+    assert "Previous position: 40" in diagnostics
+    assert "New position: 44" in diagnostics
+    assert "Status: estimated" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
     assert "t1/t0 confirm only" in diagnostics
@@ -438,6 +480,9 @@ async def test_developer_teach_motor_sends_60_then_open_and_stop() -> None:
     )
     api = MagicMock()
     api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
     api.teach_motor = AsyncMock(return_value=True)
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
@@ -502,6 +547,9 @@ async def test_developer_raw_command_validates_and_uses_api() -> None:
     )
     api = MagicMock()
     api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
     api.send_raw_transmit = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -595,6 +643,9 @@ async def test_developer_menu_navigation_dispatches_every_command(
     hass.config_entries.async_add_subentry(entry, subentry)
     api = MagicMock()
     api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -670,6 +721,9 @@ async def test_developer_and_cover_actions_share_control_blind_path(
     )
     api = MagicMock()
     api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
     api.control_blind = AsyncMock(return_value=True)
     api.is_connected = True
     api.device_mode = "listening"
@@ -729,6 +783,9 @@ async def test_developer_command_is_blocked_when_stick_is_not_ready() -> None:
     )
     api = MagicMock()
     api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = None
     api.control_blind = AsyncMock()
     api.is_connected = True
     api.device_mode = "pairing"

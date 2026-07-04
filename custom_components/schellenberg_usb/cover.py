@@ -329,6 +329,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._target_position: int | None = (
             None  # Target position for set_cover_position
         )
+        self._position_update_source = "not recorded"
         # NOTE: Debug/troubleshooting instrumentation removed now that persistence works reliably.
 
     @property
@@ -424,6 +425,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # this call the restored position would not be visible until the first movement/event.
         # Initial write after restoration (debug instrumentation removed).
         self.async_write_ha_state()
+        self._record_position_update(
+            source="restored Home Assistant state",
+            direction="idle",
+            previous_position=None,
+            new_position=self._attr_current_cover_position,
+            status="estimated",
+        )
 
         # Register listeners for events and status updates
         self.async_on_remove(
@@ -452,6 +460,25 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
         )
 
+    def _record_position_update(
+        self,
+        *,
+        source: str,
+        direction: str,
+        previous_position: int | None,
+        new_position: int | None,
+        status: str,
+    ) -> None:
+        """Publish one position model update for Developer Tools diagnostics."""
+        self._api.record_position_update(
+            self._command_device_id,
+            source=source,
+            direction=direction,
+            previous_position=previous_position,
+            new_position=new_position,
+            status=status,
+        )
+
     @callback
     def _handle_status_update(self) -> None:
         """Handle status update from API (connection state changed)."""
@@ -467,12 +494,21 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             return
 
         # Update travel times with new calibration values
+        previous_position = self._attr_current_cover_position
         self._travel_time_open = open_time
         self._travel_time_close = close_time
 
         # The device is fully closed after calibration, so set position to 0
         self._attr_current_cover_position = 0
         self._attr_is_closed = True
+        self._position_update_source = "completed calibration"
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="stop",
+            previous_position=previous_position,
+            new_position=0,
+            status="confirmed",
+        )
 
         _LOGGER.info(
             "Device %s calibration updated: open_time=%.2fs, close_time=%.2fs. "
@@ -502,6 +538,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
+            previous_position = self._attr_current_cover_position
             physical_up = event == EVENT_STARTED_MOVING_UP
             logical_opening = physical_up != self._invert_direction
             _LOGGER.info(
@@ -514,8 +551,24 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_closing = not logical_opening
             self._move_start_time = time.monotonic()
             self._move_start_position = self._attr_current_cover_position
+            self._position_update_source = (
+                f"primary status {self._status_device_id}/{self._status_enum} "
+                f"command {event}"
+            )
+            self._record_position_update(
+                source=self._position_update_source,
+                direction="opening" if logical_opening else "closing",
+                previous_position=previous_position,
+                new_position=self._attr_current_cover_position,
+                status="confirmed",
+            )
             self._start_position_tracking()
         elif event == EVENT_STOPPED:
+            previous_position = self._attr_current_cover_position
+            self._position_update_source = (
+                f"primary status {self._status_device_id}/{self._status_enum} "
+                f"command {event}"
+            )
             _LOGGER.info(
                 "Device %s STOPPED (position: %d%%)",
                 self._attr_name,
@@ -540,6 +593,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_is_closed = self._attr_current_cover_position == 0
             self._attr_is_opening = False
             self._attr_is_closing = False
+            self._record_position_update(
+                source=self._position_update_source,
+                direction="stop",
+                previous_position=previous_position,
+                new_position=self._attr_current_cover_position,
+                status="confirmed",
+            )
             # Clear movement tracking variables
             self._move_start_time = None
             self._move_start_position = None
@@ -689,8 +749,17 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             return
 
         # Clamp position between 0 and 100
+        previous_position = self._attr_current_cover_position
         self._attr_current_cover_position = max(0, min(100, int(new_pos)))
         self._attr_is_closed = self._attr_current_cover_position == 0
+        if self._attr_current_cover_position != previous_position:
+            self._record_position_update(
+                source=self._position_update_source,
+                direction="opening" if self._attr_is_opening else "closing",
+                previous_position=previous_position,
+                new_position=self._attr_current_cover_position,
+                status="estimated",
+            )
 
         _LOGGER.debug(
             "Device %s position updated to %d%% (elapsed: %.2fs, travel_time: %.2fs)",
@@ -717,6 +786,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if self._attr_current_cover_position is None:
             self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
+        self._position_update_source = "Home Assistant open command"
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="opening",
+            previous_position=self._attr_current_cover_position,
+            new_position=self._attr_current_cover_position,
+            status="estimated",
+        )
         self._start_position_tracking()
         self.async_write_ha_state()
         await self._api.control_blind(
@@ -739,6 +816,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if self._attr_current_cover_position is None:
             self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
+        self._position_update_source = "Home Assistant close command"
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="closing",
+            previous_position=self._attr_current_cover_position,
+            new_position=self._attr_current_cover_position,
+            status="estimated",
+        )
         self._start_position_tracking()
         self.async_write_ha_state()
         await self._api.control_blind(
@@ -753,6 +838,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._command_device_id,
             self._command_enum,
         )
+        previous_position = self._attr_current_cover_position
+        self._position_update_source = "Home Assistant stop command"
         self._stop_position_tracking()
         self._update_position()
         self._attr_is_opening = False
@@ -760,6 +847,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._move_start_time = None
         self._move_start_position = None
         self._target_position = None
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="stop",
+            previous_position=previous_position,
+            new_position=self._attr_current_cover_position,
+            status="estimated",
+        )
         self.async_write_ha_state()
         await self._api.control_blind(
             self._command_enum, CMD_STOP, device_id=self._command_device_id

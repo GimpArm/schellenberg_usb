@@ -386,6 +386,7 @@ async def test_unknown_secondary_commands_do_not_change_position_tracking(
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
     assert cover._move_start_time is None
+    _magic_mock(mock_api.record_position_update).assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -605,6 +606,14 @@ async def test_cover_handle_started_moving_up(
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
     assert cover._move_start_position == 0
+    _magic_mock(mock_api.record_position_update).assert_called_once_with(
+        "ABC123",
+        source="primary status ABC123/01 command 01",
+        direction="opening",
+        previous_position=0,
+        new_position=0,
+        status="confirmed",
+    )
 
 
 @pytest.mark.asyncio
@@ -677,11 +686,18 @@ async def test_cover_update_position_opening(
     cover._attr_current_cover_position = 0
     cover._move_start_position = 0
     cover._move_start_time = time.monotonic() - 10.0  # Simulating 10 seconds elapsed
+    cover._position_update_source = "primary status ABC123/01 command 01"
 
     cover._update_position()
 
     # After 10 seconds of 20 second travel time, should be at 50%
     assert 45 <= cover._attr_current_cover_position <= 55  # Allow some tolerance
+    _, kwargs = _magic_mock(mock_api.record_position_update).call_args
+    assert kwargs["source"] == "primary status ABC123/01 command 01"
+    assert kwargs["direction"] == "opening"
+    assert kwargs["previous_position"] == 0
+    assert 45 <= kwargs["new_position"] <= 55
+    assert kwargs["status"] == "estimated"
 
 
 @pytest.mark.asyncio
