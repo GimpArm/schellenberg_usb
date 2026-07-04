@@ -158,6 +158,9 @@
             "copy_diagnostics": "Copy diagnostics"
           }
         },
+        "reset_stick": {
+          "title": "Reset stick / reconnect serial"
+        },
         "copy_diagnostics": {
           "title": "Copy diagnostics",
           "description": "Select and copy the diagnostic text below. Press Submit to return.",

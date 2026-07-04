@@ -44,6 +44,14 @@ from .options_flow_calibration import CalibrationFlowHandler
 
 _LOGGER = logging.getLogger(__name__)
 
+DEVELOPER_TOOLS_MENU_OPTIONS = {
+    "test_open": "Test Open",
+    "test_close": "Test Close",
+    "test_stop": "Test Stop",
+    "reset_stick": "Reset stick / reconnect serial",
+    "copy_diagnostics": "Copy diagnostics",
+}
+
 
 class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Schellenberg USB."""
@@ -719,13 +727,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         api = self._get_entry().runtime_data
         return self.async_show_menu(
             step_id="developer_tools",
-            menu_options=[
-                "test_open",
-                "test_close",
-                "test_stop",
-                "reset_stick",
-                "copy_diagnostics",
-            ],
+            menu_options=DEVELOPER_TOOLS_MENU_OPTIONS,
             description_placeholders={
                 "selected_blind": str(details["name"]),
                 "last_device_id": last_received["device_id"],

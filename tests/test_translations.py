@@ -6,19 +6,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+from custom_components.schellenberg_usb.config_flow import (
+    DEVELOPER_TOOLS_MENU_OPTIONS,
+)
+
 COMPONENT_DIR = Path(__file__).parents[1] / "custom_components" / "schellenberg_usb"
 EXPECTED_MENU_OPTIONS = {
     "user": {"pair_test", "pair_device", "manual"},
     "manual_next": {"test_motor", "save_manual"},
     "test_success": {"calibration_close", "manual_times"},
     "reconfigure": {"edit", "test_existing", "developer_tools", "calibrate"},
-    "developer_tools": {
-        "test_open",
-        "test_close",
-        "test_stop",
-        "reset_stick",
-        "copy_diagnostics",
-    },
+    "developer_tools": set(DEVELOPER_TOOLS_MENU_OPTIONS),
 }
 
 
@@ -36,6 +34,17 @@ def _leaf_paths(value: Any, prefix: str = "") -> set[str]:
         for key, child in value.items()
         for leaf in _leaf_paths(child, f"{prefix}.{key}" if prefix else key)
     }
+
+
+def test_developer_tools_runtime_fallback_labels_are_non_empty() -> None:
+    """Every runtime Developer Tools action has a visible fallback label."""
+    assert DEVELOPER_TOOLS_MENU_OPTIONS["reset_stick"] == (
+        "Reset stick / reconnect serial"
+    )
+    assert all(
+        isinstance(label, str) and label.strip()
+        for label in DEVELOPER_TOOLS_MENU_OPTIONS.values()
+    )
 
 
 def test_all_config_subentry_menu_options_have_labels() -> None:

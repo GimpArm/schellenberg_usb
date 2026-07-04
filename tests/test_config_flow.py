@@ -12,6 +12,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.schellenberg_usb.config_flow import (
+    DEVELOPER_TOOLS_MENU_OPTIONS,
     SchellenbergPairingSubentryFlow,
 )
 from custom_components.schellenberg_usb.const import (
@@ -360,13 +361,7 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["last_device_id"] == "3720B8"
     assert placeholders["command_device_id"] == "F2B8D5"
     assert placeholders["command_enum"] == "23"
-    assert result["menu_options"] == [
-        "test_open",
-        "test_close",
-        "test_stop",
-        "reset_stick",
-        "copy_diagnostics",
-    ]
+    assert result["menu_options"] == DEVELOPER_TOOLS_MENU_OPTIONS
     api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
     api.reset_and_reconnect.assert_awaited_once_with()
     command_placeholders = command_result["description_placeholders"]
