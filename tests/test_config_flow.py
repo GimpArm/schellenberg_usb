@@ -388,6 +388,140 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert "Device ID: F2B8D5" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
+    assert "t1/t0 confirm only" in diagnostics
+    assert "Motor reception and movement remain unverified" in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_developer_teach_motor_sends_60_then_open_and_stop() -> None:
+    """Test guided teach-in uses the API and follows with a movement test."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting room door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "0D",
+            CONF_STATUS_DEVICE_ID: "F2B8D5",
+            CONF_STATUS_ENUM: "23",
+            CONF_INVERT_DIRECTION: False,
+        },
+    )
+    api = MagicMock()
+    api.get_last_received.return_value = None
+    api.teach_motor = AsyncMock(return_value=True)
+    api.control_blind = AsyncMock(return_value=True)
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.transmit_block_reason = None
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+        patch(
+            "custom_components.schellenberg_usb.config_flow.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as delay,
+    ):
+        form = await flow.async_step_teach_motor()
+        result = await flow.async_step_teach_motor({})
+
+    assert form["step_id"] == "teach_motor"
+    api.teach_motor.assert_awaited_once_with(
+        "0D", device_id="F2B8D5", source="developer_tools"
+    )
+    api.control_blind.assert_has_awaits(
+        [
+            call(
+                "0D",
+                CMD_UP,
+                device_id="F2B8D5",
+                source="developer_tools",
+            ),
+            call(
+                "0D",
+                CMD_STOP,
+                device_id="F2B8D5",
+                source="developer_tools",
+            ),
+        ]
+    )
+    delay.assert_awaited_once()
+    assert result["step_id"] == "developer_tools"
+    placeholders = result["description_placeholders"]
+    assert placeholders is not None
+    assert "Stick ACKs confirm only" in placeholders["result"]
+
+
+@pytest.mark.asyncio
+async def test_developer_raw_command_validates_and_uses_api() -> None:
+    """Test the raw RF form supplies an exact packet and invokes the API."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting room door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "F2B8D5",
+            CONF_STATUS_ENUM: "23",
+        },
+    )
+    api = MagicMock()
+    api.get_last_received.return_value = None
+    api.send_raw_transmit = AsyncMock(return_value=True)
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        form = await flow.async_step_send_raw_command()
+        result = await flow.async_step_send_raw_command({"payload": "ss109010000"})
+
+    assert form["step_id"] == "send_raw_command"
+    assert form["data_schema"]({})["payload"] == "ss109010000"
+    api.send_raw_transmit.assert_awaited_once_with(
+        "ss109010000", source="developer_tools"
+    )
+    assert result["step_id"] == "developer_tools"
+    placeholders = result["description_placeholders"]
+    assert placeholders is not None
+    assert "do not confirm motor movement" in placeholders["result"]
+
+
+@pytest.mark.asyncio
+async def test_developer_raw_command_shows_validation_error() -> None:
+    """Test malformed raw packets remain on the form with a field error."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Blind",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "08",
+        },
+    )
+    api = MagicMock()
+    api.send_raw_transmit = AsyncMock(side_effect=ValueError("invalid"))
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        result = await flow.async_step_send_raw_command({"payload": "ss08901000"})
+
+    assert result["step_id"] == "send_raw_command"
+    assert result["errors"] == {"payload": "invalid_raw_payload"}
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ Home Assistant component that interfaces with the [Schellenberg Usb Funk-Stick](
 * Tracks estimated position from measured or manually supplied travel times
 * Supports manual command/status identities when calibration cannot create a blind
 * Can test a paired command before calibration and edit a blind after creation
+* Provides guided USB-transmitter teach-in, raw RF payload testing, and ACK diagnostics
 
 ## Installation
 
@@ -82,7 +83,14 @@ offers a short motor command test and recalibration. Editing protocol values kee
 the existing Home Assistant entity unique ID.
 Choose **Developer tools** in the same blind configuration menu to see the last
 frame matching its status identity, the current transmit target, direct Open,
-Close, and Stop actions, and a copyable diagnostics snapshot.
+Close, and Stop actions, a guided **Teach motor / activate USB transmitter**
+action, validated raw RF payload sending, and a copyable diagnostics snapshot.
+
+Receiving frames from a physical remote proves only that the stick can listen. It
+does not mean the motor has authorized the stick as a transmitter. Likewise,
+serial responses `t1` and `t0` report that the stick's RF transmitter turned on
+and off; this unidirectional protocol cannot confirm that the motor received or
+executed the command.
 
 
 ### Diagnostic command service
@@ -99,7 +107,8 @@ command: open
 Valid commands are `open`, `close`, and `stop`. Open and close are direct commands,
 so send `stop` yourself when performing a short test. If more than one Schellenberg
 USB hub is loaded, also supply its `config_entry_id`. Sending logs the command,
-device ID, enum, raw serial payload, and whether it was queued successfully.
+device ID, enum, raw serial payload, write result, and stick ACK cycle. An ACK does
+not confirm motor movement.
 
 ### Step 5: Calibrate your blinds
 
@@ -144,7 +153,38 @@ You can calibrate a blind:
 
 ## Device Pairing Instructions
 
-Each Schellenberg device has a specific button combination to enter pairing mode. You must put your device into pairing mode within 2 minutes of starting the pairing process in Home Assistant.
+The USB stick is a separate transmitter and must be learned by the motor. Merely
+detecting a frame from an existing remote does not authorize the stick.
+
+### Teach the USB stick to the motor
+
+For the normal **Pair** flow, press Pair in Home Assistant and then complete these
+steps within two minutes using an already paired physical remote:
+
+1. Select the motor or channel on the physical remote.
+2. Press the remote's programming button until its channel LED blinks.
+3. Press **Stop** on the remote and wait for the motor to beep or rattle.
+4. Home Assistant detects the frame, sends teach command `60`, waits for the
+   stick's `t0`, then sends finish command `40` on the same enum. The Pair and
+   Test flow then sends a short Open/Stop test.
+5. Confirm movement yourself. The stick ACK cannot report whether the motor learned
+   the transmitter.
+
+For an existing manually configured blind, perform steps 1–3 first and then choose
+**Developer tools > Teach motor / activate USB transmitter**. Do not repeat command
+`60` outside the motor's programming sequence: the protocol also uses it when
+changing rotation direction.
+
+The movement packet is exactly 11 characters:
+`ss{two-digit enum}9{two-digit command}0000`. Commands are `00` Stop, `01`
+Up/Open, `02` Down/Close, `40` Finish/Allow Pairing, and `60` Teach/Change
+Direction. For example, enum `10` Open is
+`ss109010000`. Developer Tools rejects shorter or non-hexadecimal raw packets.
+These details follow the
+[reverse-engineered Schellenberg USB protocol](https://github.com/Hypfer/schellenberg-qivicon-usb).
+
+Each Schellenberg product may use a different button combination to enter or expose
+programming mode. Its original manual takes precedence over the examples below.
 
 ### ROLLODRIVE 65 PREMIUM / 75 PREMIUM (Electric Belt Winders)
 **Art.Nr.: 22567, 22576, 22578, 22726, 22727, 22728, 22767**

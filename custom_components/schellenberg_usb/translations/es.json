@@ -52,7 +52,7 @@
         },
         "pair_device": {
           "title": "Emparejar un nuevo dispositivo",
-          "description": "Presione el botón de emparejamiento para activar el modo de emparejamiento en su memoria USB Schellenberg. Luego presione el botón de emparejamiento en su motor de persiana en los próximos 2 minutos.",
+          "description": "After pressing Pair, use an already paired physical remote within 2 minutes: select the motor/channel, press its programming button until the channel LED blinks, then press Stop and wait for the motor to beep or rattle. Home Assistant will detect the frame and send teach command 60 followed by finish command 40 on the same enum. A USB stick ACK does not prove the motor learned the transmitter.",
           "submit": "Emparejar"
         },
         "manual": {
@@ -72,7 +72,7 @@
         },
         "name_device": {
           "title": "Nombre su dispositivo",
-          "description": "¡Emparejamiento exitoso! ID del dispositivo: {device_id}\n\nPor favor, proporcione un nombre para esta persiana.",
+          "description": "A pairing candidate was detected and the USB stick teach command was transmitted for device ID {device_id}. The stick ACK cannot prove that the motor authorized it. Name the blind, then verify actual movement.",
           "data": {
             "device_name": "Nombre del dispositivo"
           }
@@ -99,7 +99,7 @@
         },
         "pair_test": {
           "title": "Pair and test",
-          "description": "Activate pairing on the USB stick, then put the blind motor into pairing mode within 2 minutes. After pairing, a short motor command will be tested before calibration.",
+          "description": "After pressing Pair, use an already paired physical remote within 2 minutes: select the motor/channel, press its programming button until the channel LED blinks, then press Stop and wait for the motor to beep or rattle. Home Assistant will detect the frame and send teach command 60 followed by finish command 40 on the same enum. A USB stick ACK does not prove the motor learned the transmitter. A short Open/Stop test follows; confirm whether the motor actually moved.",
           "submit": "Pair"
         },
         "manual_next": {
@@ -149,13 +149,15 @@
         },
         "developer_tools": {
           "title": "Developer tools",
-          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.",
+          "description": "Selected blind: {selected_blind}\n\nLast received:\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nTime: {last_time}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
           "menu_options": {
             "test_open": "Test Open",
             "test_close": "Test Close",
             "test_stop": "Test Stop",
             "reset_stick": "Reset stick / reconnect serial",
-            "copy_diagnostics": "Copy diagnostics"
+            "copy_diagnostics": "Copy diagnostics",
+            "teach_motor": "Programar motor / activar transmisor USB",
+            "send_raw_command": "Enviar trama RF sin procesar"
           }
         },
         "reset_stick": {
@@ -183,6 +185,19 @@
             "invert_direction": "Invert open/close direction"
           },
           "submit": "Save"
+        },
+        "teach_motor": {
+          "title": "Programar motor / activar transmisor USB",
+          "description": "Selected blind: {selected_blind}\nCommand identity: {command_device_id}/{command_enum}\n\nBefore submitting: select this motor/channel on an already paired physical remote, press the remote programming button until its channel LED blinks, then press Stop and wait for the motor to beep or rattle. Submit only then. Home Assistant sends teach command 60, waits for the stick ACK, sends finish command 40 on the same enum, and then performs a short Open/Stop test. Stick ACKs do not prove that the motor learned or moved. Do not repeat command 60 outside the motor programming sequence; it can also change rotation direction.",
+          "submit": "Send teach command and test"
+        },
+        "send_raw_command": {
+          "title": "Enviar trama RF sin procesar",
+          "description": "Selected blind: {selected_blind}\nConfigured enum: {command_enum}\n\nEnter exactly 11 characters: ss + two-digit enum + repeat digit + two-digit command + 0000. Example: ss109010000. Commands are 00 Stop, 01 Up/Open, 02 Down/Close, 40 Finish/Allow Pairing, and 60 Teach/Change Direction. t1/t0 only acknowledges the stick transmitter cycle.",
+          "data": {
+            "payload": "Trama RF sin procesar"
+          },
+          "submit": "Send raw payload"
         }
       },
       "error": {
@@ -196,7 +211,9 @@
         "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",
         "calibration_start_timeout": "Tiempo de espera agotado para que la persiana comience a moverse. Por favor, asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
         "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
-        "command_failed": "The serial command could not be queued. Check the USB connection and logs."
+        "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
+        "invalid_raw_payload": "Introduzca exactamente 11 caracteres: 'ss' seguido de 9 caracteres hexadecimales.",
+        "transmit_failed": "No se pudo transmitir la trama sin procesar. Compruebe el estado del dispositivo USB y los registros."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",

@@ -48,6 +48,8 @@ DEVELOPER_TOOLS_MENU_OPTIONS = {
     "test_open": "Test Open",
     "test_close": "Test Close",
     "test_stop": "Test Stop",
+    "teach_motor": "Teach motor / activate USB transmitter",
+    "send_raw_command": "Send raw RF payload",
     "reset_stick": "Reset stick / reconnect serial",
     "copy_diagnostics": "Copy diagnostics",
 }
@@ -852,6 +854,129 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         """Send a direct stop test command."""
         return await self._async_developer_command("stop")
 
+    async def async_step_teach_motor(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Teach the USB transmitter to a motor, then send Open and Stop."""
+        details = self._developer_details()
+        if user_input is None:
+            return self.async_show_form(
+                step_id="teach_motor",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "selected_blind": str(details["name"]),
+                    "command_device_id": details["command_device_id"],
+                    "command_enum": details["command_enum"],
+                },
+            )
+
+        api = self._get_entry().runtime_data
+        if reason := api.transmit_block_reason:
+            _LOGGER.error(
+                "Motor teach blocked selected_blind=%s reason=%s",
+                details["name"],
+                reason,
+            )
+            self._developer_notice = f"Motor teach blocked: {reason}."
+            return await self.async_step_developer_tools()
+
+        _LOGGER.warning(
+            "Motor teach requested selected_blind=%s command_device_id=%s "
+            "command_enum=%s status_device_id=%s status_enum=%s",
+            details["name"],
+            details["command_device_id"],
+            details["command_enum"],
+            details["status_device_id"],
+            details["status_enum"],
+        )
+        try:
+            taught = await api.teach_motor(
+                details["command_enum"],
+                device_id=details["command_device_id"],
+                source="developer_tools",
+            )
+            opened = False
+            stopped = False
+            if taught:
+                open_action = CMD_DOWN if details["invert_direction"] else CMD_UP
+                opened = await api.control_blind(
+                    details["command_enum"],
+                    open_action,
+                    device_id=details["command_device_id"],
+                    source="developer_tools",
+                )
+                if opened:
+                    await asyncio.sleep(TEST_COMMAND_DELAY)
+                    stopped = await api.control_blind(
+                        details["command_enum"],
+                        CMD_STOP,
+                        device_id=details["command_device_id"],
+                        source="developer_tools",
+                    )
+        except Exception:
+            _LOGGER.exception(
+                "Motor teach/test raised an exception selected_blind=%s",
+                details["name"],
+            )
+            taught = opened = stopped = False
+
+        if taught and opened and stopped:
+            self._developer_notice = (
+                "Teach, Open, and Stop were transmitted. Stick ACKs confirm only "
+                "radio transmission; verify that the motor reacted."
+            )
+        else:
+            self._developer_notice = (
+                "Teach/test transmission failed; inspect the integration logs."
+            )
+        return await self.async_step_developer_tools()
+
+    async def async_step_send_raw_command(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Validate and send an exact Schellenberg RF command payload."""
+        details = self._developer_details()
+        default_payload = f"ss{details['command_enum']}9{CMD_UP}0000"
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            payload = str(user_input.get("payload", "")).strip()
+            _LOGGER.warning(
+                "Developer Tools raw RF requested selected_blind=%s payload=%s",
+                details["name"],
+                payload,
+            )
+            try:
+                sent = await self._get_entry().runtime_data.send_raw_transmit(
+                    payload, source="developer_tools"
+                )
+            except ValueError:
+                sent = False
+                errors["payload"] = "invalid_raw_payload"
+            if sent:
+                self._developer_notice = (
+                    f"Raw payload {payload} was written. Stick ACKs do not confirm "
+                    "motor movement."
+                )
+                return await self.async_step_developer_tools()
+            if not errors:
+                errors["base"] = "transmit_failed"
+
+        return self.async_show_form(
+            step_id="send_raw_command",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("payload", default=default_payload): (
+                        selector.TextSelector()
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "selected_blind": str(details["name"]),
+                "command_enum": details["command_enum"],
+            },
+        )
+
     async def async_step_reset_stick(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -890,6 +1015,10 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 f"Pairing active: {api.pairing_active}",
                 f"Transmitter active: {api.transmitter_active}",
                 f"Busy latched: {api.busy_latched}",
+                "",
+                "ACK semantics:",
+                "t1/t0 confirm only that the USB stick transmitter turned on/off.",
+                "Motor reception and movement remain unverified (unidirectional RF).",
                 "",
                 "Last received:",
                 f"Device ID: {last_received['device_id']}",

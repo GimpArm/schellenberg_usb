@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -125,6 +125,108 @@ async def test_developer_transmit_logs_payload_write_and_ack(
     assert "ACK start response=t1 source=developer_tools" in caplog.text
     assert "ACK complete response=t0 source=developer_tools" in caplog.text
     assert "result=completed" in caplog.text
+    assert "stick_ack_only=True" in caplog.text
+    assert "motor_result=unknown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_teach_motor_sends_60_then_40_and_waits_for_each_ack(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test motor teach sends 60 then 40 without claiming motor success."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+
+    async def _complete_transmit(_: str) -> bool:
+        api._handle_message("t0")
+        return True
+
+    api._wait_for_transmitter_idle = AsyncMock(side_effect=_complete_transmit)
+
+    with caplog.at_level("WARNING"):
+        assert await api.teach_motor("0d", device_id="F2B8D5", source="developer_tools")
+
+    assert [call.args[0] for call in mock_transport.write.call_args_list] == [
+        b"ss0D9600000\r\n",
+        b"ss0D9400000\r\n",
+    ]
+    assert api._wait_for_transmitter_idle.await_args_list == [
+        call("finishing motor teach phase teach_60"),
+        call("finishing motor teach phase finish_40"),
+    ]
+    assert "teach_payload=ss0D9600000" in caplog.text
+    assert "finish_payload=ss0D9400000" in caplog.text
+    assert "phases=60_then_40" in caplog.text
+    assert "stick_ack_only=True" in caplog.text
+    assert "motor_authorization=unverified" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("ss109010000", b"ss109010000\r\n"),
+        ("SS0d9000000", b"ss0D9000000\r\n"),
+    ],
+)
+async def test_raw_transmit_preserves_exact_protocol_slots(
+    hass: HomeAssistant, payload: str, expected: bytes
+) -> None:
+    """Test raw RF payloads preserve enum, repeat, command, and padding slots."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+    api._wait_for_transmitter_idle = AsyncMock(return_value=True)
+
+    assert await api.send_raw_transmit(payload)
+
+    mock_transport.write.assert_called_once_with(expected)
+    api._wait_for_transmitter_idle.assert_awaited_once_with("finishing raw RF transmit")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    ["ss10901000", "xx109010000", "ss10901G0000", "ss1090100000"],
+)
+async def test_raw_transmit_rejects_malformed_payloads(
+    hass: HomeAssistant, payload: str
+) -> None:
+    """Test raw sending rejects short, long, non-hex, and wrong-prefix values."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+
+    with pytest.raises(ValueError, match="exactly 'ss' plus 9"):
+        await api.send_raw_transmit(payload)
+
+    mock_transport.write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_raw_transmit_timeout_latches_busy_state(hass: HomeAssistant) -> None:
+    """Test a missing raw-transmit t0 is reported and requires recovery."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+    api._wait_for_transmitter_idle = AsyncMock(return_value=False)
+
+    assert not await api.send_raw_transmit("ss109010000")
+
+    assert api.busy_latched is True
 
 
 @pytest.mark.asyncio
@@ -784,6 +886,7 @@ async def test_api_pair_device_success(hass: HomeAssistant) -> None:
     assert [call.args[0] for call in mock_transport.write.call_args_list] == [
         b"sp\r\n",
         b"ss109600000\r\n",
+        b"ss109400000\r\n",
         b"sp\r\n",
     ]
     assert api.pairing_active is False

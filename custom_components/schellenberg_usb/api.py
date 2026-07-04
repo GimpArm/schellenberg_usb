@@ -300,7 +300,7 @@ class SchellenbergUsbApi:
             _LOGGER.log(
                 level,
                 "Serial transmit ACK start response=t1 source=%s mode=%s "
-                "payload=%s retries=%d",
+                "payload=%s retries=%d stick_ack_only=True motor_result=unknown",
                 source,
                 self._device_mode,
                 self._pending_retry_command,
@@ -330,7 +330,8 @@ class SchellenbergUsbApi:
                 _LOGGER.log(
                     level,
                     "Serial transmit ACK complete response=t0 source=%s mode=%s "
-                    "payload=%s retries=%d result=completed",
+                    "payload=%s retries=%d result=completed stick_ack_only=True "
+                    "motor_result=unknown",
                     source,
                     self._device_mode,
                     self._pending_retry_command,
@@ -424,7 +425,7 @@ class SchellenbergUsbApi:
             # If we're in pairing mode, accept ANY device response
             # because the user is explicitly trying to pair RIGHT NOW
             if self._pairing_future and not self._pairing_future.done():
-                _LOGGER.info("Pairing successful! New device ID: %s", device_id)
+                _LOGGER.info("Pairing candidate detected device_id=%s", device_id)
                 self._pairing_future.set_result(device_id)
                 # Don't send dispatcher signal here - let the caller handle persistence
                 return
@@ -470,7 +471,9 @@ class SchellenbergUsbApi:
                         device_id not in self._registered_devices
                         and not known_status_id
                     ):
-                        _LOGGER.info("Pairing successful! New device ID: %s", device_id)
+                        _LOGGER.info(
+                            "Pairing candidate detected device_id=%s", device_id
+                        )
                         self._pairing_future.set_result(device_id)
                         # Don't send dispatcher signal here - let the caller handle persistence
                         return
@@ -743,10 +746,12 @@ class SchellenbergUsbApi:
 
         device_enum = self.initialize_next_device_enum()
         pair_command = f"{CMD_TRANSMIT}{device_enum}9{CMD_PAIR}0000"
+        finish_pair_command = f"{CMD_TRANSMIT}{device_enum}9{CMD_ALLOW_PAIRING}0000"
         _LOGGER.info(
-            "Initiating pairing with device enum %s payload=%s",
+            "Initiating pairing with device enum %s teach_payload=%s finish_payload=%s",
             device_enum,
             pair_command,
+            finish_pair_command,
         )
 
         self._pairing_active = True
@@ -764,15 +769,29 @@ class SchellenbergUsbApi:
                 self._pairing_future, timeout=PAIRING_TIMEOUT
             )
             _LOGGER.debug(
-                "Received device ID %s, sending pairing payload=%s",
+                "Received device ID %s, sending pairing teach_payload=%s "
+                "then finish_payload=%s",
                 device_id,
                 pair_command,
+                finish_pair_command,
             )
-            if not await self.send_command(pair_command):
-                raise ConnectionError("could not send pairing transmit")
-            if not await self._wait_for_transmitter_idle("finishing pairing transmit"):
-                self._busy_latched = True
-                return None
+            for phase, payload in (
+                ("teach_60", pair_command),
+                ("finish_40", finish_pair_command),
+            ):
+                if not await self.send_command(payload, source="pairing"):
+                    raise ConnectionError(f"could not send pairing phase {phase}")
+                if not await self._wait_for_transmitter_idle(
+                    f"finishing pairing phase {phase}"
+                ):
+                    self._busy_latched = True
+                    return None
+                _LOGGER.info(
+                    "Pairing stick ACK completed phase=%s payload=%s "
+                    "motor_authorization=unverified",
+                    phase,
+                    payload,
+                )
             paired = True
         except TimeoutError:
             _LOGGER.warning("Pairing timeout - no device responded with ID")
@@ -782,7 +801,8 @@ class SchellenbergUsbApi:
             return None
         else:
             _LOGGER.info(
-                "Pairing completed successfully: %s with device enum %s",
+                "Pairing teach command transmitted device_id=%s enum=%s; "
+                "motor authorization remains unverified until movement succeeds",
                 device_id,
                 device_enum,
             )
@@ -821,6 +841,153 @@ class SchellenbergUsbApi:
             if self._is_connected:
                 self._device_mode = "listening" if stopped else "unknown"
             self._update_status()
+
+    async def teach_motor(
+        self,
+        device_enum: str,
+        *,
+        device_id: str | None = None,
+        source: str = "developer_tools",
+    ) -> bool:
+        """Transmit the full remote-assisted motor teach sequence."""
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        if reason := self._transmit_capability_block_reason():
+            _LOGGER.error(
+                "Motor teach blocked reason=%s source=%s device_id=%s enum=%s",
+                reason,
+                source,
+                device_id or "unknown",
+                normalized_enum,
+            )
+            return False
+
+        # The motor must first be put into programming mode with an authorized
+        # physical remote. The stick then transmits 0x60 (teach its identity and
+        # rolling-code start), followed directly by 0x40 to finish pairing.
+        teach_payload = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_PAIR}0000"
+        finish_payload = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_ALLOW_PAIRING}0000"
+        _LOGGER.warning(
+            "Motor teach sequence source=%s device_id=%s enum=%s "
+            "teach_payload=%s finish_payload=%s "
+            "prerequisite=authorized_remote_programming_mode",
+            source,
+            device_id or "unknown",
+            normalized_enum,
+            teach_payload,
+            finish_payload,
+        )
+
+        for phase, payload in (
+            ("teach_60", teach_payload),
+            ("finish_40", finish_payload),
+        ):
+            _LOGGER.warning(
+                "Motor teach phase write source=%s device_id=%s enum=%s "
+                "phase=%s payload=%s",
+                source,
+                device_id or "unknown",
+                normalized_enum,
+                phase,
+                payload,
+            )
+            if not await self.send_command(payload, source=source):
+                _LOGGER.error(
+                    "Motor teach write failed source=%s device_id=%s enum=%s "
+                    "phase=%s payload=%s",
+                    source,
+                    device_id or "unknown",
+                    normalized_enum,
+                    phase,
+                    payload,
+                )
+                return False
+            if not await self._wait_for_transmitter_idle(
+                f"finishing motor teach phase {phase}"
+            ):
+                self._busy_latched = True
+                _LOGGER.error(
+                    "Motor teach ACK timeout source=%s device_id=%s enum=%s "
+                    "phase=%s payload=%s",
+                    source,
+                    device_id or "unknown",
+                    normalized_enum,
+                    phase,
+                    payload,
+                )
+                return False
+            _LOGGER.warning(
+                "Motor teach phase stick ACK completed source=%s device_id=%s "
+                "enum=%s phase=%s payload=%s stick_ack_only=True",
+                source,
+                device_id or "unknown",
+                normalized_enum,
+                phase,
+                payload,
+            )
+
+        _LOGGER.warning(
+            "Motor teach sequence stick ACK completed source=%s device_id=%s "
+            "enum=%s phases=60_then_40 stick_ack_only=True "
+            "motor_authorization=unverified",
+            source,
+            device_id or "unknown",
+            normalized_enum,
+        )
+        return True
+
+    async def send_raw_transmit(
+        self, payload: str, *, source: str = "developer_tools"
+    ) -> bool:
+        """Validate and send one exact 11-character Schellenberg RF payload."""
+        candidate = str(payload).strip()
+        normalized = f"ss{candidate[2:].upper()}" if len(candidate) >= 2 else candidate
+        if (
+            len(candidate) != 11
+            or candidate[:2].lower() != "ss"
+            or any(character not in "0123456789ABCDEF" for character in normalized[2:])
+        ):
+            raise ValueError(
+                "raw RF payload must be exactly 'ss' plus 9 hexadecimal characters"
+            )
+        if reason := self._transmit_capability_block_reason():
+            _LOGGER.error(
+                "Raw RF transmit blocked reason=%s source=%s payload=%s",
+                reason,
+                source,
+                normalized,
+            )
+            return False
+
+        _LOGGER.warning(
+            "Raw RF transmit requested source=%s payload=%s payload_chars=%d",
+            source,
+            normalized,
+            len(normalized),
+        )
+        sent = await self.send_command(normalized, source=source)
+        if not sent:
+            _LOGGER.error(
+                "Raw RF transmit result source=%s payload=%s result=write_failed "
+                "stick_ack_only=True motor_result=unknown",
+                source,
+                normalized,
+            )
+            return False
+
+        acknowledged = await self._wait_for_transmitter_idle(
+            "finishing raw RF transmit"
+        )
+        if not acknowledged:
+            self._busy_latched = True
+        _LOGGER.log(
+            logging.WARNING if acknowledged else logging.ERROR,
+            "Raw RF transmit result source=%s payload=%s result=%s "
+            "stick_ack_only=True motor_result=unknown",
+            source,
+            normalized,
+            "stick_ack_completed" if acknowledged else "stick_ack_timeout",
+        )
+        return acknowledged
 
     async def control_blind(
         self,
