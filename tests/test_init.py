@@ -127,7 +127,7 @@ async def test_async_setup_registers_test_command_service(
     )
 
     api.control_blind.assert_awaited_once_with(  # type: ignore[attr-defined]
-        "23", CMD_UP, device_id="F2B8D5"
+        "23", CMD_UP, device_id="F2B8D5", source="service"
     )
 
 

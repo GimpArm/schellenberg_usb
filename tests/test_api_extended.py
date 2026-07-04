@@ -99,6 +99,61 @@ async def test_api_control_blind_preserves_two_digit_enum(
 
 
 @pytest.mark.asyncio
+async def test_developer_transmit_logs_payload_write_and_ack(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test diagnostic commands visibly log payload, write, and ACK results."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+
+    with caplog.at_level("WARNING"):
+        assert await api.control_blind(
+            "10", CMD_UP, device_id="F2B8D5", source="developer_tools"
+        )
+        api._handle_message("t1")
+        api._handle_message("t0")
+
+    assert "Blind transmit payload source=developer_tools" in caplog.text
+    assert "payload=ss109010000" in caplog.text
+    assert "Serial write attempt source=developer_tools" in caplog.text
+    assert "Serial write succeeded source=developer_tools" in caplog.text
+    assert "result=written" in caplog.text
+    assert "ACK start response=t1 source=developer_tools" in caplog.text
+    assert "ACK complete response=t0 source=developer_tools" in caplog.text
+    assert "result=completed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_developer_transmit_logs_write_exception(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test a diagnostic serial write exception is visible with its payload."""
+    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
+    mock_transport = MagicMock()
+    mock_transport.is_closing = MagicMock(return_value=False)
+    mock_transport.write.side_effect = OSError("USB write failed")
+    api._transport = mock_transport
+    api._is_connected = True
+    api._device_mode = "listening"
+
+    with caplog.at_level("WARNING"):
+        assert not await api.control_blind(
+            "0D", CMD_STOP, device_id="F2B8D5", source="developer_tools"
+        )
+
+    assert "Serial write failed source=developer_tools" in caplog.text
+    assert "payload=ss0D9000000" in caplog.text
+    assert "USB write failed" in caplog.text
+    assert "result=failed" in caplog.text
+    assert api._transmit_lock.locked() is False
+    assert api._transmit_busy is False
+
+
+@pytest.mark.asyncio
 async def test_api_control_blind_invalid_action(hass: HomeAssistant) -> None:
     """Test control blind with invalid action."""
     api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")

@@ -6,7 +6,13 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntries, ConfigSubentryFlow, SOURCE_USER
+from homeassistant.config_entries import (
+    ConfigEntries,
+    ConfigSubentry,
+    ConfigSubentryFlow,
+    SOURCE_RECONFIGURE,
+    SOURCE_USER,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -34,6 +40,7 @@ from custom_components.schellenberg_usb.const import (
     DOMAIN,
     SUBENTRY_TYPE_BLIND,
 )
+from custom_components.schellenberg_usb.cover import SchellenbergCover
 from custom_components.schellenberg_usb.options_flow_calibration import (
     CalibrationFlowHandler,
 )
@@ -341,6 +348,7 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     api.is_connected = True
     api.device_mode = "listening"
     api.transmit_ready = True
+    api.transmit_block_reason = None
     api.pairing_active = False
     api.transmitter_active = False
     api.busy_latched = False
@@ -362,11 +370,13 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["command_device_id"] == "F2B8D5"
     assert placeholders["command_enum"] == "23"
     assert result["menu_options"] == DEVELOPER_TOOLS_MENU_OPTIONS
-    api.control_blind.assert_awaited_once_with("23", CMD_DOWN, device_id="F2B8D5")
+    api.control_blind.assert_awaited_once_with(
+        "23", CMD_DOWN, device_id="F2B8D5", source="developer_tools"
+    )
     api.reset_and_reconnect.assert_awaited_once_with()
     command_placeholders = command_result["description_placeholders"]
     assert command_placeholders is not None
-    assert "queued successfully" in command_placeholders["result"]
+    assert "written successfully" in command_placeholders["result"]
     reset_placeholders = reset_result["description_placeholders"]
     assert reset_placeholders is not None
     assert "ready for transmit" in reset_placeholders["result"]
@@ -378,6 +388,166 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert "Device ID: F2B8D5" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step_id", "requested_command", "protocol_action"),
+    [
+        ("test_open", "open", CMD_UP),
+        ("test_close", "close", CMD_DOWN),
+        ("test_stop", "stop", CMD_STOP),
+    ],
+)
+async def test_developer_menu_navigation_dispatches_every_command(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+    caplog: pytest.LogCaptureFixture,
+    step_id: str,
+    requested_command: str,
+    protocol_action: str,
+) -> None:
+    """Test actual HA menu navigation invokes every Developer Tools action."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"serial_port": "/dev/ttyUSB0"},
+        title="Schellenberg USB",
+    )
+    entry.add_to_hass(hass)
+    subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                CONF_COMMAND_DEVICE_ID: "F2B8D5",
+                CONF_COMMAND_ENUM: "10",
+                CONF_STATUS_DEVICE_ID: "F2B8D5",
+                CONF_STATUS_ENUM: "23",
+                CONF_INVERT_DIRECTION: False,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_BLIND,
+        title="Sitting_room_door",
+        unique_id="F2B8D5",
+    )
+    hass.config_entries.async_add_subentry(entry, subentry)
+    api = MagicMock()
+    api.get_last_received.return_value = None
+    api.control_blind = AsyncMock(return_value=True)
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.transmit_block_reason = None
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    entry.runtime_data = api
+
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_TYPE_BLIND),
+        context={
+            "source": SOURCE_RECONFIGURE,
+            "subentry_id": subentry.subentry_id,
+        },
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"next_step_id": "developer_tools"}
+    )
+    assert result["step_id"] == "developer_tools"
+
+    with caplog.at_level("WARNING"):
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"next_step_id": step_id}
+        )
+
+    assert result["step_id"] == "developer_tools"
+    api.control_blind.assert_awaited_once_with(
+        "10",
+        protocol_action,
+        device_id="F2B8D5",
+        source="developer_tools",
+    )
+    assert "Developer Tools command clicked" in caplog.text
+    assert "selected_blind=Sitting_room_door" in caplog.text
+    assert f"command_requested={requested_command}" in caplog.text
+    assert "command_device_id=F2B8D5" in caplog.text
+    assert "command_enum=10" in caplog.text
+    assert "status_device_id=F2B8D5" in caplog.text
+    assert "status_enum=23" in caplog.text
+    assert "stick_connected=True" in caplog.text
+    assert "stick_mode=listening" in caplog.text
+    assert "stick_ready=True" in caplog.text
+    assert "pairing=False" in caplog.text
+    assert "transmitter_active=False" in caplog.text
+    assert "busy_latched=False" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step_method", "cover_method", "protocol_action"),
+    [
+        ("async_step_test_open", "async_open_cover", CMD_UP),
+        ("async_step_test_close", "async_close_cover", CMD_DOWN),
+        ("async_step_test_stop", "async_stop_cover", CMD_STOP),
+    ],
+)
+async def test_developer_and_cover_actions_share_control_blind_path(
+    step_method: str, cover_method: str, protocol_action: str
+) -> None:
+    """Test Developer Tools and cover actions invoke the same API command path."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Sitting_room_door",
+        data={
+            CONF_COMMAND_DEVICE_ID: "F2B8D5",
+            CONF_COMMAND_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "F2B8D5",
+            CONF_STATUS_ENUM: "23",
+            CONF_INVERT_DIRECTION: False,
+        },
+    )
+    api = MagicMock()
+    api.get_last_received.return_value = None
+    api.control_blind = AsyncMock(return_value=True)
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.transmit_block_reason = None
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+    cover = SchellenbergCover(
+        api=api,
+        device_id="F2B8D5",
+        device_enum="10",
+        device_name="Sitting_room_door",
+        command_device_id="F2B8D5",
+        status_device_id="F2B8D5",
+        status_enum="23",
+    )
+    cover._attr_current_cover_position = 50
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        await getattr(flow, step_method)()
+    developer_call = api.control_blind.await_args
+    api.control_blind.reset_mock()
+
+    with (
+        patch.object(cover, "_start_position_tracking"),
+        patch.object(cover, "_stop_position_tracking"),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await getattr(cover, cover_method)()
+    cover_call = api.control_blind.await_args
+
+    assert developer_call.args == cover_call.args == ("10", protocol_action)
+    assert developer_call.kwargs == {
+        "device_id": "F2B8D5",
+        "source": "developer_tools",
+    }
+    assert cover_call.kwargs == {"device_id": "F2B8D5"}
 
 
 @pytest.mark.asyncio
@@ -399,6 +569,9 @@ async def test_developer_command_is_blocked_when_stick_is_not_ready() -> None:
     api.is_connected = True
     api.device_mode = "pairing"
     api.transmit_ready = False
+    api.transmit_block_reason = "pairing is active"
+    api.pairing_active = True
+    api.transmitter_active = False
     api.busy_latched = True
     entry = MagicMock(runtime_data=api)
 

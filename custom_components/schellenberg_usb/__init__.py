@@ -99,17 +99,49 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "must be supplied"
             )
 
+        requested_command = call.data[CONF_COMMAND]
         action = {
             "open": CMD_UP,
             "close": CMD_DOWN,
             "stop": CMD_STOP,
-        }[call.data[CONF_COMMAND]]
+        }[requested_command]
+        _LOGGER.warning(
+            "test_command service called command_requested=%s device_id=%s enum=%s "
+            "config_entry_id=%s connected=%s mode=%s ready=%s pairing=%s "
+            "transmitter_active=%s busy_latched=%s",
+            requested_command,
+            call.data[CONF_DEVICE_ID],
+            call.data[CONF_ENUM],
+            requested_entry_id or "auto",
+            api.is_connected,
+            api.device_mode or "unknown",
+            api.transmit_ready,
+            api.pairing_active,
+            api.transmitter_active,
+            api.busy_latched,
+        )
         if not await api.control_blind(
             call.data[CONF_ENUM],
             action,
             device_id=call.data[CONF_DEVICE_ID],
+            source="service",
         ):
+            _LOGGER.error(
+                "test_command service failed command_requested=%s device_id=%s "
+                "enum=%s reason=%s",
+                requested_command,
+                call.data[CONF_DEVICE_ID],
+                call.data[CONF_ENUM],
+                api.transmit_block_reason or "serial write failed",
+            )
             raise ServiceValidationError("The serial command could not be queued")
+        _LOGGER.warning(
+            "test_command service result command_requested=%s device_id=%s enum=%s "
+            "result=written_awaiting_ack",
+            requested_command,
+            call.data[CONF_DEVICE_ID],
+            call.data[CONF_ENUM],
+        )
 
     hass.services.async_register(
         DOMAIN,

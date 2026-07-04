@@ -747,31 +747,91 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def _async_developer_command(self, command: str) -> SubentryFlowResult:
         """Send one logical command from the developer tools menu."""
         api = self._get_entry().runtime_data
-        if not api.transmit_ready:
+        details = self._developer_details()
+        _LOGGER.warning(
+            "Developer Tools command clicked selected_blind=%s "
+            "command_requested=%s command_device_id=%s command_enum=%s "
+            "status_device_id=%s status_enum=%s stick_connected=%s "
+            "stick_mode=%s stick_ready=%s pairing=%s transmitter_active=%s "
+            "busy_latched=%s",
+            details["name"],
+            command,
+            details["command_device_id"],
+            details["command_enum"],
+            details["status_device_id"],
+            details["status_enum"],
+            api.is_connected,
+            api.device_mode or "unknown",
+            api.transmit_ready,
+            api.pairing_active,
+            api.transmitter_active,
+            api.busy_latched,
+        )
+
+        if reason := api.transmit_block_reason:
+            _LOGGER.error(
+                "Developer Tools command blocked selected_blind=%s "
+                "command_requested=%s reason=%s",
+                details["name"],
+                command,
+                reason,
+            )
             self._developer_notice = (
-                f"{command.title()} command blocked: stick is not ready "
-                f"(connected={api.is_connected}, mode={api.device_mode or 'unknown'}, "
-                f"busy={api.busy_latched}). Use Reset stick / reconnect serial."
+                f"{command.title()} command blocked: {reason}. "
+                "Use Reset stick / reconnect serial if the condition does not clear."
             )
             return await self.async_step_developer_tools()
 
-        details = self._developer_details()
         invert_direction = details["invert_direction"]
         action = {
             "open": CMD_DOWN if invert_direction else CMD_UP,
             "close": CMD_UP if invert_direction else CMD_DOWN,
             "stop": CMD_STOP,
         }[command]
-        sent = await api.control_blind(
-            details["command_enum"],
+        _LOGGER.warning(
+            "Developer Tools command dispatching selected_blind=%s "
+            "command_requested=%s protocol_action=%s command_device_id=%s "
+            "command_enum=%s",
+            details["name"],
+            command,
             action,
-            device_id=details["command_device_id"],
+            details["command_device_id"],
+            details["command_enum"],
         )
-        self._developer_notice = (
-            f"{command.title()} command queued successfully."
-            if sent
-            else f"{command.title()} command failed; check the integration logs."
-        )
+        try:
+            sent = await api.control_blind(
+                details["command_enum"],
+                action,
+                device_id=details["command_device_id"],
+                source="developer_tools",
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Developer Tools command raised an exception selected_blind=%s "
+                "command_requested=%s",
+                details["name"],
+                command,
+            )
+            sent = False
+
+        if sent:
+            _LOGGER.warning(
+                "Developer Tools command result selected_blind=%s "
+                "command_requested=%s result=written_awaiting_ack",
+                details["name"],
+                command,
+            )
+            self._developer_notice = f"{command.title()} command written successfully."
+        else:
+            _LOGGER.error(
+                "Developer Tools command result selected_blind=%s "
+                "command_requested=%s result=failed",
+                details["name"],
+                command,
+            )
+            self._developer_notice = (
+                f"{command.title()} command failed; check the integration logs."
+            )
         return await self.async_step_developer_tools()
 
     async def async_step_test_open(
