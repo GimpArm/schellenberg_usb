@@ -20,10 +20,12 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .api import SchellenbergUsbApi
+from .blind_id import normalize_blind_id
 from .const import (
     CMD_DOWN,
     CMD_STOP,
     CMD_UP,
+    CONF_BLIND_ID,
     CONF_CLOSE_TIME,
     CONF_COMMAND_DEVICE_ID,
     CONF_COMMAND_ENUM,
@@ -150,13 +152,42 @@ async def async_setup_entry(
             else:
                 status_device_id = None
                 status_enum = None
+            blind_id = normalize_blind_id(subentry.data.get(CONF_BLIND_ID)) or str(
+                subentry.subentry_id or stable_device_id
+            )
 
-            # Check if entity already exists to avoid duplicates.
-            # Keep the original subentry unique ID stable when editable protocol IDs change.
-            entity_unique_id = f"schellenberg_{stable_device_id}"
+            # A UUID remains stable when the blind name or radio identity changes.
+            # Existing protocol-derived registry entries are migrated below.
+            entity_unique_id = f"{DOMAIN}_blind_{blind_id}"
             existing_entity_id = entity_registry.async_get_entity_id(
                 "cover", DOMAIN, entity_unique_id
             )
+            if existing_entity_id is None:
+                for legacy_unique_id in dict.fromkeys(
+                    (
+                        f"schellenberg_{stable_device_id}",
+                        f"schellenberg_{command_device_id}",
+                    )
+                ):
+                    legacy_entity_id = entity_registry.async_get_entity_id(
+                        "cover", DOMAIN, legacy_unique_id
+                    )
+                    if legacy_entity_id is None:
+                        continue
+                    entity_registry.async_update_entity(
+                        legacy_entity_id,
+                        new_unique_id=entity_unique_id,
+                        config_subentry_id=subentry.subentry_id,
+                    )
+                    existing_entity_id = legacy_entity_id
+                    _LOGGER.info(
+                        "Migrated cover entity %s from %s to stable blind ID %s",
+                        legacy_entity_id,
+                        legacy_unique_id,
+                        blind_id,
+                    )
+                    break
+
             if existing_entity_id:
                 # Entity registry entry already exists (e.g. after reload). We still need
                 # to create a new entity object so Home Assistant can manage runtime state.
@@ -218,6 +249,7 @@ async def async_setup_entry(
                         device_id=stable_device_id,
                         device_enum=command_enum,
                         device_name=device_name,
+                        blind_id=blind_id,
                         device_data=subentry.data,
                         config_entry_id=entry.entry_id,
                         command_device_id=command_device_id,
@@ -257,6 +289,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         device_id: str,
         device_enum: str,
         device_name: str,
+        blind_id: str | None = None,
         device_data: Mapping[str, Any] | None = None,
         config_entry_id: str | None = None,
         command_device_id: str | None = None,
@@ -273,6 +306,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             device_id: The unique device ID (6-character hex)
             device_enum: The device enumerator for commands (2-character hex)
             device_name: Friendly name for the device
+            blind_id: Stable per-blind UUID used for the entity registry
             device_data: Device data dict containing calibration times
             config_entry_id: The config entry ID for linking to device
             command_device_id: Protocol ID associated with outgoing commands
@@ -317,10 +351,17 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # Backward-compatible alias retained for diagnostics.
         self._device_enum = self._command_enum
         self._config_entry_id = config_entry_id
+        blind_id_source = blind_id
+        if blind_id_source is None and device_data is not None:
+            blind_id_source = device_data.get(CONF_BLIND_ID)
+        self._blind_id = normalize_blind_id(blind_id_source) or str(
+            blind_id_source or device_id
+        )
 
         # Entity attributes
-        self._attr_unique_id = f"schellenberg_{device_id}"
-        self._attr_name = device_name
+        self._attr_unique_id = f"{DOMAIN}_blind_{self._blind_id}"
+        self._device_name = device_name
+        self._attr_name = None
         self._attr_is_closed = None
         self._attr_is_opening = False
         self._attr_is_closing = False
@@ -389,7 +430,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._api.register_entity(
             self._status_device_id,
             self._status_enum,
-            self._attr_name,
+            self._device_name,
             command_device_id=self._command_device_id,
             command_enum=self._command_enum,
             secondary_status_identities=self._secondary_status_identities,
@@ -428,7 +469,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_is_closed = self._attr_current_cover_position == 0
                 _LOGGER.debug(
                     "Restored position for %s (%s) to %d%% (raw=%s)",
-                    self._attr_name,
+                    self._device_name,
                     self._device_id,
                     self._attr_current_cover_position,
                     raw_position,
@@ -439,7 +480,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_closed = True
             _LOGGER.debug(
                 "No previous state for %s (%s); defaulting position to 0%% (closed)",
-                self._attr_name,
+                self._device_name,
                 self._device_id,
             )
 
@@ -543,7 +584,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         _LOGGER.warning(
             "Manual position sync applied cover=%s command_device_id=%s "
             "previous_position=%s new_position=%d status=confirmed/manual",
-            self._attr_name,
+            self._device_name,
             self._command_device_id,
             previous_position,
             normalized_position,
@@ -579,7 +620,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         _LOGGER.info(
             "Device %s calibration updated: open_time=%.2fs, close_time=%.2fs. "
             "Cover position set to fully closed (0%%)",
-            self._attr_name,
+            self._device_name,
             open_time,
             close_time,
         )
@@ -598,7 +639,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         """Handle events from the USB stick for this device."""
         _LOGGER.info(
             "Device %s (%s) received activity event: %s",
-            self._attr_name,
+            self._device_name,
             self._device_id,
             event,
         )
@@ -609,7 +650,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             logical_opening = physical_up != self._invert_direction
             _LOGGER.info(
                 "Device %s physical_direction=%s logical_direction=%s",
-                self._attr_name,
+                self._device_name,
                 "up" if physical_up else "down",
                 "opening" if logical_opening else "closing",
             )
@@ -637,7 +678,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
             _LOGGER.info(
                 "Device %s STOPPED (position: %d%%)",
-                self._attr_name,
+                self._device_name,
                 self._attr_current_cover_position,
             )
             # Stop real-time position tracking
@@ -672,7 +713,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._target_position = None  # Clear target position on stop
         else:
             _LOGGER.debug(
-                "Device %s received unknown event: %s", self._attr_name, event
+                "Device %s received unknown event: %s", self._device_name, event
             )
 
         self.async_write_ha_state()
@@ -723,7 +764,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._attr_current_cover_position = self._target_position
                         _LOGGER.info(
                             "Device %s reached target position (%d%%)",
-                            self._attr_name,
+                            self._device_name,
                             self._target_position,
                         )
                         # If target is 0 or 100, let the device stop naturally at its limits.
@@ -753,7 +794,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     ):
                         _LOGGER.info(
                             "Device %s reached fully closed position (0%%)",
-                            self._attr_name,
+                            self._device_name,
                         )
                         self._attr_current_cover_position = 0
                         self._position_update_task = None
@@ -770,7 +811,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     ):
                         _LOGGER.info(
                             "Device %s reached fully open position (100%%)",
-                            self._attr_name,
+                            self._device_name,
                         )
                         self._attr_current_cover_position = 100
                         self._position_update_task = None
@@ -786,7 +827,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     self.async_write_ha_state()
                     ha_update_counter = 0
         except asyncio.CancelledError:
-            _LOGGER.debug("Position tracking cancelled for device %s", self._attr_name)
+            _LOGGER.debug(
+                "Position tracking cancelled for device %s", self._device_name
+            )
             self._position_update_task = None
             raise
 
@@ -840,7 +883,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         action = CMD_DOWN if self._invert_direction else CMD_UP
         _LOGGER.debug(
             "Opening cover %s (command_id=%s enum=%s action=%s)",
-            self._attr_name,
+            self._device_name,
             self._command_device_id,
             self._command_enum,
             action,
@@ -871,7 +914,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         action = CMD_UP if self._invert_direction else CMD_DOWN
         _LOGGER.debug(
             "Closing cover %s (command_id=%s enum=%s action=%s)",
-            self._attr_name,
+            self._device_name,
             self._command_device_id,
             self._command_enum,
             action,
@@ -900,7 +943,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         """Stop the cover."""
         _LOGGER.debug(
             "Stopping cover %s (command_id=%s enum=%s)",
-            self._attr_name,
+            self._device_name,
             self._command_device_id,
             self._command_enum,
         )
@@ -935,7 +978,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         _LOGGER.info(
             "Setting cover %s position from %d%% to %d%%",
-            self._attr_name,
+            self._device_name,
             current_position,
             target_position,
         )
@@ -951,14 +994,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if target_position > current_position:
             _LOGGER.info(
                 "Moving cover %s UP to reach target %d%%",
-                self._attr_name,
+                self._device_name,
                 target_position,
             )
             await self.async_open_cover()
         else:
             _LOGGER.info(
                 "Moving cover %s DOWN to reach target %d%%",
-                self._attr_name,
+                self._device_name,
                 target_position,
             )
             await self.async_close_cover()

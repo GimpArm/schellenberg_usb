@@ -7,16 +7,18 @@ from types import MappingProxyType
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 
 from .api import SchellenbergUsbApi
+from .blind_id import claim_blind_id
 from .const import (
     CMD_DOWN,
     CMD_STOP,
     CMD_UP,
+    CONF_BLIND_ID,
     CONF_COMMAND,
     CONF_CONFIG_ENTRY_ID,
     CONF_DEVICE_ID,
@@ -25,11 +27,36 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_TEST_COMMAND,
+    SUBENTRY_TYPE_BLIND,
     SUBENTRY_TYPE_HUB,
     SchellenbergConfigEntry,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@callback
+def _async_backfill_blind_ids(
+    hass: HomeAssistant, entry: SchellenbergConfigEntry
+) -> bool:
+    """Persist one stable, collision-free UUID for every blind subentry."""
+    used_ids: set[str] = set()
+    changed = False
+    for subentry in list(entry.subentries.values()):
+        if subentry.subentry_type != SUBENTRY_TYPE_BLIND:
+            continue
+        blind_id, needs_update = claim_blind_id(
+            subentry.data.get(CONF_BLIND_ID), used_ids
+        )
+        if not needs_update:
+            continue
+        data = dict(subentry.data)
+        data[CONF_BLIND_ID] = blind_id
+        hass.config_entries.async_update_subentry(entry, subentry, data=data)
+        changed = True
+        _LOGGER.info("Assigned stable blind ID %s to %s", blind_id, subentry.title)
+    return changed
+
 
 CONFIG_SCHEMA = vol.Schema(
     {DOMAIN: cv.config_entry_only_config_schema(DOMAIN)},
@@ -224,6 +251,10 @@ async def async_setup_entry(
             add_config_entry_id=entry.entry_id,
             add_config_subentry_id=hub_subentry.subentry_id,
         )
+
+    # Legacy subentries predate stable per-blind UUIDs. Persist them before
+    # platforms create entities so the registry identity is stable immediately.
+    _async_backfill_blind_ids(hass, entry)
 
     # Forward setup to the hub's platforms (cover, sensor, switch)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

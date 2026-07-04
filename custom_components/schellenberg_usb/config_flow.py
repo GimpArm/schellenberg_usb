@@ -18,10 +18,12 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
+from .blind_id import generate_blind_id
 from .const import (
     CMD_DOWN,
     CMD_STOP,
     CMD_UP,
+    CONF_BLIND_ID,
     CONF_CLOSE_TIME,
     CONF_CLOSE_TIME_SECONDS,
     CONF_COMMAND_DEVICE_ID,
@@ -241,6 +243,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         """Initialize the subentry flow."""
         super().__init__()
         self.calibration_handler: CalibrationFlowHandler | None = None
+        self._pending_blind_id = generate_blind_id()
         self._pending_device_id: str | None = None
         self._pending_device_enum: str | None = None
         self._pending_device_name: str | None = None
@@ -512,6 +515,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         assert self._pending_open_time is not None
         assert self._pending_close_time is not None
         data: dict[str, Any] = {
+            CONF_BLIND_ID: self._pending_blind_id,
             # Legacy command keys stay populated for backward compatibility.
             CONF_DEVICE_ID: self._pending_device_id,
             CONF_DEVICE_ENUM: self._pending_device_enum,
@@ -719,6 +723,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             }
         )
         handler.enable_subentry_creation(
+            blind_id=self._pending_blind_id,
             device_id=device_id,
             device_enum=device_enum,
             device_name=device_name,

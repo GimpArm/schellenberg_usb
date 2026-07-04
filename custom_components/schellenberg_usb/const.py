@@ -25,6 +25,7 @@ SUBENTRY_TYPE_BLIND = "blind"
 
 # Configuration keys
 CONF_SERIAL_PORT = "serial_port"
+CONF_BLIND_ID = "blind_id"
 CONF_DEVICE_NAME = "device_name"
 CONF_DEVICE_ENUM = "device_enum"
 CONF_COMMAND_DEVICE_ID = "command_device_id"

@@ -20,9 +20,11 @@ from homeassistant.helpers.dispatcher import (
 )
 from homeassistant.helpers.storage import Store
 
+from .blind_id import generate_blind_id, normalize_blind_id
 from .api import SchellenbergUsbApi
 from .const import (
     CALIBRATION_TIMEOUT,
+    CONF_BLIND_ID,
     CONF_CLOSE_TIME,
     CONF_COMMAND_DEVICE_ID,
     CONF_COMMAND_ENUM,
@@ -67,6 +69,7 @@ class CalibrationFlowHandler:
         self._open_time: float | None = None
         self._close_time: float | None = None
         self._create_subentry_after_calibration = False
+        self._pending_blind_id: str | None = None
         self._pending_device_id: str | None = None
         self._pending_device_enum: str | None = None
         self._pending_device_name: str | None = None
@@ -503,6 +506,7 @@ class CalibrationFlowHandler:
                 and self._pending_device_name
             ):
                 data: dict[str, Any] = {
+                    CONF_BLIND_ID: self._pending_blind_id or generate_blind_id(),
                     CONF_DEVICE_ID: self._pending_device_id,
                     CONF_DEVICE_ENUM: self._pending_device_enum,
                     CONF_COMMAND_DEVICE_ID: self._pending_device_id,
@@ -699,6 +703,7 @@ class CalibrationFlowHandler:
     def enable_subentry_creation(
         self,
         *,
+        blind_id: str | None = None,
         device_id: str,
         device_enum: str,
         device_name: str,
@@ -710,6 +715,7 @@ class CalibrationFlowHandler:
     ) -> None:
         """Enable creating a subentry after calibration completes."""
         self._create_subentry_after_calibration = True
+        self._pending_blind_id = normalize_blind_id(blind_id) or generate_blind_id()
         self._pending_device_id = device_id
         self._pending_device_enum = device_enum
         self._pending_device_name = device_name
@@ -724,6 +730,7 @@ class CalibrationFlowHandler:
     def disable_subentry_creation(self) -> None:
         """Disable subentry creation (used for reconfigure flows)."""
         self._create_subentry_after_calibration = False
+        self._pending_blind_id = None
         self._pending_device_id = None
         self._pending_device_enum = None
         self._pending_device_name = None

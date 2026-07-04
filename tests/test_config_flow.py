@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -22,6 +23,7 @@ from custom_components.schellenberg_usb.config_flow import (
     SchellenbergPairingSubentryFlow,
 )
 from custom_components.schellenberg_usb.const import (
+    CONF_BLIND_ID,
     CMD_DOWN,
     CMD_STOP,
     CMD_UP,
@@ -157,7 +159,9 @@ async def test_manual_setup_stores_separate_command_and_status_identity() -> Non
     result = await flow.async_step_save_manual()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Sitting room"
-    assert result["data"] == {
+    saved_data = dict(result["data"])
+    assert str(UUID(saved_data.pop(CONF_BLIND_ID)))
+    assert saved_data == {
         CONF_DEVICE_ID: "F2B8D5",
         CONF_DEVICE_ENUM: "23",
         CONF_COMMAND_DEVICE_ID: "F2B8D5",
@@ -1110,6 +1114,7 @@ async def test_pairing_persists_calibrated_protocol_data(
     )
     handler.enable_subentry_creation(
         device_id="F2B8D5",
+        blind_id="11111111-1111-4111-8111-111111111111",
         device_enum=command_enum,
         device_name="Sitting room",
         status_device_id="3720B8",
@@ -1125,6 +1130,7 @@ async def test_pairing_persists_calibrated_protocol_data(
         title="Sitting room",
         data={
             CONF_DEVICE_ID: "F2B8D5",
+            CONF_BLIND_ID: "11111111-1111-4111-8111-111111111111",
             CONF_DEVICE_ENUM: command_enum,
             CONF_COMMAND_DEVICE_ID: "F2B8D5",
             CONF_COMMAND_ENUM: command_enum,

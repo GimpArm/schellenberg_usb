@@ -10,10 +10,12 @@ import pytest
 from homeassistant.components.cover import ATTR_POSITION
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
+    CONF_BLIND_ID,
     CONF_CLOSE_TIME,
     CONF_COMMAND_DEVICE_ID,
     CONF_COMMAND_ENUM,
@@ -36,6 +38,8 @@ from custom_components.schellenberg_usb.cover import (
     SchellenbergCover,
     async_setup_entry,
 )
+
+TEST_BLIND_ID = "11111111-1111-4111-8111-111111111111"
 
 
 def _async_mock(value: Any) -> AsyncMock:
@@ -68,6 +72,7 @@ def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
     subentry.subentry_id = "sub1"
     subentry.subentry_type = SUBENTRY_TYPE_BLIND
     subentry.data = {
+        CONF_BLIND_ID: TEST_BLIND_ID,
         "device_id": "ABC123",
         "device_enum": "01",
         "device_name": "Test Cover",
@@ -127,6 +132,35 @@ async def test_async_setup_entry_creates_covers(
 
 
 @pytest.mark.asyncio
+async def test_setup_migrates_legacy_entity_registry_unique_id(
+    hass: HomeAssistant,
+    mock_config_entry: ConfigEntry,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test registry migration preserves the existing entity ID."""
+    mock_config_entry.runtime_data = mock_api
+    registry = er.async_get(hass)
+    legacy = registry.async_get_or_create(
+        "cover",
+        DOMAIN,
+        "schellenberg_ABC123",
+        config_entry=mock_config_entry,
+        config_subentry_id="sub1",
+        suggested_object_id="extension_0",
+    )
+    add_entities = MagicMock()
+
+    await async_setup_entry(hass, mock_config_entry, add_entities)
+
+    new_unique_id = f"{DOMAIN}_blind_{TEST_BLIND_ID}"
+    assert registry.async_get_entity_id("cover", DOMAIN, new_unique_id) == (
+        legacy.entity_id
+    )
+    assert registry.async_get_entity_id("cover", DOMAIN, "schellenberg_ABC123") is None
+    assert add_entities.call_args.args[0][0].unique_id == new_unique_id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command_enum", "status_enum"),
     [("23", "08"), ("08", "0D"), ("0D", "08")],
@@ -155,6 +189,7 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
                 "title": "Sitting room door",
                 "unique_id": "F2B8D5",
                 "data": {
+                    CONF_BLIND_ID: TEST_BLIND_ID,
                     CONF_DEVICE_ID: "F2B8D5",
                     CONF_DEVICE_ENUM: "23",
                     CONF_COMMAND_DEVICE_ID: "F2B8D5",
@@ -189,8 +224,9 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
     assert add_entities.call_args.kwargs == {"config_subentry_id": "manual_blind"}
     cover = add_entities.call_args.args[0][0]
     assert isinstance(cover, SchellenbergCover)
-    assert cover.name == "Sitting room door"
-    assert cover.unique_id == "schellenberg_F2B8D5"
+    assert cover.name is None
+    assert cover._device_name == "Sitting room door"
+    assert cover.unique_id == f"{DOMAIN}_blind_{TEST_BLIND_ID}"
     assert cover._command_enum == command_enum
     assert cover._status_device_id == "3720B8"
     assert cover._status_enum == status_enum
@@ -212,15 +248,48 @@ async def test_cover_initialization(
         device_name="Test Cover",
         device_data=None,
         config_entry_id="test_entry",
+        blind_id=TEST_BLIND_ID,
     )
 
     assert cover._device_id == "ABC123"
     assert cover._device_enum == "01"
-    assert cover.unique_id == "schellenberg_ABC123"
-    assert cover.name == "Test Cover"
+    assert cover.unique_id == f"{DOMAIN}_blind_{TEST_BLIND_ID}"
+    assert cover.name is None
+    assert cover._device_name == "Test Cover"
     assert cover._attr_current_cover_position is None
     assert cover._travel_time_open == DEFAULT_TRAVEL_TIME
     assert cover._travel_time_close == DEFAULT_TRAVEL_TIME
+
+
+def test_cover_unique_id_is_stable_after_rename(
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test a friendly-name change cannot change registry identity."""
+    original = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Extension 0",
+        blind_id=TEST_BLIND_ID,
+    )
+    renamed = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Garden blind",
+        blind_id=TEST_BLIND_ID,
+    )
+    other_blind = SchellenbergCover(
+        api=mock_api,
+        device_id="DEF456",
+        device_enum="02",
+        device_name="Other blind",
+        blind_id="22222222-2222-4222-8222-222222222222",
+    )
+
+    assert original.unique_id == renamed.unique_id
+    assert original._device_name != renamed._device_name
+    assert other_blind.unique_id != original.unique_id
 
 
 @pytest.mark.asyncio
