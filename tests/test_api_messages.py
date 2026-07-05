@@ -441,6 +441,8 @@ def test_position_update_diagnostics_are_kept_per_command_identity(
         previous_position=40,
         new_position=44,
         status="estimated",
+        position_source="primary status",
+        confirmed_since_restart=True,
     )
 
     update = api.get_last_position_update("F2B8D5")
@@ -450,6 +452,8 @@ def test_position_update_diagnostics_are_kept_per_command_identity(
     assert update["previous_position"] == 40
     assert update["new_position"] == 44
     assert update["status"] == "estimated"
+    assert update["position_source"] == "primary status"
+    assert update["confirmed_since_restart"] is True
     assert api.get_last_position_update("ABCDEF") is None
 
 

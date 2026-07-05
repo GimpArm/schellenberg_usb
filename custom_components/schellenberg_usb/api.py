@@ -1493,6 +1493,8 @@ class SchellenbergUsbApi:
         previous_position: int | None,
         new_position: int | None,
         status: str,
+        position_source: str | None = None,
+        confirmed_since_restart: bool | None = None,
     ) -> None:
         """Store the latest cover position calculation for diagnostics."""
         update = {
@@ -1502,6 +1504,8 @@ class SchellenbergUsbApi:
             "new_position": new_position,
             "status": status,
             "time": dt_util.now().strftime("%H:%M:%S"),
+            "position_source": position_source or source,
+            "confirmed_since_restart": bool(confirmed_since_restart),
         }
         normalized_id = command_device_id.upper()
         self._last_position_updates[normalized_id] = update

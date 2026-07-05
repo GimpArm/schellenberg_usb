@@ -881,6 +881,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         last_position = api.get_last_position_update(details["command_device_id"]) or {
             "source": "No position update recorded",
             "direction": "--",
+            "position_source": "unknown",
+            "confirmed_since_restart": False,
             "previous_position": None,
             "new_position": None,
             "status": "--",
@@ -950,7 +952,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "secondary_last_command": last_secondary["command"],
                 "secondary_last_interpretation": last_secondary["interpreted_command"],
                 "secondary_last_time": last_secondary["time"],
-                "position_source": last_position["source"],
+                "position_source": last_position.get(
+                    "position_source", last_position["source"]
+                ),
                 "position_direction": last_position["direction"],
                 "position_previous": (
                     "--"
@@ -971,13 +975,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 ),
                 "last_manual_sync_time": last_manual_sync["time"],
                 "position_confidence": (
-                    "manually confirmed"
-                    if last_position["status"] == "confirmed/manual"
-                    else (
-                        "estimated"
-                        if last_position["new_position"] is not None
-                        else "unknown"
-                    )
+                    last_position["status"]
+                    if last_position["new_position"] is not None
+                    else "unknown"
+                ),
+                "position_confirmed_since_restart": (
+                    "Yes" if last_position.get("confirmed_since_restart") else "No"
                 ),
                 "stick_connected": str(api.is_connected),
                 "stick_mode": str(api.device_mode or "unknown"),
@@ -1553,7 +1556,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 f"Time: {last_secondary['time']}",
                 "",
                 "Last position update:",
-                f"Source: {last_position['source']}",
+                "Source: "
+                + str(last_position.get("position_source", last_position["source"])),
+                f"Details: {last_position['source']}",
                 f"Direction: {last_position['direction']}",
                 f"Previous position: {last_position['previous_position']}",
                 f"New position: {last_position['new_position']}",
@@ -1563,16 +1568,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 "Position confidence:",
                 f"Current estimated position: {last_position['new_position']}",
                 f"Last manual sync time: {last_manual_sync['time']}",
-                "Estimated or manually confirmed: "
-                + (
-                    "manually confirmed"
-                    if last_position["status"] == "confirmed/manual"
-                    else (
-                        "estimated"
-                        if last_position["new_position"] is not None
-                        else "unknown"
-                    )
-                ),
+                f"Confidence: {last_position['status']}",
+                "Confirmed since restart: "
+                + ("Yes" if last_position.get("confirmed_since_restart") else "No"),
                 "",
                 "Current transmit target:",
                 f"Device ID: {details['command_device_id']}",

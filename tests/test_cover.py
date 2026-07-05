@@ -608,6 +608,19 @@ async def test_cover_restore_position(
 
     assert cover._attr_current_cover_position == 75
     assert cover._attr_is_closed is False
+    assert cover._position_source_kind == "restored HA state"
+    assert cover._position_confirmed_since_restart is False
+    _async_mock(mock_api.control_blind).assert_not_awaited()
+    _magic_mock(mock_api.record_position_update).assert_called_once_with(
+        "ABC123",
+        source="restored HA state",
+        direction="idle",
+        previous_position=None,
+        new_position=75,
+        position_source="restored HA state",
+        confirmed_since_restart=False,
+        status="restored / estimated / not confirmed since restart",
+    )
 
 
 @pytest.mark.asyncio
@@ -680,12 +693,15 @@ async def test_cover_handle_started_moving_up(
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
     assert cover._move_start_position == 0
+    assert cover._position_confirmed_since_restart is True
     _magic_mock(mock_api.record_position_update).assert_called_once_with(
         "ABC123",
         source="primary status ABC123/01 command 01",
         direction="opening",
         previous_position=0,
         new_position=0,
+        position_source="primary status",
+        confirmed_since_restart=True,
         status="confirmed",
     )
 
@@ -896,8 +912,90 @@ def test_manual_position_sync_updates_cover_and_stops_estimator(
         direction="manual",
         previous_position=50,
         new_position=position,
+        position_source="manual sync",
+        confirmed_since_restart=True,
         status="confirmed/manual",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "restored_position", "travel_time_key", "direction", "endpoint"),
+    [
+        ("open", 75, CONF_OPEN_TIME, "opening", 100),
+        ("close", 25, CONF_CLOSE_TIME, "closing", 0),
+    ],
+)
+async def test_full_travel_after_restore_resyncs_endpoint(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+    command: str,
+    restored_position: int,
+    travel_time_key: str,
+    direction: str,
+    endpoint: int,
+) -> None:
+    """Test a complete first movement anchors a restored startup estimate."""
+    import time
+
+    travel_time = 20.0
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+        device_data={travel_time_key: travel_time},
+    )
+    cover.hass = hass
+    last_state = State(
+        "cover.test_cover",
+        "open",
+        {"current_position": restored_position},
+    )
+
+    with (
+        patch.object(cover, "async_get_last_state", return_value=last_state),
+        patch("custom_components.schellenberg_usb.cover.async_dispatcher_connect"),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_added_to_hass()
+
+    _magic_mock(mock_api.record_position_update).reset_mock()
+    with (
+        patch.object(cover, "_start_position_tracking"),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        if command == "open":
+            await cover.async_open_cover()
+        else:
+            await cover.async_close_cover()
+
+    assert cover._full_travel_resync_direction == direction
+    cover._move_start_time = time.monotonic() - travel_time - 0.1
+
+    with (
+        patch(
+            "custom_components.schellenberg_usb.cover.asyncio.sleep",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover._async_position_update_loop()
+
+    assert cover._attr_current_cover_position == endpoint
+    assert cover._position_source_kind == "HA command"
+    assert cover._position_confirmed_since_restart is True
+    assert cover._full_travel_resync_direction is None
+    _, kwargs = _magic_mock(mock_api.record_position_update).call_args
+    assert kwargs == {
+        "source": f"Home Assistant {command} command",
+        "direction": direction,
+        "previous_position": restored_position,
+        "new_position": endpoint,
+        "position_source": "HA command",
+        "confirmed_since_restart": True,
+        "status": "estimated from full travel",
+    }
 
 
 @pytest.mark.asyncio

@@ -395,6 +395,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             None  # Target position for set_cover_position
         )
         self._position_update_source = "not recorded"
+        self._position_source_kind = "startup default"
+        self._position_confirmed_since_restart = False
+        self._full_travel_resync_direction: str | None = None
         # NOTE: Debug/troubleshooting instrumentation removed now that persistence works reliably.
 
     @property
@@ -438,6 +441,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         # Restore the last known state
+        restored_from_ha = False
         last_state = await self.async_get_last_state()
         if last_state:
             # HA stores cover position attribute as 'current_position'. Some code historically
@@ -468,6 +472,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 # Use exact restored value without inferring 100 from 'open' state; allows partial positions.
                 self._attr_current_cover_position = max(0, min(100, restored_position))
                 self._attr_is_closed = self._attr_current_cover_position == 0
+                restored_from_ha = True
                 _LOGGER.debug(
                     "Restored position for %s (%s) to %d%% (raw=%s)",
                     self._device_name,
@@ -485,17 +490,28 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._device_id,
             )
 
+        if restored_from_ha:
+            self._position_source_kind = "restored HA state"
+            self._position_update_source = "restored HA state"
+            startup_status = "restored / estimated / not confirmed since restart"
+        else:
+            self._position_source_kind = "startup default"
+            self._position_update_source = "startup default (no restored HA state)"
+            startup_status = "estimated / not confirmed since restart"
+        self._position_confirmed_since_restart = False
+        self._full_travel_resync_direction = None
+
         # IMPORTANT: We must write the restored (or default) position to the state machine now.
         # add_to_platform_finish() already wrote an initial state before restoration ran, so without
         # this call the restored position would not be visible until the first movement/event.
         # Initial write after restoration (debug instrumentation removed).
         self.async_write_ha_state()
         self._record_position_update(
-            source="restored Home Assistant state",
+            source=self._position_update_source,
             direction="idle",
             previous_position=None,
             new_position=self._attr_current_cover_position,
-            status="estimated",
+            status=startup_status,
         )
 
         # Only an observed or manually supplied primary status identity may drive
@@ -561,6 +577,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             direction=direction,
             previous_position=previous_position,
             new_position=new_position,
+            position_source=self._position_source_kind,
+            confirmed_since_restart=self._position_confirmed_since_restart,
             status=status,
         )
 
@@ -583,6 +601,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._move_start_position = None
         self._target_position = None
         self._position_update_source = "Developer Tools manual position sync"
+        self._position_source_kind = "manual sync"
+        self._position_confirmed_since_restart = True
+        self._full_travel_resync_direction = None
         self._record_position_update(
             source=self._position_update_source,
             direction="manual",
@@ -618,6 +639,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._attr_current_cover_position = 0
         self._attr_is_closed = True
         self._position_update_source = "completed calibration"
+        self._position_source_kind = "calibration"
+        self._position_confirmed_since_restart = True
+        self._full_travel_resync_direction = None
         self._record_position_update(
             source=self._position_update_source,
             direction="stop",
@@ -714,6 +738,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_closing = not logical_opening
             self._move_start_time = time.monotonic()
             self._move_start_position = self._attr_current_cover_position
+            self._position_source_kind = "primary status"
+            self._position_confirmed_since_restart = True
+            self._full_travel_resync_direction = None
             self._position_update_source = (
                 f"primary status {self._status_device_id}/{self._status_enum} "
                 f"command {event}"
@@ -728,6 +755,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._start_position_tracking()
         elif event == EVENT_STOPPED:
             previous_position = self._attr_current_cover_position
+            self._position_source_kind = "primary status"
+            self._position_confirmed_since_restart = True
+            self._full_travel_resync_direction = None
             self._position_update_source = (
                 f"primary status {self._status_device_id}/{self._status_enum} "
                 f"command {event}"
@@ -814,6 +844,35 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if self._position_update_task is task:
             self._position_update_task = None
 
+    def _waiting_for_full_travel_resync(self, direction: str) -> bool:
+        """Return whether an unconfirmed startup estimate needs more travel time."""
+        if (
+            self._full_travel_resync_direction != direction
+            or self._move_start_time is None
+        ):
+            return False
+        travel_time = (
+            self._travel_time_open
+            if direction == "opening"
+            else self._travel_time_close
+        )
+        return time.monotonic() - self._move_start_time < travel_time
+
+    def _confirm_full_travel_resync(self, direction: str, position: int) -> None:
+        """Anchor an endpoint after one complete configured travel interval."""
+        if self._full_travel_resync_direction != direction:
+            return
+        previous_position = self._move_start_position
+        self._position_confirmed_since_restart = True
+        self._full_travel_resync_direction = None
+        self._record_position_update(
+            source=self._position_update_source,
+            direction=direction,
+            previous_position=previous_position,
+            new_position=position,
+            status="estimated from full travel",
+        )
+
     async def _async_position_update_loop(self) -> None:
         """Update position every 200ms internally, report to HA every 1 second."""
         position_task = asyncio.current_task()
@@ -871,12 +930,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._attr_is_closing
                         and self._attr_current_cover_position is not None
                         and self._attr_current_cover_position <= 0
+                        and not self._waiting_for_full_travel_resync("closing")
                     ):
                         _LOGGER.info(
                             "Device %s reached fully closed position (0%%)",
                             self._device_name,
                         )
                         self._attr_current_cover_position = 0
+                        self._confirm_full_travel_resync("closing", 0)
                         self._attr_is_opening = False
                         self._attr_is_closing = False
                         self._move_start_time = None
@@ -887,12 +948,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._attr_is_opening
                         and self._attr_current_cover_position is not None
                         and self._attr_current_cover_position >= 100
+                        and not self._waiting_for_full_travel_resync("opening")
                     ):
                         _LOGGER.info(
                             "Device %s reached fully open position (100%%)",
                             self._device_name,
                         )
                         self._attr_current_cover_position = 100
+                        self._confirm_full_travel_resync("opening", 100)
                         self._attr_is_opening = False
                         self._attr_is_closing = False
                         self._move_start_time = None
@@ -977,6 +1040,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
         self._position_update_source = "Home Assistant open command"
+        self._position_source_kind = "HA command"
+        self._full_travel_resync_direction = (
+            "opening"
+            if not self._position_confirmed_since_restart
+            and self._target_position is None
+            else None
+        )
         self._record_position_update(
             source=self._position_update_source,
             direction="opening",
@@ -1008,6 +1078,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_current_cover_position = 0
         self._move_start_position = self._attr_current_cover_position
         self._position_update_source = "Home Assistant close command"
+        self._position_source_kind = "HA command"
+        self._full_travel_resync_direction = (
+            "closing"
+            if not self._position_confirmed_since_restart
+            and self._target_position is None
+            else None
+        )
         self._record_position_update(
             source=self._position_update_source,
             direction="closing",
@@ -1031,6 +1108,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._command_enum,
         )
         previous_position = self._attr_current_cover_position
+        self._position_source_kind = "HA command"
+        self._full_travel_resync_direction = None
         self._position_update_source = "Home Assistant stop command"
         await self._async_cancel_position_tracking("Home Assistant stop command")
         self._update_position()

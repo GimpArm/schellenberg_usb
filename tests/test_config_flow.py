@@ -418,6 +418,8 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     }
     api.get_last_position_update.return_value = {
         "source": "primary status 3720B8/08 command 01",
+        "position_source": "primary status",
+        "confirmed_since_restart": True,
         "direction": "opening",
         "previous_position": 40,
         "new_position": 44,
@@ -464,7 +466,7 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["primary_last_interpretation"] == "open"
     assert placeholders["secondary_last_device_id"] == "F2B8D5"
     assert placeholders["secondary_last_command"] == "C1"
-    assert placeholders["position_source"] == ("primary status 3720B8/08 command 01")
+    assert placeholders["position_source"] == "primary status"
     assert placeholders["position_direction"] == "opening"
     assert placeholders["position_previous"] == "40%"
     assert placeholders["position_new"] == "44%"
@@ -472,6 +474,7 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert placeholders["current_position"] == "44%"
     assert placeholders["last_manual_sync_time"] == "17:30:00"
     assert placeholders["position_confidence"] == "estimated"
+    assert placeholders["position_confirmed_since_restart"] == "Yes"
     assert placeholders["primary_status_device_id"] == "3720B8"
     assert placeholders["primary_status_enum"] == "08"
     assert placeholders["status_identity_source"] == (
@@ -517,11 +520,73 @@ async def test_developer_tools_show_last_frame_and_send_selected_target() -> Non
     assert "Status: estimated" in diagnostics
     assert "Current estimated position: 44" in diagnostics
     assert "Last manual sync time: 17:30:00" in diagnostics
-    assert "Estimated or manually confirmed: estimated" in diagnostics
+    assert "Source: primary status" in diagnostics
+    assert "Details: primary status 3720B8/08 command 01" in diagnostics
+    assert "Confidence: estimated" in diagnostics
+    assert "Confirmed since restart: Yes" in diagnostics
     assert "Mode: listening" in diagnostics
     assert "Ready: True" in diagnostics
     assert "t1/t0 confirm only" in diagnostics
     assert "Motor reception and movement remain unverified" in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_developer_tools_show_restored_startup_confidence() -> None:
+    """Test restored HA position is visibly unconfirmed after restart."""
+    flow = _create_flow()
+    subentry = MagicMock(
+        title="Garden",
+        data={
+            CONF_COMMAND_DEVICE_ID: "ABC123",
+            CONF_COMMAND_ENUM: "10",
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_UNKNOWN,
+        },
+    )
+    api = MagicMock()
+    api.get_last_received_for_identities.return_value = None
+    api.get_last_primary_tracking_frame.return_value = None
+    api.get_last_secondary_frame.return_value = None
+    api.get_last_position_update.return_value = {
+        "source": "restored HA state",
+        "position_source": "restored HA state",
+        "confirmed_since_restart": False,
+        "direction": "idle",
+        "previous_position": None,
+        "new_position": 75,
+        "status": "restored / estimated / not confirmed since restart",
+        "time": "08:00:00",
+    }
+    api.get_last_manual_position_sync.return_value = None
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    entry = MagicMock(runtime_data=api)
+
+    with (
+        patch.object(flow, "_get_entry", return_value=entry),
+        patch.object(flow, "_get_reconfigure_subentry", return_value=subentry),
+    ):
+        result = await flow.async_step_developer_tools()
+        copy_result = await flow.async_step_copy_diagnostics()
+
+    placeholders = result["description_placeholders"]
+    assert placeholders["current_position"] == "75%"
+    assert placeholders["position_source"] == "restored HA state"
+    assert placeholders["position_confidence"] == (
+        "restored / estimated / not confirmed since restart"
+    )
+    assert placeholders["position_confirmed_since_restart"] == "No"
+
+    diagnostics = copy_result["data_schema"]({})["diagnostics"]
+    assert "Current estimated position: 75" in diagnostics
+    assert "Source: restored HA state" in diagnostics
+    assert (
+        "Confidence: restored / estimated / not confirmed since restart" in diagnostics
+    )
+    assert "Confirmed since restart: No" in diagnostics
 
 
 @pytest.mark.asyncio
