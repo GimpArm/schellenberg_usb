@@ -12,7 +12,8 @@ from homeassistant.components.cover import (
     CoverEntity,
     CoverEntityFeature,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -536,6 +537,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
         )
 
+        # Persist the latest estimate and stop the non-critical loop before HA's
+        # final-write shutdown stage.
+        self.async_on_remove(
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STOP, self._async_handle_hass_stop
+            )
+        )
+
     def _record_position_update(
         self,
         *,
@@ -628,11 +637,58 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # Update entity state
         self.async_write_ha_state()
 
+    async def _async_handle_hass_stop(self, _event: Event) -> None:
+        """Persist and stop position tracking before final-write shutdown."""
+        await self._async_shutdown_position_tracking("Home Assistant stopping")
+
+    async def _async_shutdown_position_tracking(self, reason: str) -> None:
+        """Persist the latest estimate and await position-loop cancellation."""
+        task = self._position_update_task
+        if task is None:
+            return
+
+        previous_position = self._attr_current_cover_position
+        self._update_position()
+        if self.entity_id is not None:
+            self.async_write_ha_state()
+        _LOGGER.debug(
+            "Stopping position tracking cover=%s reason=%s position=%s previous=%s",
+            self._device_name,
+            reason,
+            self._attr_current_cover_position,
+            previous_position,
+        )
+        await self._async_cancel_position_tracking(reason)
+
+    async def _async_cancel_position_tracking(self, reason: str) -> None:
+        """Cancel and await the currently tracked position loop, if any."""
+        task = self._position_update_task
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            if self._position_update_task is task:
+                self._position_update_task = None
+            return
+
+        if self._position_update_task is task:
+            self._position_update_task = None
+        if not task.done():
+            task.cancel(reason)
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.exception(
+                "Position tracking task failed while stopping cover=%s reason=%s",
+                self._device_name,
+                reason,
+            )
+
     async def async_will_remove_from_hass(self) -> None:
-        """Clean up when entity is removed."""
+        """Clean up when entity is removed or its config entry is unloaded."""
+        await self._async_shutdown_position_tracking("entity removal or entry unload")
         await super().async_will_remove_from_hass()
-        # Stop any running position tracking tasks
-        self._stop_position_tracking()
 
     @callback
     def _handle_event(self, event: str) -> None:
@@ -719,23 +775,48 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self.async_write_ha_state()
 
     def _start_position_tracking(self) -> None:
-        """Start tracking position updates every second."""
-        # Cancel any existing tracking task
-        self._stop_position_tracking()
+        """Ensure exactly one lifecycle-managed position loop is running."""
+        existing_task = self._position_update_task
+        if (
+            existing_task is not None
+            and not existing_task.done()
+            and not existing_task.cancelling()
+        ):
+            return
+        if self._position_update_task is existing_task:
+            self._position_update_task = None
 
-        # Create a new task to update position every second
-        self._position_update_task = self.hass.async_create_task(
-            self._async_position_update_loop()
+        task_name = f"{DOMAIN} position update {self._blind_id}"
+        config_entry = (
+            self.hass.config_entries.async_get_entry(self._config_entry_id)
+            if self._config_entry_id is not None
+            else None
         )
+        if config_entry is not None:
+            task = config_entry.async_create_background_task(
+                self.hass,
+                self._async_position_update_loop(),
+                task_name,
+            )
+        else:
+            task = self.hass.async_create_background_task(
+                self._async_position_update_loop(), task_name
+            )
+        self._position_update_task = task
 
-    def _stop_position_tracking(self) -> None:
-        """Stop the position tracking task."""
-        if self._position_update_task and not self._position_update_task.done():
-            self._position_update_task.cancel()
-        self._position_update_task = None
+    def _stop_position_tracking(
+        self, reason: str = "position tracking stopped"
+    ) -> None:
+        """Request immediate cancellation from synchronous event handlers."""
+        task = self._position_update_task
+        if task is not None and not task.done():
+            task.cancel(reason)
+        if self._position_update_task is task:
+            self._position_update_task = None
 
     async def _async_position_update_loop(self) -> None:
         """Update position every 200ms internally, report to HA every 1 second."""
+        position_task = asyncio.current_task()
         try:
             ha_update_counter = 0
             while True:
@@ -776,7 +857,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                 device_id=self._command_device_id,
                             )
                         # Stop tracking loop
-                        self._position_update_task = None
                         # Leave opening/closing flags as-is until STOP to aid debugging
                         self._move_start_time = None
                         self._move_start_position = None
@@ -797,7 +877,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._device_name,
                         )
                         self._attr_current_cover_position = 0
-                        self._position_update_task = None
                         self._attr_is_opening = False
                         self._attr_is_closing = False
                         self._move_start_time = None
@@ -814,7 +893,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._device_name,
                         )
                         self._attr_current_cover_position = 100
-                        self._position_update_task = None
                         self._attr_is_opening = False
                         self._attr_is_closing = False
                         self._move_start_time = None
@@ -830,8 +908,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             _LOGGER.debug(
                 "Position tracking cancelled for device %s", self._device_name
             )
-            self._position_update_task = None
             raise
+        finally:
+            # A cancelled older loop must never clear its newer replacement.
+            if self._position_update_task is position_task:
+                self._position_update_task = None
 
     def _update_position(self) -> None:
         """Calculate and update the position based on travel time."""
@@ -903,6 +984,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             new_position=self._attr_current_cover_position,
             status="estimated",
         )
+        await self._async_cancel_position_tracking("new open command")
         self._start_position_tracking()
         self.async_write_ha_state()
         await self._api.control_blind(
@@ -933,6 +1015,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             new_position=self._attr_current_cover_position,
             status="estimated",
         )
+        await self._async_cancel_position_tracking("new close command")
         self._start_position_tracking()
         self.async_write_ha_state()
         await self._api.control_blind(
@@ -949,7 +1032,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
         previous_position = self._attr_current_cover_position
         self._position_update_source = "Home Assistant stop command"
-        self._stop_position_tracking()
+        await self._async_cancel_position_tracking("Home Assistant stop command")
         self._update_position()
         self._attr_is_opening = False
         self._attr_is_closing = False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import MappingProxyType
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.components.cover import ATTR_POSITION
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
@@ -501,9 +503,11 @@ async def test_cover_async_stop_cover(
     cover._attr_is_opening = True
     cover._attr_current_cover_position = 50
 
-    with patch.object(cover, "_stop_position_tracking"):
-        with patch.object(cover, "async_write_ha_state"):
-            await cover.async_stop_cover()
+    with (
+        patch.object(cover, "_async_cancel_position_tracking", new_callable=AsyncMock),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_stop_cover()
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
@@ -975,12 +979,24 @@ async def test_cover_registers_with_api(
     )
 
 
+def _pending_position_update_tasks() -> list[asyncio.Task[Any]]:
+    """Return live Schellenberg cover position tasks except this test task."""
+    current_task = asyncio.current_task()
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task is not current_task
+        and not task.done()
+        and task.get_name().startswith(f"{DOMAIN} position update")
+    ]
+
+
 @pytest.mark.asyncio
-async def test_cover_will_remove_from_hass(
+async def test_position_update_loop_cancelled_on_entity_removal(
     hass: HomeAssistant,
     mock_api: SchellenbergUsbApi,
 ) -> None:
-    """Test cover cleanup on removal."""
+    """Test entity removal awaits cancellation of a sleeping position loop."""
     cover = SchellenbergCover(
         api=mock_api,
         device_id="ABC123",
@@ -988,7 +1004,150 @@ async def test_cover_will_remove_from_hass(
         device_name="Test Cover",
     )
     cover.hass = hass
+    cover._attr_current_cover_position = 20
+    cover._attr_is_opening = True
+    cover._move_start_position = 20
+    cover._move_start_time = 0.0
+    cover._start_position_tracking()
+    task = cover._position_update_task
+    assert task is not None
 
-    with patch.object(cover, "_stop_position_tracking") as mock_stop:
-        await cover.async_will_remove_from_hass()
-        mock_stop.assert_called_once()
+    await cover.async_will_remove_from_hass()
+
+    assert task.done()
+    assert task.cancelled()
+    assert cover._position_update_task is None
+
+
+@pytest.mark.asyncio
+async def test_no_pending_position_tasks_after_config_entry_unload(
+    hass: HomeAssistant,
+    mock_config_entry: ConfigEntry,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test config-entry lifecycle cancellation leaves no coroutine pending."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+        config_entry_id=mock_config_entry.entry_id,
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = 50
+    cover._start_position_tracking()
+    task = cover._position_update_task
+    assert task is not None
+
+    await mock_config_entry._async_process_on_unload(hass)
+
+    assert task.done()
+    assert task.cancelled()
+    assert cover._position_update_task is None
+    assert _pending_position_update_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_position_loop_during_sleep_exits_cleanly(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test cancellation interrupts the loop while it is inside asyncio.sleep."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+    )
+    cover.hass = hass
+    sleep_started = asyncio.Event()
+
+    async def _sleep_until_cancelled(_delay: float) -> None:
+        sleep_started.set()
+        await asyncio.Future()
+
+    with patch(
+        "custom_components.schellenberg_usb.cover.asyncio.sleep",
+        new=_sleep_until_cancelled,
+    ):
+        cover._start_position_tracking()
+        task = cover._position_update_task
+        assert task is not None
+        await sleep_started.wait()
+        await cover._async_cancel_position_tracking("test cancellation during sleep")
+
+    assert task.done()
+    assert task.cancelled()
+    assert cover._position_update_task is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_commands_replace_loop_without_duplicates(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test repeated Open/Close/Stop commands keep at most one active loop."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = 50
+
+    with patch.object(cover, "async_write_ha_state"):
+        await cover.async_open_cover()
+        first_task = cover._position_update_task
+        assert first_task is not None
+
+        cover._handle_event(EVENT_STARTED_MOVING_UP)
+        assert cover._position_update_task is first_task
+        assert len(_pending_position_update_tasks()) == 1
+
+        await cover.async_close_cover()
+        second_task = cover._position_update_task
+        assert second_task is not None
+        assert second_task is not first_task
+        assert first_task.cancelling()
+        assert len(_pending_position_update_tasks()) == 1
+
+        await cover.async_stop_cover()
+
+    await asyncio.gather(first_task, second_task, return_exceptions=True)
+    assert cover._position_update_task is None
+    assert _pending_position_update_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_home_assistant_stop_cancels_position_loop_before_final_write(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the HA stop listener awaits the position loop without warnings."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+    )
+    cover.hass = hass
+    with (
+        patch.object(cover, "async_get_last_state", return_value=None),
+        patch("custom_components.schellenberg_usb.cover.async_dispatcher_connect"),
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        await cover.async_added_to_hass()
+
+    cover._start_position_tracking()
+    task = cover._position_update_task
+    assert task is not None
+
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+
+    assert task.done()
+    assert cover._position_update_task is None
+    assert _pending_position_update_tasks() == []
+    assert "still running after final writes shutdown stage" not in caplog.text
