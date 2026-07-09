@@ -145,7 +145,8 @@ async def test_teach_motor_sends_60_then_40_and_waits_for_each_ack(
         api._handle_message("t0")
         return True
 
-    api._wait_for_transmitter_idle = AsyncMock(side_effect=_complete_transmit)
+    wait_for_idle = AsyncMock(side_effect=_complete_transmit)
+    setattr(api, "_wait_for_transmitter_idle", wait_for_idle)
 
     with caplog.at_level("WARNING"):
         assert await api.teach_motor("0d", device_id="F2B8D5", source="developer_tools")
@@ -154,7 +155,7 @@ async def test_teach_motor_sends_60_then_40_and_waits_for_each_ack(
         b"ss0D9600000\r\n",
         b"ss0D9400000\r\n",
     ]
-    assert api._wait_for_transmitter_idle.await_args_list == [
+    assert wait_for_idle.await_args_list == [
         call("finishing motor teach phase teach_60"),
         call("finishing motor teach phase finish_40"),
     ]
@@ -183,12 +184,13 @@ async def test_raw_transmit_preserves_exact_protocol_slots(
     api._transport = mock_transport
     api._is_connected = True
     api._device_mode = "listening"
-    api._wait_for_transmitter_idle = AsyncMock(return_value=True)
+    wait_for_idle = AsyncMock(return_value=True)
+    setattr(api, "_wait_for_transmitter_idle", wait_for_idle)
 
     assert await api.send_raw_transmit(payload)
 
     mock_transport.write.assert_called_once_with(expected)
-    api._wait_for_transmitter_idle.assert_awaited_once_with("finishing raw RF transmit")
+    wait_for_idle.assert_awaited_once_with("finishing raw RF transmit")
 
 
 @pytest.mark.asyncio
@@ -222,7 +224,8 @@ async def test_raw_transmit_timeout_latches_busy_state(hass: HomeAssistant) -> N
     api._transport = mock_transport
     api._is_connected = True
     api._device_mode = "listening"
-    api._wait_for_transmitter_idle = AsyncMock(return_value=False)
+    wait_for_idle = AsyncMock(return_value=False)
+    setattr(api, "_wait_for_transmitter_idle", wait_for_idle)
 
     assert not await api.send_raw_transmit("ss109010000")
 

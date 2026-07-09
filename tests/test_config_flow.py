@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock, call, patch
+from uuid import UUID
 
 import pytest
 from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
+    SOURCE_USER,
     ConfigEntries,
     ConfigSubentry,
     ConfigSubentryFlow,
-    SOURCE_RECONFIGURE,
-    SOURCE_USER,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -23,10 +23,10 @@ from custom_components.schellenberg_usb.config_flow import (
     SchellenbergPairingSubentryFlow,
 )
 from custom_components.schellenberg_usb.const import (
-    CONF_BLIND_ID,
     CMD_DOWN,
     CMD_STOP,
     CMD_UP,
+    CONF_BLIND_ID,
     CONF_CLOSE_TIME,
     CONF_CLOSE_TIME_SECONDS,
     CONF_COMMAND_DEVICE_ID,
@@ -573,6 +573,7 @@ async def test_developer_tools_show_restored_startup_confidence() -> None:
         copy_result = await flow.async_step_copy_diagnostics()
 
     placeholders = result["description_placeholders"]
+    assert placeholders is not None
     assert placeholders["current_position"] == "75%"
     assert placeholders["position_source"] == "restored HA state"
     assert placeholders["position_confidence"] == (
@@ -580,7 +581,9 @@ async def test_developer_tools_show_restored_startup_confidence() -> None:
     )
     assert placeholders["position_confirmed_since_restart"] == "No"
 
-    diagnostics = copy_result["data_schema"]({})["diagnostics"]
+    data_schema = copy_result["data_schema"]
+    assert data_schema is not None
+    diagnostics = data_schema({})["diagnostics"]
     assert "Current estimated position: 75" in diagnostics
     assert "Source: restored HA state" in diagnostics
     assert (
@@ -681,6 +684,7 @@ async def test_developer_manual_position_form_uses_current_position_and_submits(
         result = await flow.async_step_set_position_manual({"position": 63})
 
     assert form["step_id"] == "set_position_manual"
+    assert form["data_schema"] is not None
     assert form["data_schema"]({})["position"] == 37
     assert form["description_placeholders"] == {
         "selected_blind": "Sitting room door",
@@ -688,6 +692,7 @@ async def test_developer_manual_position_form_uses_current_position_and_submits(
     }
     api.manual_sync_position.assert_called_once_with("F2B8D5", 63)
     assert result["step_id"] == "developer_tools"
+    assert result["description_placeholders"] is not None
     assert "confirmed at 63%" in result["description_placeholders"]["result"]
 
 
@@ -746,6 +751,7 @@ async def test_original_remote_discovery_saves_primary_secondary_and_provenance(
     assert form["step_id"] == "discover_status"
     assert confirmation["step_id"] == "confirm_status_discovery"
     placeholders = confirmation["description_placeholders"]
+    assert placeholders is not None
     assert placeholders["command_identity"] == "06C5C0/11"
     assert placeholders["primary_identity"] == "3720B8/08"
     assert placeholders["primary_commands"] == "01, 00, 02"
@@ -798,10 +804,9 @@ async def test_original_remote_discovery_keeps_status_unknown_when_unrecognized(
         confirmation = await flow.async_step_discover_status({})
         result = await flow.async_step_confirm_status_discovery({})
 
-    assert (
-        "No remote/status tracking identity"
-        in confirmation["description_placeholders"]["position_tracking"]
-    )
+    placeholders = confirmation["description_placeholders"]
+    assert placeholders is not None
+    assert "No remote/status tracking identity" in placeholders["position_tracking"]
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert CONF_STATUS_DEVICE_ID not in result["data"]
     assert CONF_STATUS_ENUM not in result["data"]
@@ -916,6 +921,7 @@ async def test_developer_raw_command_validates_and_uses_api() -> None:
         result = await flow.async_step_send_raw_command({"payload": "ss109010000"})
 
     assert form["step_id"] == "send_raw_command"
+    assert form["data_schema"] is not None
     assert form["data_schema"]({})["payload"] == "ss109010000"
     api.send_raw_transmit.assert_awaited_once_with(
         "ss109010000", source="developer_tools"

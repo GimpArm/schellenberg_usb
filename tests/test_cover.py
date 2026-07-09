@@ -184,29 +184,26 @@ async def test_setup_restores_manual_cover_from_persisted_subentry(
         source="user",
         unique_id="/dev/ttyUSB0",
         discovery_keys=MappingProxyType({}),
-        subentries_data=[
-            {
-                "subentry_id": "manual_blind",
-                "subentry_type": SUBENTRY_TYPE_BLIND,
-                "title": "Sitting room door",
-                "unique_id": "F2B8D5",
-                "data": {
-                    CONF_BLIND_ID: TEST_BLIND_ID,
-                    CONF_DEVICE_ID: "F2B8D5",
-                    CONF_DEVICE_ENUM: "23",
-                    CONF_COMMAND_DEVICE_ID: "F2B8D5",
-                    CONF_COMMAND_ENUM: command_enum,
-                    CONF_STATUS_DEVICE_ID: "3720B8",
-                    CONF_STATUS_ENUM: status_enum,
-                    CONF_SECONDARY_STATUS_IDENTITIES: [
-                        {"device_id": "F2B8D5", "enum": "23"}
-                    ],
-                    CONF_OPEN_TIME: 25.06,
-                    CONF_CLOSE_TIME: 23.05,
-                },
-            }
-        ],
+        subentries_data=None,
     )
+    subentry = MagicMock()
+    subentry.subentry_id = "manual_blind"
+    subentry.subentry_type = SUBENTRY_TYPE_BLIND
+    subentry.title = "Sitting room door"
+    subentry.unique_id = "F2B8D5"
+    subentry.data = {
+        CONF_BLIND_ID: TEST_BLIND_ID,
+        CONF_DEVICE_ID: "F2B8D5",
+        CONF_DEVICE_ENUM: "23",
+        CONF_COMMAND_DEVICE_ID: "F2B8D5",
+        CONF_COMMAND_ENUM: command_enum,
+        CONF_STATUS_DEVICE_ID: "3720B8",
+        CONF_STATUS_ENUM: status_enum,
+        CONF_SECONDARY_STATUS_IDENTITIES: [{"device_id": "F2B8D5", "enum": "23"}],
+        CONF_OPEN_TIME: 25.06,
+        CONF_CLOSE_TIME: 23.05,
+    }
+    entry.subentries = MappingProxyType({"manual_blind": subentry})  # type: ignore[misc]
     entry.runtime_data = mock_api
     hass.config_entries._entries[entry.entry_id] = entry
     add_entities = MagicMock()
