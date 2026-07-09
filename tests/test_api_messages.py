@@ -502,7 +502,9 @@ def test_manual_position_sync_dispatches_and_retains_last_confirmation(
         new_position=45,
         status="estimated",
     )
-    assert api.get_last_position_update("F2B8D5")["new_position"] == 45
+    latest_position_update = api.get_last_position_update("F2B8D5")
+    assert latest_position_update is not None
+    assert latest_position_update["new_position"] == 45
     assert api.get_last_manual_position_sync("F2B8D5") == manual_update
 
 
