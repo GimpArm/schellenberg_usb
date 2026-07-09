@@ -737,6 +737,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_opening = logical_opening
             self._attr_is_closing = not logical_opening
             self._move_start_time = time.monotonic()
+            if self._attr_current_cover_position is None:
+                self._attr_current_cover_position = 0
             self._move_start_position = self._attr_current_cover_position
             self._position_source_kind = "primary status"
             self._position_confirmed_since_restart = True

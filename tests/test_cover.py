@@ -12,8 +12,8 @@ from homeassistant.components.cover import ATTR_POSITION
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, State
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
@@ -728,6 +728,33 @@ async def test_cover_handle_started_moving_down(
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is True
     assert cover._move_start_position == 100
+
+
+@pytest.mark.asyncio
+async def test_cover_handle_started_moving_up_without_known_position_defaults_to_zero(
+    hass: HomeAssistant,
+    mock_api: SchellenbergUsbApi,
+) -> None:
+    """Test movement events default to a closed-start estimate when no prior position exists."""
+    cover = SchellenbergCover(
+        api=mock_api,
+        device_id="ABC123",
+        device_enum="01",
+        device_name="Test Cover",
+    )
+    cover.hass = hass
+    cover._attr_current_cover_position = None
+
+    with (
+        patch.object(cover, "_start_position_tracking") as start_tracking,
+        patch.object(cover, "async_write_ha_state"),
+    ):
+        cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    assert cover._move_start_position == 0
+    start_tracking.assert_called_once_with()
 
 
 @pytest.mark.asyncio
