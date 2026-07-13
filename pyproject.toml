@@ -14,7 +14,7 @@ dev = [
 ]
 
 test = [
-    "croniter~=6.0.0",
+    "croniter~=6.2.4",
     "watchdog~=6.0.0",
     "mock-open~=1.4.0",
     "polyfactory~=3.1.0",
