@@ -18,7 +18,7 @@ test = [
     "watchdog~=6.0.0",
     "mock-open~=1.4.0",
     "polyfactory~=3.1.0",
-    "PyYAML~=6.0.2",
+    "PyYAML~=6.0.3",
     # Need specific versions
     "pytest-homeassistant-custom-component==0.13.299",
     # Versions handled by pytest-homeassistant-custom-component
