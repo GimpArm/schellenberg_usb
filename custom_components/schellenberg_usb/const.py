@@ -13,13 +13,20 @@ if TYPE_CHECKING:
 DOMAIN = "schellenberg_usb"
 
 # Type alias for config entry with runtime data
+#
+# NOTE: the `type X = Y` syntax below is a PEP 695 type alias statement,
+# available only on Python 3.12+ (it raises SyntaxError on 3.11 and
+# earlier). Home Assistant's own minimum supported Python version already
+# satisfies this, but it means this file (and identities.py /
+# options_flow_calibration.py, which use the same syntax) cannot be
+# parsed or imported by a 3.11 interpreter, e.g. in a dev/test tool that
+# pins an older Python.
 type SchellenbergConfigEntry = ConfigEntry[SchellenbergUsbApi]
 
 # Platform for the cover entities
 PLATFORMS = ["cover", "sensor", "switch"]
 
 # Subentry types
-SUBENTRY_TYPE_LED = "led"
 SUBENTRY_TYPE_HUB = "hub"
 SUBENTRY_TYPE_BLIND = "blind"
 
@@ -43,12 +50,17 @@ CONF_INVERT_DIRECTION = "invert_direction"
 CONF_COMMAND = "command"
 CONF_ENUM = "enum"
 CONF_CONFIG_ENTRY_ID = "config_entry_id"
+# Form field keys for the manual/edit config-subentry steps only. The values
+# entered under these keys are converted to float seconds and stored under
+# the *different* keys CONF_OPEN_TIME / CONF_CLOSE_TIME below (defined near
+# the other calibration constants) once they land in subentry.data - the
+# "_SECONDS" suffix marks these as the schema/form field names, not the
+# storage keys. Kept separate rather than merged into a single constant
+# because the manual/edit forms and the calibration flow serialize the same
+# quantity slightly differently; see cover.py and options_flow_calibration.py
+# for the read side.
 CONF_OPEN_TIME_SECONDS = "open_time_seconds"
 CONF_CLOSE_TIME_SECONDS = "close_time_seconds"
-
-# Data keys
-DATA_API_INSTANCE = "api_instance"
-DATA_UNSUB_DISPATCHER = "unsub_dispatcher"
 
 # Device commands (Schellenberg protocol) - for controlling devices
 CMD_STOP = "00"  # 0x00 - Stop
@@ -61,11 +73,6 @@ CMD_PAIR = "60"  # 0x60 - Pair with device / Change rotation direction
 CMD_SET_UPPER_ENDPOINT = "61"  # 0x61 - Set upper endpoint
 CMD_SET_LOWER_ENDPOINT = "62"  # 0x62 - Set lower endpoint
 
-# Sensor status codes
-SENSOR_WINDOW_HANDLE_0 = "1A"  # 0x1A - Window handle at 0°
-SENSOR_WINDOW_HANDLE_90 = "1B"  # 0x1B - Window handle at 90°
-SENSOR_WINDOW_HANDLE_180 = "3B"  # 0x3B - Window handle at 180°
-
 # Motor events from stick (same as some commands)
 EVENT_STARTED_MOVING_UP = "01"
 EVENT_STARTED_MOVING_DOWN = "02"
@@ -75,7 +82,6 @@ EVENT_STOPPED = "00"
 CMD_VERIFY = "!?"  # Get version and current mode
 CMD_ENTER_BOOTLOADER = "!B"  # Enter B:0 bootloader mode
 CMD_ENTER_INITIAL = "!G"  # Enter B:1 initial mode
-CMD_GET_TRANSCEIVER = "!F"  # Get transceiver info (Si446x)
 CMD_REBOOT = "!R"  # Reboot device (only in B:0)
 CMD_ECHO_ON = "!E1"  # Enable local echo
 CMD_ECHO_OFF = "!E0"  # Disable local echo
@@ -94,19 +100,12 @@ CMD_LED_BLINK_8 = "so8"  # Blink LED 8 times
 CMD_LED_BLINK_9 = "so9"  # Blink LED 9 times
 CMD_GET_DEVICE_ID = "sr"  # Get device ID
 CMD_GET_PARAM_P = "sp"  # Get parameters P
-CMD_GET_PARAM_Q = "sq"  # Get parameters Q
-CMD_GET_PARAM_V = "sv"  # Get parameters V
-CMD_GET_PARAM_W = "sw"  # Get parameters W
-CMD_GET_SG = "sg"  # Unknown function
 
 # Command prefixes
 CMD_TRANSMIT = "ss"  # Schellenberg transmit prefix for device commands
 
 # Dispatcher signals
 SIGNAL_DEVICE_EVENT = f"{DOMAIN}_device_event"
-SIGNAL_DEVICE_PAIRED = f"{DOMAIN}_device_paired"
-SIGNAL_PAIRING_STARTED = f"{DOMAIN}_pairing_started"
-SIGNAL_PAIRING_TIMEOUT = f"{DOMAIN}_pairing_timeout"
 SIGNAL_STICK_STATUS_UPDATED = f"{DOMAIN}_stick_status_updated"
 SIGNAL_CALIBRATION_COMPLETED = f"{DOMAIN}_calibration_completed"
 SIGNAL_MANUAL_POSITION_SYNC = f"{DOMAIN}_manual_position_sync"
@@ -126,6 +125,18 @@ STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 
 # Calibration constants
 CALIBRATION_TIMEOUT = 300  # Maximum 5 minutes (300 seconds) for calibration
+# Fallback travel time (seconds) used whenever a blind has no calibrated/manual
+# open or close time yet. Shared by cover.py (runtime default) and
+# config_flow.py (form defaults shown before a blind has been calibrated) so
+# both stay in sync instead of each hardcoding the same literal separately.
+DEFAULT_TRAVEL_TIME_SECONDS = 60.0
+# Storage keys actually persisted in subentry.data (see CONF_OPEN_TIME_SECONDS
+# / CONF_CLOSE_TIME_SECONDS above for the corresponding form field keys).
 CONF_OPEN_TIME = "open_time"  # Time it takes to open (up) in seconds
 CONF_CLOSE_TIME = "close_time"  # Time it takes to close (down) in seconds
-CONF_DEVICE_ID = "device_id"  # Device ID for calibration
+# Legacy top-level command-device-ID key from before CONF_COMMAND_DEVICE_ID
+# and the separate status identity existed. Despite living in this
+# "calibration constants" block (for historical reasons), it is read as a
+# fallback throughout config_flow.py and cover.py, not just during
+# calibration - see e.g. cover.py's legacy_device_id handling.
+CONF_DEVICE_ID = "device_id"

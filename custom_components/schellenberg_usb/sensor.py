@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -91,6 +92,12 @@ class SchellenbergConnectionSensor(SchellenbergBaseSensor):
     """Sensor for USB stick connection status."""
 
     _attr_translation_key = "connection_status"
+    # ENUM + a translated "state" block in strings.json/translations means the
+    # displayed text now follows the user's configured HA language instead of
+    # always being the hardcoded English word, matching the rest of the
+    # integration (which already ships de/en/es/fr).
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options: ClassVar[list[str]] = ["connected", "disconnected"]
 
     def __init__(self, api: SchellenbergUsbApi, entry: SchellenbergConfigEntry) -> None:
         """Initialize the connection sensor."""
@@ -100,7 +107,7 @@ class SchellenbergConnectionSensor(SchellenbergBaseSensor):
     @property
     def native_value(self) -> str:
         """Return the connection status."""
-        return "Connected" if self.api.is_connected else "Disconnected"
+        return "connected" if self.api.is_connected else "disconnected"
 
     @property
     def icon(self) -> str:
@@ -133,6 +140,14 @@ class SchellenbergModeSensor(SchellenbergBaseSensor):
     """Sensor for USB stick operating mode."""
 
     _attr_translation_key = "operating_mode"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options: ClassVar[list[str]] = [
+        "bootloader",
+        "initial",
+        "listening",
+        "pairing",
+        "unknown",
+    ]
 
     def __init__(self, api: SchellenbergUsbApi, entry: SchellenbergConfigEntry) -> None:
         """Initialize the mode sensor."""
@@ -141,11 +156,8 @@ class SchellenbergModeSensor(SchellenbergBaseSensor):
 
     @property
     def native_value(self) -> str | None:
-        """Return the operating mode."""
-        mode = self.api.device_mode
-        if mode:
-            return mode.capitalize()
-        return None
+        """Return the operating mode (a raw api.device_mode value, or None)."""
+        return self.api.device_mode
 
     @property
     def icon(self) -> str:

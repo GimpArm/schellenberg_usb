@@ -64,8 +64,8 @@ def parse_status_identities_text(value: object) -> tuple[StatusIdentity, ...]:
     if not text:
         return ()
     identities: list[StatusIdentity] = []
-    for token in re.split(r"[,;\n]+", text):
-        token = token.strip()
+    for raw_token in re.split(r"[,;\n]+", text):
+        token = raw_token.strip()
         if not token:
             continue
         match = _STATUS_IDENTITY_PATTERN.fullmatch(token)

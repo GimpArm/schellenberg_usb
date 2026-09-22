@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, cast
+from collections.abc import Awaitable
+from typing import Any, cast
 
 import serial  # NOTE: blocking open used only to sanity-check connectivity
 import voluptuous as vol
@@ -15,9 +16,11 @@ from homeassistant.config_entries import (
     SubentryFlowResult,
 )
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers import selector
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
+from .api import check_serial_port
 from .blind_id import generate_blind_id
 from .const import (
     CMD_DOWN,
@@ -40,6 +43,7 @@ from .const import (
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
     CONF_STATUS_IDENTITY_SOURCE,
+    DEFAULT_TRAVEL_TIME_SECONDS,
     DOMAIN,
     STATUS_IDENTITY_SOURCE_CALIBRATION,
     STATUS_IDENTITY_SOURCE_MANUAL,
@@ -60,19 +64,26 @@ from .options_flow_calibration import CalibrationFlowHandler
 
 _LOGGER = logging.getLogger(__name__)
 
-DEVELOPER_TOOLS_MENU_OPTIONS = {
-    "test_open": "Test Open",
-    "test_close": "Test Close",
-    "test_stop": "Test Stop",
-    "discover_status": "Discover status from original remote",
-    "set_position_open": "Set position fully open",
-    "set_position_closed": "Set position fully closed",
-    "set_position_manual": "Set position manually",
-    "teach_motor": "Teach motor / activate USB transmitter",
-    "send_raw_command": "Send raw RF payload",
-    "reset_stick": "Reset stick / reconnect serial",
-    "copy_diagnostics": "Copy diagnostics",
-}
+# A plain list of step ids - NOT a dict. async_show_menu() resolves a
+# list's labels from strings.json/translations for every language this
+# integration ships (de/en/es/fr), the same way every other menu in this
+# file does. A dict (the previous form of this constant) is displayed with
+# its *values* used verbatim as hardcoded, untranslated English labels,
+# which silently ignored the fully translated de/es/fr menu_options that
+# already existed for this exact step in every strings/translation file.
+DEVELOPER_TOOLS_MENU_OPTIONS = [
+    "test_open",
+    "test_close",
+    "test_stop",
+    "discover_status",
+    "set_position_open",
+    "set_position_closed",
+    "set_position_manual",
+    "reset_stick",
+    "copy_diagnostics",
+    "teach_motor",
+    "send_raw_command",
+]
 
 
 class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -104,17 +115,6 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovered_unique: str | None = None
 
     # -------------------------
-    # MENU FLOW (Hub only)
-    # -------------------------
-    async def async_step_menu(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show menu to set up hub."""
-        # For now, only allow setting up the hub through the user flow
-        # Device pairing is handled through the subentry flow
-        return await self.async_step_user()
-
-    # -------------------------
     # USER-INITIATED FLOW
     # -------------------------
     async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
@@ -123,10 +123,7 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             port = user_input[CONF_SERIAL_PORT]
             try:
-                # Quick, blocking sanity check that the port is reachable.
-                serial_conn = serial.Serial(port)
-
-                serial_conn.close()
+                await self.hass.async_add_executor_job(check_serial_port, port)
 
                 # Use the port path as the unique ID when set up manually.
                 await self.async_set_unique_id(port, raise_on_progress=False)
@@ -138,6 +135,11 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except serial.SerialException:
                 errors["base"] = "cannot_connect"
                 _LOGGER.error("Failed to connect to serial port %s", port)
+            except AbortFlow:
+                # _abort_if_unique_id_configured() signals "already
+                # configured" by raising this - let it propagate instead of
+                # it being swallowed as an "unknown error" below.
+                raise
             except Exception:
                 errors["base"] = "unknown"
                 _LOGGER.exception("An unexpected error occurred")
@@ -149,7 +151,8 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # -------------------------
     async def async_step_usb(self, discovery_info: UsbServiceInfo) -> ConfigFlowResult:
         """Handle discovery from the USB subsystem."""
-        # Try to get the most stable unique identifier we can (serial number if present).
+        # Try to get the most stable unique identifier we can (serial
+        # number if present).
         unique = getattr(discovery_info, "serial_number", None) or (
             f"{getattr(discovery_info, 'vid', 'unknown')}:"
             f"{getattr(discovery_info, 'pid', 'unknown')}:"
@@ -172,7 +175,8 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             updates={CONF_SERIAL_PORT: port} if port else None
         )
 
-        # Ask for confirmation (and allow editing the port if the host maps it differently)
+        # Ask for confirmation (and allow editing the port if the host
+        # maps it differently)
         return await self.async_step_usb_confirm()
 
     async def async_step_usb_confirm(
@@ -181,16 +185,16 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Confirm USB-discovered device and create the entry."""
         errors: dict[str, str] = {}
 
-        # If we don’t have a port path, let the user supply one.
+        # If we don't have a port path, let the user supply one.
         default_port = self._discovered_port or "/dev/ttyUSB0"
 
         if user_input is not None:
             port = user_input[CONF_SERIAL_PORT]
             try:
-                serial_conn = serial.Serial(port)
-                serial_conn.close()
+                await self.hass.async_add_executor_job(check_serial_port, port)
 
-                # unique_id was already set in async_step_usb(), re-assert and create the entry
+                # unique_id was already set in async_step_usb(),
+                # re-assert and create the entry
                 await self.async_set_unique_id(
                     self._discovered_unique, raise_on_progress=False
                 )
@@ -203,6 +207,10 @@ class SchellenbergUsbConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except serial.SerialException:
                 errors["base"] = "cannot_connect"
                 _LOGGER.error("Failed to connect to serial port %s", port)
+            except AbortFlow:
+                # Same reasoning as async_step_user(): don't let the abort
+                # signal be swallowed as an "unknown error" below.
+                raise
             except Exception:
                 errors["base"] = "unknown"
                 _LOGGER.exception("An unexpected error occurred during USB confirm")
@@ -694,7 +702,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 step_id="name_device",
                 data_schema=vol.Schema(
                     {
-                        vol.Optional("device_name"): selector.TextSelector(),
+                        vol.Optional(CONF_DEVICE_NAME): selector.TextSelector(),
                     }
                 ),
                 description_placeholders={
@@ -706,7 +714,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         if not device_id or not device_enum:
             return self.async_abort(reason="pairing_failed")
 
-        device_name = user_input.get("device_name") or f"Blind {device_id}"
+        device_name = user_input.get(CONF_DEVICE_NAME) or f"Blind {device_id}"
         self._pending_device_name = device_name
 
         handler = self._get_calibration_handler()
@@ -805,7 +813,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "\n".join(
                 f"{frame.get('time', '--')} "
                 f"{frame.get('device_id', 'Unknown')}/{frame.get('enum', '--')} "
-                f"cmd={frame.get('command', '--')} phase={frame.get('phase', 'unknown')}"
+                f"cmd={frame.get('command', '--')} "
+                f"phase={frame.get('phase', 'unknown')}"
                 for frame in calibration_frames
                 if isinstance(frame, dict)
             )
@@ -836,8 +845,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             ),
             "status_identities": status_identities,
             "invert_direction": bool(data.get(CONF_INVERT_DIRECTION, False)),
-            "open_time": float(data.get(CONF_OPEN_TIME, 60.0)),
-            "close_time": float(data.get(CONF_CLOSE_TIME, 60.0)),
+            "open_time": float(data.get(CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME_SECONDS)),
+            "close_time": float(data.get(CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME_SECONDS)),
             "last_calibration_time": str(last_calibration.get("completed_at", "Never")),
             "calibration_end_reason": str(
                 last_calibration.get("end_reason", "Not recorded")
@@ -1615,23 +1624,33 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         subentry = self._get_reconfigure_subentry()
         data = subentry.data
         self._pending_device_name = subentry.title
+        # Normalized the same way as _prepare_existing_status_discovery()
+        # below, so both entry points into the short command test present
+        # identities consistently regardless of the case they happen to be
+        # stored in.
         self._pending_device_id = str(
             data.get(CONF_COMMAND_DEVICE_ID) or data.get(CONF_DEVICE_ID, "")
-        )
-        self._pending_device_enum = str(
-            data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, "")
+        ).upper()
+        self._pending_device_enum = (
+            str(data.get(CONF_COMMAND_ENUM) or data.get(CONF_DEVICE_ENUM, ""))
+            .upper()
+            .zfill(2)
         )
         self._pending_status_device_id = str(
             data.get(CONF_STATUS_DEVICE_ID) or self._pending_device_id
-        )
+        ).upper()
         self._pending_status_enum = str(
             data.get(CONF_STATUS_ENUM) or self._pending_device_enum
-        )
+        ).upper()
         self._pending_secondary_status_identities = serialize_status_identities(
             normalize_status_identities(data.get(CONF_SECONDARY_STATUS_IDENTITIES))
         )
-        self._pending_open_time = float(data.get(CONF_OPEN_TIME, 60.0))
-        self._pending_close_time = float(data.get(CONF_CLOSE_TIME, 60.0))
+        self._pending_open_time = float(
+            data.get(CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME_SECONDS)
+        )
+        self._pending_close_time = float(
+            data.get(CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME_SECONDS)
+        )
         self._pending_invert_direction = bool(data.get(CONF_INVERT_DIRECTION, False))
         self._pairing_workflow = "existing"
         return await self.async_step_test_motor(user_input)
@@ -1793,7 +1812,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                     ),
                     vol.Required(
                         CONF_OPEN_TIME_SECONDS,
-                        default=current_data.get(CONF_OPEN_TIME, 60.0),
+                        default=current_data.get(
+                            CONF_OPEN_TIME, DEFAULT_TRAVEL_TIME_SECONDS
+                        ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,
@@ -1804,7 +1825,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                     ),
                     vol.Required(
                         CONF_CLOSE_TIME_SECONDS,
-                        default=current_data.get(CONF_CLOSE_TIME, 60.0),
+                        default=current_data.get(
+                            CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME_SECONDS
+                        ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,

@@ -9,19 +9,16 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import (
-    ConfigFlowResult,
     ConfigSubentryFlow,
-    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
-from homeassistant.helpers.storage import Store
 
-from .blind_id import generate_blind_id, normalize_blind_id
 from .api import SchellenbergUsbApi
+from .blind_id import generate_blind_id, normalize_blind_id
 from .const import (
     CALIBRATION_TIMEOUT,
     CONF_BLIND_ID,
@@ -48,17 +45,22 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
-STORAGE_KEY = "schellenberg_usb_devices"  # Must match __init__.py
-
-# Type alias for flow results that work with both OptionsFlow and ConfigSubentryFlow
-FlowResult = ConfigFlowResult | SubentryFlowResult
+# Type alias for the subentry flow step results this handler returns.
+type FlowResult = SubentryFlowResult
 
 
 class CalibrationFlowHandler:
-    """Handle calibration options flow steps."""
+    """Handle calibration steps shared by the blind config-subentry flow.
 
-    def __init__(self, flow: OptionsFlow | ConfigSubentryFlow) -> None:
+    This is only ever constructed by SchellenbergPairingSubentryFlow
+    (config_flow.py), never by SchellenbergOptionsFlowHandler
+    (options_flow.py) - hub options only edit the serial port and do not
+    calibrate. `flow` is therefore always a ConfigSubentryFlow, not a plain
+    OptionsFlow, and code here can rely on ConfigSubentryFlow-only methods
+    such as `_get_entry()`/`_get_reconfigure_subentry()`.
+    """
+
+    def __init__(self, flow: ConfigSubentryFlow) -> None:
         """Initialize the calibration flow handler."""
         self.flow = flow
         self._selected_device: dict[str, Any] | None = None
@@ -81,13 +83,8 @@ class CalibrationFlowHandler:
         self._pending_invert_direction = False
 
     def _runtime_api(self) -> SchellenbergUsbApi | None:
-        """Return the loaded hub API when this flow has one."""
-        entry = None
-        get_entry = getattr(self.flow, "_get_entry", None)
-        if callable(get_entry):
-            entry = get_entry()
-        if entry is None:
-            entry = getattr(self.flow, "config_entry", None)
+        """Return the loaded hub API for this subentry flow's parent entry."""
+        entry = self.flow._get_entry()
         api = getattr(entry, "runtime_data", None)
         return api if isinstance(api, SchellenbergUsbApi) else None
 
@@ -147,8 +144,12 @@ class CalibrationFlowHandler:
             return None
         return {
             **self._calibration_discovery_result,
-            "open_time": round(self._open_time, 2) if self._open_time else None,
-            "close_time": round(self._close_time, 2) if self._close_time else None,
+            "open_time": (
+                round(self._open_time, 2) if self._open_time is not None else None
+            ),
+            "close_time": (
+                round(self._close_time, 2) if self._close_time is not None else None
+            ),
         }
 
     def _calibration_summary_placeholders(self) -> dict[str, str]:
@@ -188,114 +189,9 @@ class CalibrationFlowHandler:
             "observed_frame_count": str(len(result.get("frames", []))),
         }
 
-    async def set_device_by_id(self, device_id: str) -> None:
-        """Set the device to calibrate by its ID.
-
-        Used by reconfigure flow to directly set the device without selection.
-        """
-        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
-        stored_data = await storage.async_load() or {"devices": []}
-        devices = stored_data.get("devices", [])
-        self._selected_device = next((d for d in devices if d["id"] == device_id), None)
-
-        # Fallback: if device not present in storage yet, build minimal record
-        if self._selected_device is None:
-            # Attempt to derive name from subentry (OptionsFlow context has config_entry)
-            # We access the config entry via flow.config_entry and search its subentries.
-            try:
-                entry = getattr(self.flow, "config_entry", None)
-                if entry is not None:
-                    subentry = next(
-                        (
-                            s
-                            for s in entry.subentries.values()
-                            if s.data.get("device_id") == device_id
-                        ),
-                        None,
-                    )
-                    if subentry is not None:
-                        self._selected_device = {
-                            "id": device_id,
-                            "name": subentry.title or f"Blind {device_id}",
-                            # Calibration times unknown at this point
-                            CONF_OPEN_TIME: None,
-                            CONF_CLOSE_TIME: None,
-                        }
-            except Exception:  # noqa: BLE001
-                # Leave _selected_device as None; caller will abort appropriately
-                _LOGGER.debug(
-                    "Fallback subentry lookup failed for device %s", device_id
-                )
-
     def set_selected_device(self, device: dict[str, Any]) -> None:
         """Public setter to assign selected device without storage lookup."""
         self._selected_device = device
-
-    async def async_step_calibration_after_pairing(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Start calibration for a newly paired device.
-
-        This step bypasses device selection and goes straight to calibration
-        confirmation for the device that was just paired.
-        """
-        pairing_handler = getattr(self.flow, "pairing_handler", None)
-        if pairing_handler is None:
-            return await self.async_step_calibration()
-
-        device_id = pairing_handler.get_last_paired_device_id()
-
-        if device_id is None:
-            # Fallback to regular calibration if no device ID available
-            return await self.async_step_calibration()
-
-        # Load paired devices from storage to get device details
-        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
-        stored_data = await storage.async_load() or {"devices": []}
-        devices = stored_data.get("devices", [])
-
-        # Find the newly paired device
-        self._selected_device = next((d for d in devices if d["id"] == device_id), None)
-
-        if self._selected_device is None:
-            # Device not found, abort
-            return self.flow.async_abort(reason="device_not_found")
-
-        # Proceed directly to calibration close step
-        return await self.async_step_calibration_close()
-
-    async def async_step_calibration(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Select a device to calibrate."""
-        # Load paired devices from storage
-        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
-        stored_data = await storage.async_load() or {"devices": []}
-        devices = stored_data.get("devices", [])
-
-        if not devices:
-            return self.flow.async_abort(reason="no_devices")
-
-        if user_input is not None:
-            # User selected a device
-            device_id = user_input[CONF_DEVICE_ID]
-            self._selected_device = next(
-                (d for d in devices if d["id"] == device_id), None
-            )
-            if self._selected_device is None:
-                return self.flow.async_abort(reason="device_not_found")
-            return await self.async_step_calibration_close()
-
-        # Show device selection form
-        device_options = {device["id"]: device["name"] for device in devices}
-        return self.flow.async_show_form(
-            step_id="calibration",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_DEVICE_ID): vol.In(device_options),
-                }
-            ),
-        )
 
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
@@ -360,8 +256,10 @@ class CalibrationFlowHandler:
                     last_step=False,
                 )
 
-            # Start timing the open movement
-            self._calibration_start_time = time.time()
+            # Start timing the open movement. Monotonic, not wall-clock: an
+            # NTP correction or manual clock change during the up-to-5-minute
+            # calibration window must not corrupt the measured travel time.
+            self._calibration_start_time = time.monotonic()
 
             # Wait for device to stop moving
             stop_ok = await self._wait_for_stop_event()
@@ -378,15 +276,30 @@ class CalibrationFlowHandler:
                     last_step=False,
                 )
 
-            # Record the open time
-            self._open_time = time.time() - self._calibration_start_time
+            # Record the open time. Floor it well above zero: on a very fast
+            # motor (or if the start/stop events land in the same clock
+            # tick) this could otherwise measure as 0.0, which would later
+            # divide-by-zero when cover.py uses it to compute position
+            # during movement.
+            self._open_time = max(
+                time.monotonic() - self._calibration_start_time, 0.1
+            )
             _LOGGER.debug("Calibration open_time: %s seconds", self._open_time)
             self._set_calibration_capture_phase("idle_between_legs")
 
             # Move to close instruction step
             return await self.async_step_calibration_close_instruction()
 
-        except Exception:  # noqa: BLE001
+        except asyncio.CancelledError:
+            # The flow itself was cancelled (e.g. HA shutting down, or the
+            # user abandoning the wizard) while awaiting movement/stop
+            # events. Still close out the capture window before propagating
+            # the cancellation, otherwise it is left "active" forever and
+            # the next status-discovery attempt fails with a busy error
+            # until something else happens to supersede it.
+            self._finish_calibration_capture("opening_cancelled")
+            raise
+        except Exception:
             self._finish_calibration_capture("opening_error")
             errors["base"] = "unknown"
             return self.flow.async_show_form(
@@ -442,8 +355,9 @@ class CalibrationFlowHandler:
                     last_step=False,
                 )
 
-            # Start timing the close movement
-            self._calibration_start_time = time.time()
+            # Start timing the close movement (see the open-instruction step
+            # for why this uses monotonic rather than wall-clock time).
+            self._calibration_start_time = time.monotonic()
 
             # Wait for device to stop moving
             stop_ok = await self._wait_for_stop_event()
@@ -460,8 +374,10 @@ class CalibrationFlowHandler:
                     last_step=False,
                 )
 
-            # Record the close time
-            self._close_time = time.time() - self._calibration_start_time
+            # Record the close time (see the open_time floor above for why).
+            self._close_time = max(
+                time.monotonic() - self._calibration_start_time, 0.1
+            )
             _LOGGER.debug("Calibration close_time: %s seconds", self._close_time)
             self._finish_calibration_capture("completed")
             self._apply_calibration_status_candidates()
@@ -469,7 +385,13 @@ class CalibrationFlowHandler:
             # Move to completion step
             return await self.async_step_calibration_complete()
 
-        except Exception:  # noqa: BLE001
+        except asyncio.CancelledError:
+            # See the matching comment in the open-instruction step: always
+            # close out the capture window before the cancellation
+            # propagates.
+            self._finish_calibration_capture("closing_cancelled")
+            raise
+        except Exception:
             self._finish_calibration_capture("closing_error")
             errors["base"] = "unknown"
             return self.flow.async_show_form(
@@ -494,13 +416,15 @@ class CalibrationFlowHandler:
             return self.flow.async_abort(reason="device_not_found")
 
         if user_input is not None:
-            # User confirmed completion - save calibration data
-            await self._save_calibration_data(self._open_time, self._close_time)
+            # User confirmed completion - notify the live entity. The actual
+            # open/close times are persisted below via async_create_entry /
+            # async_update_and_abort (the config subentry, not ad-hoc storage).
+            await self._notify_calibration_completed(self._open_time, self._close_time)
 
-            # If pairing flow requested creation after calibration, create subentry entry now.
+            # If pairing flow requested creation after calibration,
+            # create subentry entry now.
             if (
-                not isinstance(self.flow, OptionsFlow)
-                and self._create_subentry_after_calibration
+                self._create_subentry_after_calibration
                 and self._pending_device_id
                 and self._pending_device_enum
                 and self._pending_device_name
@@ -530,49 +454,44 @@ class CalibrationFlowHandler:
                     )
                 if calibration_record := self._calibration_record():
                     data[CONF_LAST_CALIBRATION] = calibration_record
-                return self.flow.async_create_entry(  # type: ignore[attr-defined]
+                return self.flow.async_create_entry(
                     title=self._pending_device_name,
                     data=data,
                     unique_id=self._pending_device_id,
                 )
 
-            # Options flow: create empty entry to finish
-            if isinstance(self.flow, OptionsFlow):
-                return self.flow.async_create_entry(title="", data={})
-
-            if isinstance(self.flow, ConfigSubentryFlow):
-                data_updates: dict[str, Any] = {
-                    CONF_OPEN_TIME: round(self._open_time, 2),
-                    CONF_CLOSE_TIME: round(self._close_time, 2),
-                }
-                if calibration_record := self._calibration_record():
-                    data_updates[CONF_LAST_CALIBRATION] = calibration_record
-                if (
-                    self._pending_status_device_id is not None
-                    and self._pending_status_enum is not None
-                    and self._pending_status_identity_source
-                    == STATUS_IDENTITY_SOURCE_CALIBRATION
-                ):
-                    data_updates.update(
-                        {
-                            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
-                            CONF_STATUS_ENUM: self._pending_status_enum,
-                            CONF_STATUS_IDENTITY_SOURCE: (
-                                STATUS_IDENTITY_SOURCE_CALIBRATION
-                            ),
-                            CONF_SECONDARY_STATUS_IDENTITIES: list(
-                                self._pending_secondary_status_identities
-                            ),
-                        }
-                    )
-                return self.flow.async_update_and_abort(
-                    self.flow._get_entry(),
-                    self.flow._get_reconfigure_subentry(),
-                    data_updates=data_updates,
+            # Otherwise this is a recalibration of an already-existing blind
+            # subentry (self.flow is always a ConfigSubentryFlow; see the
+            # class docstring).
+            data_updates: dict[str, Any] = {
+                CONF_OPEN_TIME: round(self._open_time, 2),
+                CONF_CLOSE_TIME: round(self._close_time, 2),
+            }
+            if calibration_record := self._calibration_record():
+                data_updates[CONF_LAST_CALIBRATION] = calibration_record
+            if (
+                self._pending_status_device_id is not None
+                and self._pending_status_enum is not None
+                and self._pending_status_identity_source
+                == STATUS_IDENTITY_SOURCE_CALIBRATION
+            ):
+                data_updates.update(
+                    {
+                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
+                        CONF_STATUS_ENUM: self._pending_status_enum,
+                        CONF_STATUS_IDENTITY_SOURCE: (
+                            STATUS_IDENTITY_SOURCE_CALIBRATION
+                        ),
+                        CONF_SECONDARY_STATUS_IDENTITIES: list(
+                            self._pending_secondary_status_identities
+                        ),
+                    }
                 )
-
-            # Fallback: abort with success if no creation path triggered
-            return self.flow.async_abort(reason="reconfigure_successful")
+            return self.flow.async_update_and_abort(
+                self.flow._get_entry(),
+                self.flow._get_reconfigure_subentry(),
+                data_updates=data_updates,
+            )
 
         return self.flow.async_show_form(
             step_id="calibration_complete",
@@ -590,7 +509,8 @@ class CalibrationFlowHandler:
         """Wait for the device to start moving.
 
         Args:
-            event_type: The event type to wait for (EVENT_STARTED_MOVING_UP or EVENT_STARTED_MOVING_DOWN)
+            event_type: The event type to wait for
+                (EVENT_STARTED_MOVING_UP or EVENT_STARTED_MOVING_DOWN)
 
         Returns:
             True if movement start event received, False if timeout.
@@ -599,14 +519,13 @@ class CalibrationFlowHandler:
             return False
         device_id = self._selected_device["id"]
         self._start_event = asyncio.Event()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Set up listener for movement start events
         def handle_device_event(command: str) -> None:
             """Handle device event."""
-            if command == event_type:
-                if self._start_event:
-                    loop.call_soon_threadsafe(self._start_event.set)
+            if command == event_type and self._start_event:
+                loop.call_soon_threadsafe(self._start_event.set)
 
         # Subscribe to device events
         self._event_listener_unsub = async_dispatcher_connect(
@@ -641,14 +560,13 @@ class CalibrationFlowHandler:
             return False
         device_id = self._selected_device["id"]
         self._stop_event = asyncio.Event()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Set up listener for stop events
         def handle_device_event(command: str) -> None:
             """Handle device event."""
-            if command == EVENT_STOPPED:
-                if self._stop_event:
-                    loop.call_soon_threadsafe(self._stop_event.set)
+            if command == EVENT_STOPPED and self._stop_event:
+                loop.call_soon_threadsafe(self._stop_event.set)
 
         # Subscribe to device events
         self._event_listener_unsub = async_dispatcher_connect(
@@ -671,26 +589,16 @@ class CalibrationFlowHandler:
                 self._event_listener_unsub = None
             self._stop_event = None
 
-    async def _save_calibration_data(self, open_time: float, close_time: float) -> None:
-        """Save calibration times to device storage and set cover position.
+    async def _notify_calibration_completed(
+        self, open_time: float, close_time: float
+    ) -> None:
+        """Notify the live cover entity that new calibration times are available.
 
-        After calibration completes, the device is in fully closed position,
-        so we update the cover entity position to 0.
+        The open/close times themselves are persisted as part of the config
+        subentry (see async_create_entry / async_update_and_abort in
+        async_step_calibration_complete); this just signals the already-running
+        cover entity so it can pick up the new times without waiting for a reload.
         """
-        storage: Store = Store(self.flow.hass, STORAGE_VERSION, STORAGE_KEY)
-        stored_data = await storage.async_load() or {"devices": []}
-
-        # Find and update the device
-        if self._selected_device is not None:
-            for device in stored_data.get("devices", []):
-                if device["id"] == self._selected_device["id"]:
-                    device[CONF_OPEN_TIME] = round(open_time, 2)
-                    device[CONF_CLOSE_TIME] = round(close_time, 2)
-                    break
-
-        await storage.async_save(stored_data)
-
-        # Send signal to notify entities that calibration has been completed
         if self._selected_device is not None:
             async_dispatcher_send(
                 self.flow.hass,

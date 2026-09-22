@@ -1,13 +1,6 @@
 {
   "config": {
     "step": {
-      "menu": {
-        "title": "Schellenberg USB setup",
-        "menu_options": {
-          "user": "Set up USB hub",
-          "pair_device_menu": "Pair new device"
-        }
-      },
       "user": {
         "title": "Set up Schellenberg USB Stick",
         "description": "Enter the serial port path for your Schellenberg USB stick.",
@@ -25,13 +18,10 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to the serial port",
-      "pairing_timeout": "No device responded within 2 minutes. Please try again and ensure you press the pairing button on your blind motor.",
       "unknown": "Unexpected error occurred"
     },
     "abort": {
-      "already_configured": "Device is already configured",
-      "no_hub": "No USB hub found. Please set up the USB hub first.",
-      "reconfigure_successful": "Calibration completed successfully"
+      "already_configured": "Device is already configured"
     }
   },
   "config_subentries": {
@@ -154,16 +144,14 @@
           "title": "Confirm discovered status identities",
           "description": "Command/transmit identity: {command_identity}\nFrames observed: {frame_count}\n\nDetected primary status identity: {primary_identity}\nPrimary commands observed: {primary_commands}\nPrimary timestamps: {primary_timestamps}\n\nDetected secondary identities:\n{secondary_identities}\n\nUnknown commands observed:\n{unknown_commands}\n\nPosition tracking: {position_tracking}",
           "submit": "Save detected identities"
-        },        "set_position_manual": {
+        },
+        "set_position_manual": {
           "title": "Set position manually",
           "description": "Set the current position for {selected_blind} without moving the motor. Current tracked position: {current_position}.",
           "data": {
             "position": "Position"
           },
           "submit": "Confirm position"
-        },
-        "reset_stick": {
-          "title": "Reset stick / reconnect serial"
         },
         "copy_diagnostics": {
           "title": "Copy diagnostics",
@@ -196,17 +184,17 @@
         },
         "calibration_open_instruction": {
           "title": "Step 2: Open the blind",
-          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring.",
+          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. No need to rush — the timer doesn't start until we receive an upward movement message from the blind.",
           "submit": "Start"
         },
         "calibration_close_instruction": {
           "title": "Step 3: Close the blind",
-          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring.",
+          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. No need to rush — the timer doesn't start until we receive a downward movement message from the blind.",
           "submit": "Start"
         },
         "calibration_complete": {
           "title": "Calibration complete",
-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nStatus discovery from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Frames observed: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the blind can still be controlled and its position estimated from Home Assistant commands.",
+          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind's position.\n\nStatus discovery from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Frames observed: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the blind can still be controlled and its position estimated from Home Assistant commands.",
           "submit": "Done"
         },
         "teach_motor": {
@@ -230,11 +218,9 @@
         "invalid_travel_time": "Travel time must be greater than zero.",
         "already_configured": "This command device ID is already configured.",
         "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
-        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
-        "pairing_failed": "Pairing failed.",
-        "calibration_timeout": "Calibration timed out. Please check the device and try again.",
-        "calibration_start_timeout": "Timeout waiting for the blind to start moving.",
-        "unknown": "An unexpected error occurred.",
+        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please make sure the device is properly connected, and try again.",
+        "unknown": "An unexpected error occurred during calibration. Please try again.",
         "invalid_raw_payload": "Enter exactly 11 characters: 'ss' followed by 9 hexadecimal characters.",
         "transmit_failed": "The raw payload could not be transmitted. Check the stick state and logs.",
         "invalid_status_identities": "Enter each additional status identity as DEVICE_ID/ENUM, separated by commas or new lines (for example F2B8D5/23).",
@@ -245,6 +231,7 @@
       "abort": {
         "pairing_timeout": "No device responded within 2 minutes. Please try again.",
         "pairing_failed": "Pairing failed.",
+        "device_not_found": "The selected blind could not be found. Please start this step again.",
         "command_test_successful": "The motor command test succeeded.",
         "reconfigure_successful": "Blind configuration updated successfully"
       }
@@ -269,13 +256,24 @@
   "entity": {
     "sensor": {
       "connection_status": {
-        "name": "Connection status"
+        "name": "Connection status",
+        "state": {
+          "connected": "Connected",
+          "disconnected": "Disconnected"
+        }
       },
       "firmware_version": {
         "name": "Firmware version"
       },
       "operating_mode": {
-        "name": "Operating mode"
+        "name": "Operating mode",
+        "state": {
+          "bootloader": "Bootloader",
+          "initial": "Initial",
+          "listening": "Listening",
+          "pairing": "Pairing",
+          "unknown": "Unknown"
+        }
       }
     },
     "switch": {
@@ -285,10 +283,6 @@
     }
   },
   "services": {
-    "pair": {
-      "name": "Pair device",
-      "description": "Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds."
-    },
     "test_command": {
       "name": "Test blind command",
       "description": "Send open, close, or stop to a device enum without creating a cover."

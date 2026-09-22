@@ -1,12 +1,13 @@
 # Services for Schellenberg USB integration
-
-pair:
-  name: Pair device
-  description: Activate pairing mode on the Schellenberg USB stick to pair a new blind motor. After calling this service, press the pairing button on your blind motor within 10 seconds.
+#
+# NOTE: Pairing a blind is done through Settings -> Devices & services ->
+# Schellenberg USB -> Add blind (the "pair" service some older releases of
+# this file mentioned was never registered by the integration and always
+# failed with "Service not found"; it has been removed here).
 
 test_command:
   name: Test blind command
-  description: Send a raw open, close, or stop command to a device enum without creating a cover.
+  description: Send open, close, or stop to a device enum without creating a cover.
   fields:
     device_id:
       name: Device ID

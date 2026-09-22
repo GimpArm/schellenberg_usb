@@ -80,14 +80,19 @@ class SchellenbergLedSwitch(RestoreEntity, SwitchEntity):
             self._is_on = last_state.state == "on"
             _LOGGER.debug("Restored LED switch state: %s", self._is_on)
 
-            # If already connected, restore the hardware state
+            # If already connected, restore the hardware state now. Mark
+            # _was_available so _handle_status_update doesn't see a spurious
+            # "just became available" transition on the next status signal
+            # and restore the (already-restored) hardware state a second time.
             if self.api.is_connected:
                 await self._restore_hardware_state()
+                self._was_available = True
 
     @callback
     def _handle_status_update(self) -> None:
         """Handle status update from API."""
-        # Detect when connection is re-established (transition from unavailable to available)
+        # Detect when connection is re-established (transition from
+        # unavailable to available)
         is_now_available = self.api.is_connected
         if is_now_available and not self._was_available:
             # Connection restored, restore hardware state

@@ -11,11 +11,10 @@ from typing import Any
 
 import serial
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlow
-from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from .api import check_serial_port
 from .const import CONF_SERIAL_PORT
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,8 +37,9 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
             new_port = user_input[CONF_SERIAL_PORT]
             if new_port != current_port:
                 try:
-                    serial_conn = serial.Serial(new_port)
-                    serial_conn.close()
+                    await self.hass.async_add_executor_job(
+                        check_serial_port, new_port
+                    )
                 except serial.SerialException:
                     _LOGGER.error(
                         "Failed to open serial port %s during options save", new_port
@@ -74,8 +74,3 @@ class SchellenbergOptionsFlowHandler(OptionsFlow):
             ),
             errors=self._errors,
         )
-
-    @callback
-    def async_get_options_flow(self):
-        """Return self (options flow factory compatibility)."""
-        return self

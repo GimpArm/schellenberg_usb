@@ -7,12 +7,14 @@ import logging
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 import serial
 import serial_asyncio_fast
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -45,18 +47,11 @@ from .const import (
     CMD_TRANSMIT,
     CMD_UP,
     CMD_VERIFY,
-    CONF_COMMAND_DEVICE_ID,
-    CONF_COMMAND_ENUM,
-    CONF_SECONDARY_STATUS_IDENTITIES,
-    CONF_STATUS_DEVICE_ID,
-    CONF_STATUS_IDENTITY_SOURCE,
-    CONF_STATUS_ENUM,
     PAIRING_DEVICE_ENUM_START,
     PAIRING_TIMEOUT,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
-    STATUS_IDENTITY_SOURCE_UNKNOWN,
     STATUS_DISCOVERY_TIMEOUT,
     VERIFY_TIMEOUT,
 )
@@ -69,12 +64,21 @@ from .identities import (
 
 _LOGGER = logging.getLogger(__name__)
 
-TRANSMIT_RETRY_DELAY = 0.05
-TRANSMIT_MAX_RETRIES = 3
-TRANSMIT_IDLE_TIMEOUT = 3.0
 RECONNECT_DELAY = 5.0
 RESET_SETTLE_DELAY = 0.25
 DIAGNOSTIC_TRANSMIT_SOURCES = frozenset({"developer_tools", "service"})
+
+
+def check_serial_port(port: str) -> None:
+    """Quick sanity check that a serial port is reachable.
+
+    Blocking (opens and immediately closes the port), so callers must run
+    this via hass.async_add_executor_job() rather than await it directly on
+    the event loop. Shared by config_flow.py and options_flow.py so the
+    sanity-check logic only needs to be maintained in one place.
+    """
+    serial_conn = serial.Serial(port)
+    serial_conn.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +144,7 @@ class SchellenbergUsbApi:
             None  # Track task to stop pairing
         )
         self._disconnect_requested = False
-        self._reconnect_handle: asyncio.TimerHandle | None = None
+        self._reconnect_handle: CALLBACK_TYPE | None = None
 
         # USB stick status
         self._is_connected = False
@@ -150,18 +154,14 @@ class SchellenbergUsbApi:
         self._device_id_future: asyncio.Future[str] | None = None
         self._hub_id: str | None = None
 
-        # Retry queue for commands that failed with "stick busy"
+        # Minimal retry state for commands that fail with "stick busy"
         self._pending_retry_command: str | None = None
-        self._pending_transmit_source: str | None = None
-        self._transmit_retry_count = 0
         self._retry_task: asyncio.Task[None] | None = None
-        self._transmit_lock = asyncio.Lock()
-        self._transmit_busy = False
 
+        # Set on a "t1" transmitter-on ACK and cleared on "t0" (see
+        # _handle_message); reflects the stick's own report of its
+        # transmitter state.
         self._transmitter_active = False
-        self._transmitter_idle = asyncio.Event()
-        self._transmitter_idle.set()
-        self._busy_latched = False
 
     async def connect(self) -> bool:
         """Establish, verify, and initialize the serial connection."""
@@ -183,7 +183,13 @@ class SchellenbergUsbApi:
                 self.hass.loop,
                 lambda: SchellenbergProtocol(self._handle_message, self),
                 self.port,
-                baudrate=112500,
+                # 115200 8N1 is the stick's documented/standard rate. This was
+                # previously 112500 (not a standard baud rate - likely a typo
+                # for 115200). The stick's USB-CDC interface appears to
+                # tolerate a range of requested baud rates in practice, which
+                # is probably why this went unnoticed, but 115200 is the
+                # correct value to request.
+                baudrate=115200,
             )
             self._transport = transport
             # The factory above always creates this concrete protocol type.
@@ -203,9 +209,6 @@ class SchellenbergUsbApi:
                 return False
 
             self._is_connected = True
-            self._busy_latched = False
-            self._transmitter_active = False
-            self._transmitter_idle.set()
             self._update_status()
 
             if not await self._enter_listening_mode():
@@ -268,7 +271,7 @@ class SchellenbergUsbApi:
     def _cancel_scheduled_reconnect(self) -> None:
         """Cancel a pending automatic reconnect callback."""
         if self._reconnect_handle is not None:
-            self._reconnect_handle.cancel()
+            self._reconnect_handle()
             self._reconnect_handle = None
 
     def _schedule_reconnect(self, delay: float = RECONNECT_DELAY) -> None:
@@ -276,16 +279,18 @@ class SchellenbergUsbApi:
         if self._disconnect_requested or self._reconnect_handle is not None:
             return
         _LOGGER.info("Scheduling serial reconnect in %.1f seconds", delay)
-        self._reconnect_handle = self.hass.loop.call_later(
-            delay, self._start_scheduled_reconnect
+        self._reconnect_handle = async_call_later(
+            self.hass, delay, self._start_scheduled_reconnect
         )
 
     @callback
-    def _start_scheduled_reconnect(self) -> None:
+    def _start_scheduled_reconnect(self, _now: datetime) -> None:
         """Start the reconnect task from its timer callback."""
         self._reconnect_handle = None
         if not self._disconnect_requested:
-            self.hass.loop.create_task(self.connect())
+            self.hass.async_create_task(
+                self.connect(), name="schellenberg-reconnect"
+            )
 
     @callback
     def _handle_message(self, message: str) -> None:
@@ -327,118 +332,40 @@ class SchellenbergUsbApi:
                 self._update_status()
             return
 
-        # t1 means the RF transmitter started; it is not idle until t0.
-        if message == "t1":
-            self._transmitter_active = True
-            self._transmitter_idle.clear()
-            self._busy_latched = False
-            source = self._pending_transmit_source or "internal"
-            level = (
-                logging.WARNING
-                if source in DIAGNOSTIC_TRANSMIT_SOURCES
-                else logging.INFO
-            )
-            _LOGGER.log(
-                level,
-                "Serial transmit ACK start response=t1 source=%s mode=%s "
-                "payload=%s retries=%d stick_ack_only=True motor_result=unknown",
-                source,
-                self._device_mode,
-                self._pending_retry_command,
-                self._transmit_retry_count,
-            )
-            return
-
-        if message == "t0":
-            self._transmitter_active = False
-            self._transmitter_idle.set()
-            self._busy_latched = False
-            source = self._pending_transmit_source or "internal"
-            level = (
-                logging.WARNING
-                if source in DIAGNOSTIC_TRANSMIT_SOURCES
-                else logging.INFO
-            )
-            if self._retry_task is not None and not self._retry_task.done():
-                _LOGGER.log(
-                    level,
-                    "Serial transmitter idle response=t0 source=%s; queued retry "
-                    "may proceed payload=%s",
-                    source,
-                    self._pending_retry_command,
-                )
-            else:
-                _LOGGER.log(
-                    level,
-                    "Serial transmit ACK complete response=t0 source=%s mode=%s "
-                    "payload=%s retries=%d result=completed stick_ack_only=True "
-                    "motor_result=unknown",
-                    source,
-                    self._device_mode,
-                    self._pending_retry_command,
-                    self._transmit_retry_count,
-                )
-                self._clear_pending_transmit(cancel_retry=False)
+        # Handle acknowledgments. t1/t0 are the stick's own transmitter
+        # on/off ACKs: receiving either one confirms the most recently sent
+        # command was accepted rather than rejected as "stick busy" (tE), so
+        # the retry latch for it must be released here. Previously nothing
+        # ever cleared _pending_retry_command on a normal ACK, so it stayed
+        # latched permanently after the very first command ever sent (e.g.
+        # the internal handshake during connect()), which made the public
+        # busy_latched/transmit_block_reason/transmit_ready properties
+        # report "busy"/"not ready" forever - silently blocking every
+        # Developer Tools test/teach/reset action even though normal cover
+        # control (which checks the separate, unaffected private
+        # _transmit_capability_block_reason()) kept working.
+        if message in ("t1", "t0"):
+            _LOGGER.debug("Transmit ACK: %s", message)
+            self._pending_retry_command = None
+            self._transmitter_active = message == "t1"
             return
 
         if message == "tE":
-            command = self._pending_retry_command
-            source = self._pending_transmit_source or "internal"
-            self._transmitter_active = True
-            self._transmitter_idle.clear()
-            if command is None:
-                _LOGGER.warning(
-                    "Serial stick reported busy with no pending transmit payload "
-                    "source=%s",
-                    source,
+            _LOGGER.warning("Transmit error - stick busy, will retry in 100ms")
+            if self._pending_retry_command:
+                if self._retry_task and not self._retry_task.done():
+                    self._retry_task.cancel()
+                self._retry_task = asyncio.create_task(
+                    self._retry_command_after_delay()
                 )
-                return
-
-            # A burst of duplicate tE responses must not continually cancel and
-            # postpone the retry that is already waiting to run.
-            if self._retry_task is not None and not self._retry_task.done():
-                _LOGGER.debug(
-                    "Serial stick still busy; retry already scheduled source=%s "
-                    "payload=%s retry=%d/%d",
-                    source,
-                    command,
-                    self._transmit_retry_count,
-                    TRANSMIT_MAX_RETRIES,
-                )
-                return
-
-            if self._transmit_retry_count >= TRANSMIT_MAX_RETRIES:
-                self._busy_latched = True
-                _LOGGER.error(
-                    "Serial transmit abandoned after %d attempts because the stick "
-                    "remained busy source=%s mode=%s payload=%s; "
-                    "reset/reconnect required",
-                    TRANSMIT_MAX_RETRIES + 1,
-                    source,
-                    self._device_mode,
-                    command,
-                )
-                self._clear_pending_transmit(cancel_retry=False)
-                return
-
-            self._transmit_retry_count += 1
-            _LOGGER.warning(
-                "Serial stick busy; retry %d/%d will wait up to %.1fs for idle "
-                "source=%s mode=%s payload=%s",
-                self._transmit_retry_count,
-                TRANSMIT_MAX_RETRIES,
-                TRANSMIT_IDLE_TIMEOUT,
-                source,
-                self._device_mode,
-                command,
-            )
-            self._retry_task = asyncio.create_task(
-                self._retry_command_after_delay(command, source)
-            )
             return
         # Handle device ID response (format: sr5D3E7C where 5D3E7C is the device ID)
         if message.startswith("sr") and len(message) >= 8:
-            device_id = message[2:8]
+            # Uppercased for consistency with every other device ID in this
+            # class (see the "ss" handler below) - the stick's own responses
+            # are expected to already be uppercase hex, but normalizing here
+            # avoids a latent case-mismatch if that ever isn't true.
+            device_id = message[2:8].upper()
             _LOGGER.debug("Received device ID response: %s", device_id)
             if self._device_id_future and not self._device_id_future.done():
                 self._device_id_future.set_result(device_id)
@@ -449,10 +376,14 @@ class SchellenbergUsbApi:
         # 00BE = 2 bytes to ignore (address prefix)
         # XXXXXX = 3 bytes device ID (the actual device ID we want)
         # Rest = can be ignored
-        if message.startswith("sl") and len(message) >= 8:
+        if message.startswith("sl") and len(message) >= 12:
             # Extract the device ID: skip "sl" (2 chars) + "00BE" (4 chars) = 6 chars
             # Then take the next 6 characters (3 bytes as hex) = 6 chars
-            device_id = message[6:12]
+            # (needs 12 chars total; the old ">= 8" guard let message[6:12]
+            # silently return a truncated ID for any 8-11 char message)
+            # Uppercased for consistency with every other device ID in this
+            # class - see the matching comment on the "sr" handler above.
+            device_id = message[6:12].upper()
             _LOGGER.debug(
                 "Received pairing/list response: %s, extracted device ID: %s",
                 message,
@@ -550,15 +481,17 @@ class SchellenbergUsbApi:
                         key[0] == normalized_device_id
                         for key in self._registered_entity_keys
                     )
-                    if (
-                        device_id not in self._registered_devices
-                        and not known_status_id
-                    ):
+                    known_command_id = any(
+                        registered_id.upper() == normalized_device_id
+                        for registered_id in self._registered_devices
+                    )
+                    if not known_command_id and not known_status_id:
                         _LOGGER.info(
                             "Pairing candidate detected device_id=%s", device_id
                         )
                         self._pairing_future.set_result(device_id)
-                        # Don't send dispatcher signal here - let the caller handle persistence
+                        # Don't send dispatcher signal here - let the
+                        # caller handle persistence
                         return
 
                 if registration is None:
@@ -606,223 +539,42 @@ class SchellenbergUsbApi:
                 _LOGGER.debug("Failed to parse message %s: %s", message, err)
 
     async def send_command(self, command: str, *, source: str = "internal") -> bool:
-        """Queue a raw command on the serial transport."""
-        return await self._write_command(command, is_retry=False, source=source)
+        """Send a command to the USB stick."""
+        if self._transport is None or self._transport.is_closing():
+            _LOGGER.warning("Serial port not connected. Command dropped: %s", command)
+            return False
 
-    async def _write_command(
-        self, command: str, *, is_retry: bool, source: str
-    ) -> bool:
-        """Write one command while serializing access to the transport."""
-        async with self._transmit_lock:
-            self._transmit_busy = True
-            try:
-                if is_retry and self._pending_retry_command != command:
-                    _LOGGER.debug(
-                        "Skipping stale serial retry source=%s payload=%s pending=%s",
-                        source,
-                        command,
-                        self._pending_retry_command,
-                    )
-                    return False
+        # Store command for potential retry on "stick busy" error.
+        self._pending_retry_command = command
 
-                if self._transport is None or self._transport.is_closing():
-                    _LOGGER.error(
-                        "Serial write blocked reason=transport_unavailable source=%s "
-                        "payload=%s connected=%s mode=%s",
-                        source,
-                        command,
-                        self._is_connected,
-                        self._device_mode,
-                    )
-                    if is_retry or command.startswith(CMD_TRANSMIT):
-                        self._clear_pending_transmit(cancel_retry=False)
-                    return False
-
-                is_transmit = command.startswith(CMD_TRANSMIT)
-                diagnostic = is_transmit and source in DIAGNOSTIC_TRANSMIT_SOURCES
-                visible_level = logging.WARNING if diagnostic else logging.DEBUG
-                if is_transmit:
-                    if self._busy_latched:
-                        _LOGGER.error(
-                            "Serial transmit blocked reason=busy_latched source=%s "
-                            "mode=%s payload=%s; reset/reconnect required",
-                            source,
-                            self._device_mode,
-                            command,
-                        )
-                        return False
-
-                    if not is_retry and not self._transmitter_idle.is_set():
-                        _LOGGER.log(
-                            logging.WARNING if diagnostic else logging.INFO,
-                            "Waiting for active serial transmit to finish source=%s "
-                            "mode=%s pending_payload=%s new_payload=%s",
-                            source,
-                            self._device_mode,
-                            self._pending_retry_command,
-                            command,
-                        )
-                        if not await self._wait_for_transmitter_idle(
-                            "before a new transmit"
-                        ):
-                            self._busy_latched = True
-                            return False
-
-                    if not is_retry:
-                        if self._pending_retry_command is not None:
-                            _LOGGER.warning(
-                                "Replacing completed serial transmit old_payload=%s "
-                                "new_payload=%s source=%s",
-                                self._pending_retry_command,
-                                command,
-                                source,
-                            )
-                        self._clear_pending_transmit()
-                        self._pending_retry_command = command
-                        self._pending_transmit_source = source
-                        self._transmit_retry_count = 0
-
-                    # Close the idle window before writing. This prevents another
-                    # coroutine from queuing a command before the stick reports t1.
-                    self._transmitter_active = True
-                    self._transmitter_idle.clear()
-
-                full_command = f"{command}\r\n".encode("ascii")
-                attempt = self._transmit_retry_count + 1 if is_retry else 1
-                max_attempts = TRANSMIT_MAX_RETRIES + 1
-                _LOGGER.log(
-                    visible_level,
-                    "Serial write attempt source=%s mode=%s connected=%s pairing=%s "
-                    "transmitter_active=%s payload=%s bytes=%d attempt=%d/%d retry=%s",
-                    source,
-                    self._device_mode,
-                    self._is_connected,
-                    self._pairing_active,
-                    self._transmitter_active,
-                    command,
-                    len(full_command),
-                    attempt,
-                    max_attempts if is_transmit else 1,
-                    is_retry,
-                )
-                try:
-                    self._transport.write(full_command)
-                except (OSError, RuntimeError):
-                    _LOGGER.exception(
-                        "Serial write failed source=%s payload=%s attempt=%d retry=%s",
-                        source,
-                        command,
-                        attempt,
-                        is_retry,
-                    )
-                    if self._pending_retry_command == command:
-                        self._clear_pending_transmit(cancel_retry=False)
-                    if is_transmit:
-                        self._transmitter_active = False
-                        self._transmitter_idle.set()
-                    return False
-
-                _LOGGER.log(
-                    visible_level,
-                    "Serial write succeeded source=%s payload=%s attempt=%d "
-                    "retry=%s result=written",
-                    source,
-                    command,
-                    attempt,
-                    is_retry,
-                )
-                return True
-            finally:
-                # Never leave local transmit state busy after an exception,
-                # cancellation, disconnected transport, or stale retry.
-                self._transmit_busy = False
-
-    async def _wait_for_transmitter_idle(self, reason: str) -> bool:
-        """Wait for the stick's t0 completion marker with a hard timeout."""
-        if self._transmitter_idle.is_set():
-            return True
+        full_command = f"{command}\r\n".encode("ascii")
+        _LOGGER.debug("Sending to serial device: %s", full_command.strip())
         try:
-            await asyncio.wait_for(
-                self._transmitter_idle.wait(), timeout=TRANSMIT_IDLE_TIMEOUT
-            )
-        except TimeoutError:
-            _LOGGER.error(
-                "Serial transmitter did not return to idle within %.1fs (%s) "
-                "source=%s mode=%s pending_payload=%s",
-                TRANSMIT_IDLE_TIMEOUT,
-                reason,
-                self._pending_transmit_source or "internal",
-                self._device_mode,
-                self._pending_retry_command,
+            self._transport.write(full_command)
+        except (OSError, RuntimeError):
+            _LOGGER.exception(
+                "Serial write failed source=%s payload=%s", source, command
             )
             return False
+        _LOGGER.debug("Command sent to serial device: %s", full_command.strip())
         return True
 
-    async def _retry_command_after_delay(self, command: str, source: str) -> None:
-        """Retry a busy transmit only after the stick reports idle."""
-        retry_task = asyncio.current_task()
-        diagnostic = source in DIAGNOSTIC_TRANSMIT_SOURCES
+    async def _retry_command_after_delay(self) -> None:
+        """Retry sending the pending command after a short delay."""
         try:
-            if not await self._wait_for_transmitter_idle("after a busy response"):
-                self._busy_latched = True
-                _LOGGER.error(
-                    "Serial transmit abandoned because the stick never returned "
-                    "to idle source=%s payload=%s; reset/reconnect required",
-                    source,
-                    command,
-                )
-                self._clear_pending_transmit(cancel_retry=False)
-                return
-
-            await asyncio.sleep(TRANSMIT_RETRY_DELAY)
-            if self._pending_retry_command != command:
-                _LOGGER.debug(
-                    "Busy retry no longer pending source=%s payload=%s", source, command
-                )
-                return
-
-            # Clear the task reference before writing so a tE response generated
-            # by this attempt can schedule the next bounded retry.
-            if self._retry_task is retry_task:
-                self._retry_task = None
-            _LOGGER.log(
-                logging.WARNING if diagnostic else logging.INFO,
-                "Retrying serial transmit after idle source=%s retry=%d/%d "
-                "mode=%s payload=%s",
-                source,
-                self._transmit_retry_count,
-                TRANSMIT_MAX_RETRIES,
-                self._device_mode,
-                command,
-            )
-            await self._write_command(command, is_retry=True, source=source)
+            await asyncio.sleep(0.1)
+            if self._pending_retry_command:
+                command = self._pending_retry_command
+                _LOGGER.debug("Retrying command after stick busy: %s", command)
+                await self.send_command(command)
         except asyncio.CancelledError:
-            _LOGGER.debug(
-                "Serial transmit retry cancelled source=%s payload=%s", source, command
-            )
-            raise
+            _LOGGER.debug("Retry task cancelled")
         finally:
-            if self._retry_task is retry_task:
-                self._retry_task = None
-
-    def _clear_pending_transmit(self, *, cancel_retry: bool = True) -> None:
-        """Clear retry state and optionally cancel the scheduled retry task."""
-        retry_task = self._retry_task
-        self._retry_task = None
-        if (
-            cancel_retry
-            and retry_task is not None
-            and retry_task is not asyncio.current_task()
-            and not retry_task.done()
-        ):
-            retry_task.cancel()
-        self._pending_retry_command = None
-        self._pending_transmit_source = None
-        self._transmit_retry_count = 0
+            self._retry_task = None
 
     @callback
     def get_recent_raw_frames(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        """Return recent raw receive frames across pairing, tests, and idle listening."""
+        """Return recent raw receive frames across pairing, tests, and idle."""
         if limit <= 0:
             return []
         return [dict(frame) for frame in list(self._raw_received_frames)[-limit:]]
@@ -862,21 +614,21 @@ class SchellenbergUsbApi:
         return result
 
     async def async_discover_status_identities(
-        self, *, timeout: float = STATUS_DISCOVERY_TIMEOUT
+        self, *, capture_duration: float = STATUS_DISCOVERY_TIMEOUT
     ) -> dict[str, Any]:
         """Capture and classify frames from one guided original-remote sequence."""
         if not self._is_connected:
             raise ConnectionError("USB stick is not connected")
-        if timeout <= 0:
+        if capture_duration <= 0:
             raise ValueError("status discovery timeout must be positive")
 
         self.start_status_frame_capture(phase="remote_discovery")
         _LOGGER.warning(
             "Status discovery started timeout=%.1fs; listening for original remote",
-            timeout,
+            capture_duration,
         )
         try:
-            await asyncio.sleep(timeout)
+            await asyncio.sleep(capture_duration)
         except BaseException:
             self.finish_status_frame_capture(end_reason="cancelled")
             raise
@@ -905,11 +657,9 @@ class SchellenbergUsbApi:
             return None
         if not self._is_transmit_capable():
             _LOGGER.error(
-                "Pairing blocked because stick is not ready connected=%s mode=%s "
-                "busy_latched=%s",
+                "Pairing blocked because stick is not ready connected=%s mode=%s",
                 self._is_connected,
                 self._device_mode,
-                self._busy_latched,
             )
             return None
 
@@ -950,11 +700,6 @@ class SchellenbergUsbApi:
             ):
                 if not await self.send_command(payload, source="pairing"):
                     raise ConnectionError(f"could not send pairing phase {phase}")
-                if not await self._wait_for_transmitter_idle(
-                    f"finishing pairing phase {phase}"
-                ):
-                    self._busy_latched = True
-                    return None
                 _LOGGER.info(
                     "Pairing stick ACK completed phase=%s payload=%s "
                     "motor_authorization=unverified",
@@ -1070,20 +815,6 @@ class SchellenbergUsbApi:
                     payload,
                 )
                 return False
-            if not await self._wait_for_transmitter_idle(
-                f"finishing motor teach phase {phase}"
-            ):
-                self._busy_latched = True
-                _LOGGER.error(
-                    "Motor teach ACK timeout source=%s device_id=%s enum=%s "
-                    "phase=%s payload=%s",
-                    source,
-                    device_id or "unknown",
-                    normalized_enum,
-                    phase,
-                    payload,
-                )
-                return False
             _LOGGER.warning(
                 "Motor teach phase stick ACK completed source=%s device_id=%s "
                 "enum=%s phase=%s payload=%s stick_ack_only=True",
@@ -1143,20 +874,14 @@ class SchellenbergUsbApi:
             )
             return False
 
-        acknowledged = await self._wait_for_transmitter_idle(
-            "finishing raw RF transmit"
-        )
-        if not acknowledged:
-            self._busy_latched = True
         _LOGGER.log(
-            logging.WARNING if acknowledged else logging.ERROR,
-            "Raw RF transmit result source=%s payload=%s result=%s "
+            logging.WARNING if source in DIAGNOSTIC_TRANSMIT_SOURCES else logging.DEBUG,
+            "Raw RF transmit result source=%s payload=%s result=written "
             "stick_ack_only=True motor_result=unknown",
             source,
             normalized,
-            "stick_ack_completed" if acknowledged else "stick_ack_timeout",
         )
-        return acknowledged
+        return True
 
     async def control_blind(
         self,
@@ -1182,8 +907,7 @@ class SchellenbergUsbApi:
         _LOGGER.log(
             visible_level,
             "Blind transmit requested source=%s command=%s device_id=%s enum=%s "
-            "connected=%s mode=%s ready=%s pairing=%s transmitter_active=%s "
-            "busy_latched=%s",
+            "connected=%s mode=%s ready=%s pairing=%s",
             source,
             action_name,
             device_id or "unknown",
@@ -1192,8 +916,6 @@ class SchellenbergUsbApi:
             self._device_mode,
             self.transmit_ready,
             self._pairing_active,
-            self._transmitter_active,
-            self._busy_latched,
         )
         if reason := self._transmit_capability_block_reason():
             _LOGGER.error(
@@ -1313,69 +1035,6 @@ class SchellenbergUsbApi:
             )
             if bool(last_message["position_tracking"]):
                 self._last_primary_tracking_messages[identity] = dict(last_message)
-
-    def register_existing_devices(self, devices: list[dict[str, Any]]) -> None:
-        """Register existing devices and all persisted status identities."""
-        for device in devices:
-            command_device_id = (
-                device.get(CONF_COMMAND_DEVICE_ID)
-                or device.get("id")
-                or device.get(CONF_STATUS_DEVICE_ID)
-            )
-            command_enum = (
-                device.get(CONF_COMMAND_ENUM)
-                or device.get("enum")
-                or device.get(CONF_STATUS_ENUM)
-            )
-            status_source = device.get(CONF_STATUS_IDENTITY_SOURCE)
-            if status_source == STATUS_IDENTITY_SOURCE_UNKNOWN:
-                status_device_id = device.get(CONF_STATUS_DEVICE_ID)
-                status_enum = device.get(CONF_STATUS_ENUM)
-            else:
-                # Entries created before status provenance existed retain their
-                # historical fallback until the user runs discovery or edits them.
-                status_device_id = (
-                    device.get(CONF_STATUS_DEVICE_ID)
-                    or device.get("id")
-                    or command_device_id
-                )
-                status_enum = (
-                    device.get(CONF_STATUS_ENUM) or device.get("enum") or command_enum
-                )
-            entity_name = str(
-                device.get("name") or status_device_id or command_device_id or "Blind"
-            )
-            if command_device_id and command_enum:
-                self._registered_devices[str(command_device_id)] = str(command_enum)
-            primary_identity = normalize_status_identity(status_device_id, status_enum)
-            if primary_identity is not None and command_device_id:
-                self._register_status_identity(
-                    primary_identity,
-                    entity_name=entity_name,
-                    command_device_id=str(command_device_id),
-                    primary=True,
-                )
-            secondary_identities = normalize_status_identities(
-                device.get(CONF_SECONDARY_STATUS_IDENTITIES)
-            )
-            for identity in secondary_identities:
-                if identity != primary_identity and command_device_id:
-                    self._register_status_identity(
-                        identity,
-                        entity_name=entity_name,
-                        command_device_id=str(command_device_id),
-                        primary=False,
-                    )
-            _LOGGER.debug(
-                "Registered existing entity=%s command=%s/%s primary_status=%s/%s "
-                "secondary_statuses=%s",
-                entity_name,
-                command_device_id,
-                command_enum,
-                status_device_id,
-                status_enum,
-                secondary_identities,
-            )
 
     def remove_known_device(self, device_id: str) -> None:
         """Remove a command device and all of its registered status identities."""
@@ -1608,11 +1267,11 @@ class SchellenbergUsbApi:
         self._is_connected = False
         self._device_mode = None
         self._pairing_active = False
-        self._clear_pending_transmit()
-        self._transmit_busy = False
+        self._pending_retry_command = None
         self._transmitter_active = False
-        self._transmitter_idle.set()
-        self._busy_latched = False
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+        self._retry_task = None
 
         error = ConnectionError(f"serial connection lost: {exc}")
         for future in (
@@ -1639,8 +1298,6 @@ class SchellenbergUsbApi:
             return "pairing is active"
         if self._device_mode != "listening":
             return f"stick mode is {self._device_mode or 'unknown'}, expected listening"
-        if self._busy_latched:
-            return "stick busy state is latched; reset/reconnect required"
         return None
 
     def _is_transmit_capable(self) -> bool:
@@ -1674,12 +1331,12 @@ class SchellenbergUsbApi:
 
     @property
     def busy_latched(self) -> bool:
-        """Return whether a busy timeout requires reset/reconnect."""
-        return self._busy_latched
+        """Return whether a sent command is still awaiting a t1/t0/tE ACK."""
+        return self._pending_retry_command is not None
 
     @property
     def transmitter_active(self) -> bool:
-        """Return whether t1 was seen without a subsequent t0."""
+        """Return whether the stick last reported its transmitter as on."""
         return self._transmitter_active
 
     @property
@@ -1687,14 +1344,8 @@ class SchellenbergUsbApi:
         """Return why a new diagnostic command cannot be sent immediately."""
         if reason := self._transmit_capability_block_reason():
             return reason
-        if self._transmitter_active or not self._transmitter_idle.is_set():
-            return "transmitter is active; waiting for t0"
         if self._pending_retry_command is not None:
             return f"transmit is pending for payload {self._pending_retry_command}"
-        if self._transmit_busy:
-            return "serial write is in progress"
-        if self._transmit_lock.locked():
-            return "serial transmit lock is held"
         return None
 
     @property
@@ -1749,7 +1400,8 @@ class SchellenbergUsbApi:
         """
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{CMD_SET_UPPER_ENDPOINT}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        command = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_SET_UPPER_ENDPOINT}0000"
         _LOGGER.debug("Setting upper endpoint for device %s: %s", device_enum, command)
         await self.send_command(command)
 
@@ -1762,7 +1414,8 @@ class SchellenbergUsbApi:
         """
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{CMD_SET_LOWER_ENDPOINT}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        command = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_SET_LOWER_ENDPOINT}0000"
         _LOGGER.debug("Setting lower endpoint for device %s: %s", device_enum, command)
         await self.send_command(command)
 
@@ -1775,7 +1428,8 @@ class SchellenbergUsbApi:
         """
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{CMD_ALLOW_PAIRING}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        command = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_ALLOW_PAIRING}0000"
         _LOGGER.debug("Allowing pairing on device %s: %s", device_enum, command)
         await self.send_command(command)
 
@@ -1788,7 +1442,8 @@ class SchellenbergUsbApi:
         """
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{CMD_MANUAL_UP}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        command = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_MANUAL_UP}0000"
         _LOGGER.debug("Manual up for device %s: %s", device_enum, command)
         await self.send_command(command)
 
@@ -1801,7 +1456,8 @@ class SchellenbergUsbApi:
         """
         # Format: ssXX9AAZZZ
         # XX = device enum, 9 = number of messages, AA = command, ZZZ = padding
-        command = f"{CMD_TRANSMIT}{device_enum}9{CMD_MANUAL_DOWN}0000"
+        normalized_enum = _normalize_protocol_enum(device_enum)
+        command = f"{CMD_TRANSMIT}{normalized_enum}9{CMD_MANUAL_DOWN}0000"
         _LOGGER.debug("Manual down for device %s: %s", device_enum, command)
         await self.send_command(command)
 
@@ -1860,7 +1516,11 @@ class SchellenbergUsbApi:
         self._disconnect_requested = True
         self._cancel_scheduled_reconnect()
 
-        self._clear_pending_transmit()
+        self._pending_retry_command = None
+        self._transmitter_active = False
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+        self._retry_task = None
         stop_task = self._stop_pairing_task
         self._stop_pairing_task = None
         if (
@@ -1886,10 +1546,6 @@ class SchellenbergUsbApi:
         self._is_connected = False
         self._device_mode = None
         self._pairing_active = False
-        self._transmit_busy = False
-        self._transmitter_active = False
-        self._transmitter_idle.set()
-        self._busy_latched = False
         if transport is not None:
             transport.close()
         self._update_status()
@@ -1898,13 +1554,10 @@ class SchellenbergUsbApi:
     async def reset_and_reconnect(self) -> bool:
         """Close and reopen the serial port, restoring listening mode."""
         _LOGGER.warning(
-            "Resetting Schellenberg stick serial state connected=%s mode=%s "
-            "pairing=%s transmitter_active=%s busy_latched=%s",
+            "Resetting Schellenberg stick serial state connected=%s mode=%s pairing=%s",
             self._is_connected,
             self._device_mode,
             self._pairing_active,
-            self._transmitter_active,
-            self._busy_latched,
         )
         await self.disconnect()
         await asyncio.sleep(RESET_SETTLE_DELAY)

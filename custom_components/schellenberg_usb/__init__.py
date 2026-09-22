@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .api import SchellenbergUsbApi
 from .blind_id import claim_blind_id
@@ -27,6 +28,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_TEST_COMMAND,
+    SIGNAL_STICK_STATUS_UPDATED,
     SUBENTRY_TYPE_BLIND,
     SUBENTRY_TYPE_HUB,
     SchellenbergConfigEntry,
@@ -39,7 +41,6 @@ _LOGGER = logging.getLogger(__name__)
 def _async_backfill_blind_ids(
     hass: HomeAssistant, entry: SchellenbergConfigEntry
 ) -> bool:
-    """Persist one stable, collision-free UUID for every blind subentry."""
     used_ids: set[str] = set()
     changed = False
     for subentry in list(entry.subentries.values()):
@@ -65,7 +66,6 @@ CONFIG_SCHEMA = vol.Schema(
 
 
 def _validate_device_id(value: str) -> str:
-    """Validate and normalize a six-character protocol device ID."""
     normalized = cv.string(value).strip().upper()
     if len(normalized) != 6 or any(
         character not in "0123456789ABCDEF" for character in normalized
@@ -75,7 +75,6 @@ def _validate_device_id(value: str) -> str:
 
 
 def _validate_device_enum(value: str) -> str:
-    """Validate and normalize a two-character protocol enum."""
     normalized = cv.string(value).strip().upper()
     if len(normalized) != 2 or any(
         character not in "0123456789ABCDEF" for character in normalized
@@ -95,7 +94,7 @@ TEST_COMMAND_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up integration-level diagnostic services."""
+    _LOGGER.info("Setting up Schellenberg USB integration")
 
     async def _handle_test_command(call: ServiceCall) -> None:
         requested_entry_id = call.data.get(CONF_CONFIG_ENTRY_ID)
@@ -182,11 +181,6 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(
     hass: HomeAssistant, entry: SchellenbergConfigEntry
 ) -> bool:
-    """Set up Schellenberg USB from a config entry."""
-    _LOGGER.debug("Setup entry called for entry: %s", entry.entry_id)
-    _LOGGER.debug("Entry data keys: %s", list(entry.data.keys()))
-
-    # This is a hub entry - it has CONF_SERIAL_PORT
     if CONF_SERIAL_PORT not in entry.data:
         _LOGGER.warning(
             "Received async_setup_entry for non-hub entry %s, ignoring", entry.entry_id
@@ -194,19 +188,14 @@ async def async_setup_entry(
         return False
 
     _LOGGER.info("Setting up hub entry: %s", entry.title)
-    hass.data.setdefault(DOMAIN, {})
 
     port = entry.data[CONF_SERIAL_PORT]
     api = SchellenbergUsbApi(hass, port)
 
-    # Store API in runtime_data for platforms and services access
     entry.runtime_data = api
 
-    # Start the connection
-    hass.async_create_task(api.connect())
+    hass.async_create_task(api.connect(), name="schellenberg-initial-connect")
 
-    # Ensure we have a dedicated hub subentry so hub-level devices/entities
-    # (like the LED) do not appear under "Devices that don't belong to a sub-entry".
     hub_subentry = next(
         (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_HUB),
         None,
@@ -221,17 +210,19 @@ async def async_setup_entry(
         )
         hass.config_entries.async_add_subentry(entry, hub_subentry)
 
-    # Attach or create hub device under hub subentry to avoid ungrouped duplication
     device_registry = dr.async_get(hass)
-    hub_device = device_registry.async_get_device(
-        identifiers={(DOMAIN, entry.entry_id)}
+
+    # NOTE: `dr.async_get_device_id_by_identifier` never existed in Home Assistant
+    # (calling it raised AttributeError, which was NOT caught by the ValueError
+    # handler that used to be here, so this crashed async_setup_entry on every
+    # attempt). Identifiers are also no longer globally unique as of HA 2026.8;
+    # they are scoped per config entry, so the lookup must be scoped too.
+    hub_device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, entry.entry_id), entry.entry_id
     )
+
     if hub_device is None:
-        _LOGGER.debug(
-            "Creating hub device and attaching to hub subentry %s",
-            hub_subentry.subentry_id,
-        )
-        device_registry.async_get_or_create(
+        hub_device = device_registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             config_subentry_id=hub_subentry.subentry_id,
             identifiers={(DOMAIN, entry.entry_id)},
@@ -239,27 +230,37 @@ async def async_setup_entry(
             manufacturer="Schellenberg",
             model="USB Stick",
         )
-    else:
-        _LOGGER.debug(
-            "Ensuring existing hub device %s is associated with entry %s and subentry %s",
-            hub_device.id,
-            entry.entry_id,
-            hub_subentry.subentry_id,
-        )
+    elif hub_device.config_subentry_id != hub_subentry.subentry_id:
         device_registry.async_update_device(
             hub_device.id,
-            add_config_entry_id=entry.entry_id,
-            add_config_subentry_id=hub_subentry.subentry_id,
+            new_config_subentry_id=hub_subentry.subentry_id,
         )
+    hub_device_id = hub_device.id
 
-    # Legacy subentries predate stable per-blind UUIDs. Persist them before
-    # platforms create entities so the registry identity is stable immediately.
+    @callback
+    def _handle_stick_status_for_device_registry() -> None:
+        """Keep the hub device's reported firmware version current.
+
+        device_version is None until the stick has been verified, which
+        normally happens after entity platforms are already set up, so the
+        DeviceInfo captured once at entity-construction time (switch/sensor)
+        never gets refreshed on its own.
+        """
+        if api.device_version:
+            device_registry.async_update_device(
+                hub_device_id, sw_version=api.device_version
+            )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, SIGNAL_STICK_STATUS_UPDATED, _handle_stick_status_for_device_registry
+        )
+    )
+
     _async_backfill_blind_ids(hass, entry)
 
-    # Forward setup to the hub's platforms (cover, sensor, switch)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Reload when blind subentries are added, removed, renamed, or edited.
     known_subentries = {
         subentry_id: (
             subentry.subentry_type,
@@ -273,7 +274,6 @@ async def async_setup_entry(
     async def _on_entry_updated(
         hass_instance: HomeAssistant, updated_entry: SchellenbergConfigEntry
     ) -> None:
-        """Handle changes to the hub's blind subentries."""
         nonlocal known_subentries
         current_subentries = {
             subentry_id: (
@@ -299,7 +299,6 @@ async def async_setup_entry(
 async def async_unload_entry(
     hass: HomeAssistant, entry: SchellenbergConfigEntry
 ) -> bool:
-    """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
