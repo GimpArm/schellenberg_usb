@@ -1,0 +1,291 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Schellenberg USB-Stick einrichten",
+        "description": "Geben Sie den seriellen Anschlusspfad für Ihren Schellenberg USB-Stick ein.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        }
+      },
+      "usb_confirm": {
+        "title": "Schellenberg USB-Stick bestätigen",
+        "description": "Bestätigen Sie den seriellen Anschlusspfad für Ihren erkannten Schellenberg USB-Stick.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum seriellen Anschluss fehlgeschlagen",
+      "unknown": "Unerwarteter Fehler aufgetreten"
+    },
+    "abort": {
+      "already_configured": "Gerät ist bereits konfiguriert"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Rollladen",
+      "initiate_flow": {
+        "user": "Rollladen hinzufügen",
+        "reconfigure": "Konfigurieren"
+      },
+      "step": {
+        "user": {
+          "title": "Rollladen hinzufügen",
+          "menu_options": {
+            "pair_device": "Koppeln und kalibrieren (veraltet)",
+            "manual": "Manuell hinzufügen",
+            "pair_test": "Koppeln und testen (empfohlen)"
+          }
+        },
+        "pair_device": {
+          "title": "Neues Gerät koppeln",
+          "description": "Verwenden Sie nach dem Drücken von „Koppeln" innerhalb von 2 Minuten eine bereits gekoppelte Original-Fernbedienung: Wählen Sie den Motor/Kanal aus, drücken Sie dessen Programmiertaste, bis die Kanal-LED blinkt, drücken Sie dann Stopp und warten Sie, bis der Motor piept oder rattert. Home Assistant erkennt das Telegramm und sendet den Anlernbefehl 60, gefolgt vom Abschlussbefehl 40 auf demselben Enum-Wert. Eine ACK-Bestätigung des USB-Sticks belegt nicht, dass der Motor den Sender gelernt hat.",
+          "submit": "Koppeln"
+        },
+        "manual": {
+          "title": "Rollladen manuell hinzufügen",
+          "description": "Die Befehlsidentität wird für die ausgehende Steuerung verwendet. Die optionale Statusidentität wird mit empfangenen Bewegungsmeldungen abgeglichen; lassen Sie sie leer, um die Befehlsidentität zu verwenden. Die primäre Statusidentität steuert die Positionsverfolgung. Geben Sie zusätzliche Identitäten als GERÄTE-ID/ENUM ein, eine pro Zeile oder durch Kommas getrennt. Sekundäre Identitäten werden für Diagnosezwecke abgeglichen, ändern jedoch nicht die Position. Lassen Sie beide primären Statusfelder leer, wenn sie unbekannt sind; die Sendeidentität wird nicht als Status verwendet, es sei denn, sie wurde tatsächlich beobachtet oder Sie geben sie manuell ein.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Geräte-ID",
+            "device_enum": "Enum",
+            "open_time_seconds": "Öffnungszeit",
+            "close_time_seconds": "Schließzeit",
+            "status_device_id": "Primäre Status-Geräte-ID (optional)",
+            "status_enum": "Primärer Status-Enum (optional)",
+            "invert_direction": "Öffnungs-/Schließrichtung umkehren",
+            "secondary_status_identities": "Zusätzliche Statusidentitäten (optional)"
+          },
+          "submit": "Hinzufügen"
+        },
+        "name_device": {
+          "title": "Gerät benennen",
+          "description": "Ein Kopplungskandidat wurde erkannt, und der Anlernbefehl des USB-Sticks wurde für Geräte-ID {device_id} gesendet. Die ACK-Bestätigung des Sticks belegt nicht, dass der Motor dies autorisiert hat. Benennen Sie den Rollladen und prüfen Sie anschließend die tatsächliche Bewegung.",
+          "data": {
+            "device_name": "Gerätename"
+          }
+        },
+        "calibration_close": {
+          "title": "Schritt 1: Rollladen schließen",
+          "description": "Stellen Sie zunächst sicher, dass {device_name} vollständig geschlossen ist (ganz unten). Drücken Sie 'Weiter', wenn Sie bereit sind.",
+          "submit": "Weiter"
+        },
+        "calibration_open_instruction": {
+          "title": "Schritt 2: Rollladen öffnen",
+          "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu öffnen. Drücken Sie Start **und dann** die Öffnen-Taste an der Steuerung, um die Messung zu starten. Sie müssen sich nicht beeilen, der Timer startet erst, wenn wir eine Aufwärtsbewegungsnachricht vom Rollladen erhalten.",
+          "submit": "Start"
+        },
+        "calibration_close_instruction": {
+          "title": "Schritt 3: Rollladen schließen",
+          "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu schließen. Drücken Sie Start **und dann** die Schließen-Taste an der Steuerung, um die Messung zu starten. Sie müssen sich nicht beeilen, der Timer startet erst, wenn wir eine Abwärtsbewegungsnachricht vom Rollladen erhalten.",
+          "submit": "Start"
+        },
+        "calibration_complete": {
+          "title": "Kalibrierung abgeschlossen",
+          "description": "Kalibrierung für {device_name} abgeschlossen!\n\nGemessene Zeiten:\n- Öffnungszeit: {open_time} Sekunden\n- Schließzeit: {close_time} Sekunden\n\nDiese Zeiten werden verwendet, um die Rollladenposition genau zu verfolgen.\n\nStatuserkennung aus der Kalibrierung:\n- Primäre Statusidentität: {primary_status_identity}\n- Verwendete primäre Befehle: {primary_frames}\n- Sekundäre Identitäten: {secondary_status_identities}\n- Beobachtete Telegramme: {observed_frame_count}\n- Endegrund: {calibration_end_reason}\n- Positionsverfolgung: {position_tracking}\n\nWenn keine Empfangs-/Statusidentität erkannt wurde, kann der Rollladen weiterhin gesteuert werden; seine Position wird dann anhand der von Home Assistant gesendeten Befehle geschätzt.",
+          "submit": "Fertig"
+        },
+        "pair_test": {
+          "title": "Koppeln und testen",
+          "description": "Verwenden Sie nach dem Drücken von „Koppeln" innerhalb von 2 Minuten eine bereits gekoppelte Original-Fernbedienung: Wählen Sie den Motor/Kanal aus, drücken Sie dessen Programmiertaste, bis die Kanal-LED blinkt, drücken Sie dann Stopp und warten Sie, bis der Motor piept oder rattert. Home Assistant erkennt das Telegramm und sendet den Anlernbefehl 60, gefolgt vom Abschlussbefehl 40 auf demselben Enum-Wert. Eine ACK-Bestätigung des USB-Sticks belegt nicht, dass der Motor den Sender gelernt hat. Anschließend folgt ein kurzer Auf/Stopp-Test; bestätigen Sie, ob sich der Motor tatsächlich bewegt hat.",
+          "submit": "Koppeln"
+        },
+        "manual_next": {
+          "title": "Manueller Rollladen bereit",
+          "menu_options": {
+            "test_motor": "Motorbefehl testen",
+            "save_manual": "Ohne Test speichern"
+          }
+        },
+        "test_motor": {
+          "title": "Motorbefehl testen",
+          "description": "Dies sendet einen kurzen Auf-Befehl und anschließend Stopp an die Befehlsidentität {device_id}/{device_enum}. Beobachten Sie den Motor und drücken Sie Test.",
+          "submit": "Test"
+        },
+        "did_motor_move": {
+          "title": "Hat sich der Motor bewegt?",
+          "description": "Befehlsidentität {device_id}/{device_enum} getestet.",
+          "data": {
+            "motor_moved": "Der Motor hat sich bewegt"
+          },
+          "submit": "Weiter"
+        },
+        "test_success": {
+          "title": "Befehlstest erfolgreich",
+          "menu_options": {
+            "calibration_close": "Weiter zur Kalibrierung",
+            "manual_times": "Mit manuellen Laufzeiten speichern"
+          }
+        },
+        "manual_times": {
+          "title": "Laufzeiten eingeben",
+          "description": "Geben Sie die gemessenen vollständigen Öffnungs- und Schließzeiten ein.",
+          "data": {
+            "open_time_seconds": "Öffnungszeit",
+            "close_time_seconds": "Schließzeit"
+          },
+          "submit": "Speichern"
+        },
+        "reconfigure": {
+          "title": "Rollladen konfigurieren",
+          "menu_options": {
+            "edit": "Identitäten und Laufzeiten bearbeiten",
+            "test_existing": "Motorbefehl testen",
+            "developer_tools": "Entwicklerwerkzeuge",
+            "calibrate": "Kalibrieren"
+          }
+        },
+        "developer_tools": {
+          "title": "Entwicklerwerkzeuge",
+          "description": "Ausgewählter Rollladen: {selected_blind}\n\nLetztes passendes Telegramm (beliebige Identität):\nGeräte-ID: {last_device_id}\nEnum: {last_enum}\nBefehl: {last_command}\nIdentitätsrolle: {last_identity_role}\nInterpretation: {last_interpretation}\nPositionsverfolgung: {last_position_tracking}\nZeit: {last_time}\n\nLetztes primäres Verfolgungstelegramm:\nGeräte-ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nBefehl: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nZeit: {primary_last_time}\n\nLetztes sekundäres Telegramm:\nGeräte-ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nBefehl: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nZeit: {secondary_last_time}\n\nLetzte Positionsaktualisierung:\nQuelle: {position_source}\nRichtung: {position_direction}\nVorherige Position: {position_previous}\nNeue Position: {position_new}\nStatus: {position_status}\nZeit: {position_time}\n\nAktuelle Positionsdiagnose:\nAktuell geschätzte Position: {current_position}\nLetzte manuelle Abgleichzeit: {last_manual_sync_time}\nZuverlässigkeit: {position_confidence}\nSeit Neustart bestätigt: {position_confirmed_since_restart}\n\nAktuelles Sendeziel:\nGeräte-ID: {command_device_id}\nEnum: {command_enum}\n\nKonfigurierte Statusidentitäten:\nPrimär: {primary_status_device_id}/{primary_status_enum}\nQuelle: {status_identity_source}\nSekundär:\n{secondary_status_identities}\n\nLetzter Kalibrierungslauf:\nAbgeschlossen: {last_calibration_time}\nEndegrund: {calibration_end_reason}\nKandidatenidentitäten:\n{calibration_candidates}\nBeobachtete Telegramme:\n{calibration_frames}\n\nStick-Status:\nVerbunden: {stick_connected}\nModus: {stick_mode}\nBereit: {stick_ready}\nBusy-Zustand aktiv: {stick_busy}\n\n{result}\n\nAuf und Zu bewegen sich weiter, bis Stopp gedrückt wird oder eine Endposition erreicht ist.\n\nACK-Hinweis: t1/t0 bestätigt nur, dass sich der Sender des USB-Sticks ein-/ausgeschaltet hat. Der Empfang oder die Bewegung des Motors wird dadurch nicht bestätigt.",
+          "menu_options": {
+            "test_open": "Test: Öffnen",
+            "test_close": "Test: Schließen",
+            "test_stop": "Test: Stopp",
+            "discover_status": "Status von Originalfernbedienung erkennen",
+            "set_position_open": "Position vollständig geöffnet setzen",
+            "set_position_closed": "Position vollständig geschlossen setzen",
+            "set_position_manual": "Position manuell setzen",
+            "reset_stick": "Stick zurücksetzen / seriell neu verbinden",
+            "copy_diagnostics": "Diagnose kopieren",
+            "teach_motor": "Motor anlernen / USB-Sender aktivieren",
+            "send_raw_command": "Rohes Funktelegramm senden"
+          }
+        },
+        "discover_status": {
+          "title": "Status von Originalfernbedienung erkennen",
+          "description": "Ausgewählter Rollladen: {selected_blind}\nBefehls-/Sendeidentität: {command_identity}\n\nVerwenden Sie nach dem Drücken von „Empfang starten" die Original-Schellenberg-Fernbedienung für diesen Rollladenkanal: Drücken Sie AUF, STOPP, ZU, STOPP. Home Assistant lauscht 45 Sekunden lang und gruppiert jede empfangene Geräte-ID, jeden Enum-Wert, Befehl und Zeitstempel.",
+          "submit": "Empfang starten"
+        },
+        "confirm_status_discovery": {
+          "title": "Erkannte Statusidentitäten bestätigen",
+          "description": "Befehls-/Sendeidentität: {command_identity}\nBeobachtete Telegramme: {frame_count}\n\nErkannte primäre Statusidentität: {primary_identity}\nBeobachtete primäre Befehle: {primary_commands}\nPrimäre Zeitstempel: {primary_timestamps}\n\nErkannte sekundäre Identitäten:\n{secondary_identities}\n\nBeobachtete unbekannte Befehle:\n{unknown_commands}\n\nPositionsverfolgung: {position_tracking}",
+          "submit": "Erkannte Identitäten speichern"
+        },
+        "set_position_manual": {
+          "title": "Position manuell setzen",
+          "description": "Die aktuelle Position für {selected_blind} festlegen, ohne den Motor zu bewegen. Aktuell erfasste Position: {current_position}.",
+          "data": {
+            "position": "Position"
+          },
+          "submit": "Position bestätigen"
+        },
+        "copy_diagnostics": {
+          "title": "Diagnose kopieren",
+          "description": "Wählen und kopieren Sie den folgenden Diagnosetext. Drücken Sie Senden, um zurückzukehren.",
+          "data": {
+            "diagnostics": "Diagnose"
+          },
+          "submit": "Zurück"
+        },
+        "edit": {
+          "title": "Rollladeneinstellungen bearbeiten",
+          "description": "Das Ändern der Protokollidentitäten ändert nicht die eindeutige Entity-ID in Home Assistant. Die primäre Statusidentität steuert die Positionsverfolgung. Geben Sie zusätzliche Identitäten als GERÄTE-ID/ENUM ein, eine pro Zeile oder durch Kommas getrennt. Sekundäre Identitäten werden für Diagnosezwecke abgeglichen, ändern jedoch nicht die Position. Lassen Sie beide primären Statusfelder leer, wenn sie unbekannt sind; die Sendeidentität wird nicht als Status verwendet, es sei denn, sie wurde tatsächlich beobachtet oder Sie geben sie manuell ein.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Befehls-Geräte-ID",
+            "device_enum": "Befehls-Enum",
+            "status_device_id": "Primäre Status-Geräte-ID (optional)",
+            "status_enum": "Primärer Status-Enum (optional)",
+            "open_time_seconds": "Öffnungszeit",
+            "close_time_seconds": "Schließzeit",
+            "invert_direction": "Öffnungs-/Schließrichtung umkehren",
+            "secondary_status_identities": "Zusätzliche Statusidentitäten (optional)"
+          },
+          "submit": "Speichern"
+        },
+        "teach_motor": {
+          "title": "Motor anlernen / USB-Sender aktivieren",
+          "description": "Ausgewählter Rollladen: {selected_blind}\nBefehlsidentität: {command_device_id}/{command_enum}\n\nVor dem Senden: Wählen Sie diesen Motor/Kanal an einer bereits gekoppelten Original-Fernbedienung aus, drücken Sie deren Programmiertaste, bis die Kanal-LED blinkt, drücken Sie dann Stopp und warten Sie, bis der Motor piept oder rattert. Erst dann senden. Home Assistant sendet den Anlernbefehl 60, wartet auf die ACK-Bestätigung des Sticks, sendet den Abschlussbefehl 40 auf demselben Enum-Wert und führt anschließend einen kurzen Auf/Stopp-Test durch. ACK-Bestätigungen des Sticks belegen nicht, dass der Motor gelernt hat oder sich bewegt hat. Wiederholen Sie Befehl 60 nicht außerhalb der Motor-Programmiersequenz; er kann auch die Drehrichtung ändern.",
+          "submit": "Anlernbefehl senden und testen"
+        },
+        "send_raw_command": {
+          "title": "Rohes Funktelegramm senden",
+          "description": "Ausgewählter Rollladen: {selected_blind}\nKonfigurierter Enum: {command_enum}\n\nGeben Sie genau 11 Zeichen ein: ss + zweistelliger Enum + Wiederholungsziffer + zweistelliger Befehl + 0000. Beispiel: ss109010000. Befehle sind 00 Stopp, 01 Auf/Öffnen, 02 Zu/Schließen, 40 Abschluss/Kopplung erlauben und 60 Anlernen/Richtung ändern. t1/t0 bestätigt nur den Sendezyklus des Sticks.",
+          "data": {
+            "payload": "Rohes Funktelegramm"
+          },
+          "submit": "Rohdaten senden"
+        }
+      },
+      "error": {
+        "required": "Dieses Feld ist erforderlich.",
+        "invalid_device_id": "Die Geräte-ID muss genau 6 Hexadezimalzeichen enthalten.",
+        "invalid_device_enum": "Der Enum-Wert muss genau 2 Hexadezimalzeichen enthalten.",
+        "invalid_travel_time": "Die Laufzeit muss größer als null sein.",
+        "already_configured": "Dieses Gerät ist bereits konfiguriert.",
+        "calibration_timeout": "Kalibrierung abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
+        "calibration_start_timeout": "Zeitüberschreitung beim Warten auf die Bewegung des Rollladens. Bitte stellen Sie sicher, dass das Gerät ordnungsgemäß angeschlossen ist, und versuchen Sie es erneut.",
+        "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut.",
+        "command_failed": "Der serielle Befehl konnte nicht eingereiht werden. Prüfen Sie die USB-Verbindung und die Protokolle.",
+        "invalid_raw_payload": "Geben Sie genau 11 Zeichen ein: 'ss' gefolgt von 9 Hexadezimalzeichen.",
+        "transmit_failed": "Das rohe Funktelegramm konnte nicht gesendet werden. Prüfen Sie den Stick-Status und die Protokolle.",
+        "invalid_status_identities": "Geben Sie jede zusätzliche Statusidentität als GERÄTE_ID/ENUM ein, getrennt durch Kommas oder neue Zeilen (zum Beispiel F2B8D5/23).",
+        "status_identity_incomplete": "Geben Sie beide primären Statusfelder ein oder lassen Sie beide leer.",
+        "status_discovery_unavailable": "Der USB-Stick ist nicht verbunden. Verbinden Sie ihn erneut und versuchen Sie es noch einmal.",
+        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
+      },
+      "abort": {
+        "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
+        "pairing_failed": "Kopplung fehlgeschlagen.",
+        "device_not_found": "Der ausgewählte Rollladen wurde nicht gefunden. Bitte starten Sie diesen Schritt erneut.",
+        "reconfigure_successful": "Rollladen-Konfiguration erfolgreich aktualisiert",
+        "command_test_successful": "Der Motorbefehlstest war erfolgreich."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Bearbeiten Sie den seriellen Anschlusspfad für den Schellenberg USB-Hub.",
+        "data": {
+          "serial_port": "Serieller Anschluss"
+        },
+        "submit": "Speichern"
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum seriellen Anschluss fehlgeschlagen",
+      "unknown": "Unerwarteter Fehler aufgetreten"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Verbindungsstatus",
+        "state": {
+          "connected": "Verbunden",
+          "disconnected": "Getrennt"
+        }
+      },
+      "firmware_version": {
+        "name": "Firmware-Version"
+      },
+      "operating_mode": {
+        "name": "Betriebsmodus",
+        "state": {
+          "bootloader": "Bootloader",
+          "initial": "Initialisierung",
+          "listening": "Empfangsbereit",
+          "pairing": "Kopplung",
+          "unknown": "Unbekannt"
+        }
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "test_command": {
+      "name": "Testbefehl für Rollladen",
+      "description": "Sendet Auf, Zu oder Stopp an einen Geräte-Enum, ohne einen Rollladen anzulegen."
+    }
+  }
+        }
