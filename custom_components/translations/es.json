@@ -1,0 +1,291 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurar memoria USB Schellenberg",
+        "description": "Introduzca la ruta del puerto serie para su memoria USB Schellenberg.",
+        "data": {
+          "serial_port": "Puerto serie"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirmar memoria USB Schellenberg",
+        "description": "Confirme la ruta del puerto serie para su memoria USB Schellenberg detectada.",
+        "data": {
+          "serial_port": "Puerto serie"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Error al conectar con el puerto serie",
+      "unknown": "Se produjo un error inesperado"
+    },
+    "abort": {
+      "already_configured": "El dispositivo ya está configurado"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Persiana",
+      "initiate_flow": {
+        "user": "Añadir persiana",
+        "reconfigure": "Configurar"
+      },
+      "step": {
+        "user": {
+          "title": "Añadir una persiana",
+          "menu_options": {
+            "pair_device": "Emparejar y calibrar (antiguo)",
+            "manual": "Añadir manualmente",
+            "pair_test": "Emparejar y probar (recomendado)"
+          }
+        },
+        "pair_device": {
+          "title": "Emparejar un nuevo dispositivo",
+          "description": "Después de pulsar Emparejar, utilice un mando físico ya emparejado en un plazo de 2 minutos: seleccione el motor/canal, pulse su botón de programación hasta que el LED del canal parpadee, luego pulse Stop y espere a que el motor emita un pitido o traqueteo. Home Assistant detectará la trama y enviará el comando de aprendizaje 60 seguido del comando de finalización 40 en el mismo enum. Un ACK de la memoria USB no demuestra que el motor haya aprendido el transmisor.",
+          "submit": "Emparejar"
+        },
+        "manual": {
+          "title": "Añadir una persiana manualmente",
+          "description": "La identidad de comando se utiliza para el control saliente. La identidad de estado opcional se compara con los mensajes de movimiento recibidos; déjela en blanco para usar la identidad de comando. La identidad de estado principal controla el seguimiento de posición. Introduzca identidades adicionales como ID_DISPOSITIVO/ENUM, una por línea o separadas por comas. Las identidades secundarias se utilizan para diagnóstico, pero no cambian la posición. Deje ambos campos de estado principal en blanco si se desconocen; la identidad de transmisión no se usará como estado a menos que se haya observado realmente o la introduzca manualmente.",
+          "data": {
+            "device_name": "Nombre",
+            "device_id": "ID del dispositivo",
+            "device_enum": "Enum",
+            "open_time_seconds": "Tiempo de apertura",
+            "close_time_seconds": "Tiempo de cierre",
+            "status_device_id": "ID de estado principal (opcional)",
+            "status_enum": "Enum de estado principal (opcional)",
+            "invert_direction": "Invertir dirección de apertura/cierre",
+            "secondary_status_identities": "Identidades de estado adicionales (opcional)"
+          },
+          "submit": "Añadir"
+        },
+        "name_device": {
+          "title": "Nombre su dispositivo",
+          "description": "Se detectó un candidato de emparejamiento y se transmitió el comando de aprendizaje de la memoria USB para el ID de dispositivo {device_id}. El ACK de la memoria no demuestra que el motor lo haya autorizado. Nombre la persiana y luego verifique el movimiento real.",
+          "data": {
+            "device_name": "Nombre del dispositivo"
+          }
+        },
+        "calibration_close": {
+          "title": "Paso 1: Cerrar la persiana",
+          "description": "Primero, asegúrese de que {device_name} esté completamente cerrada (totalmente abajo). Presione 'Siguiente' cuando esté listo.",
+          "submit": "Siguiente"
+        },
+        "calibration_open_instruction": {
+          "title": "Paso 2: Abrir la persiana",
+          "description": "Ahora mediremos cuánto tiempo tarda en abrirse {device_name}. Presione Iniciar **y luego** presione el botón de abrir en el control para comenzar a medir. No hay prisa, el temporizador no comienza hasta que recibamos un mensaje de subida de la persiana.",
+          "submit": "Iniciar"
+        },
+        "calibration_close_instruction": {
+          "title": "Paso 3: Cerrar la persiana",
+          "description": "Ahora mediremos cuánto tiempo tarda en cerrarse {device_name}. Presione Iniciar **y luego** presione el botón de cerrar en el control para comenzar a medir. No hay prisa, el temporizador no comienza hasta que recibamos un mensaje de bajada de la persiana.",
+          "submit": "Iniciar"
+        },
+        "calibration_complete": {
+          "title": "Calibración completada",
+          "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizarán para rastrear con precisión la posición de la persiana.\n\nDetección de estado a partir de la calibración:\n- Identidad de estado principal: {primary_status_identity}\n- Comandos principales utilizados: {primary_frames}\n- Identidades secundarias: {secondary_status_identities}\n- Tramas observadas: {observed_frame_count}\n- Motivo de finalización: {calibration_end_reason}\n- Seguimiento de posición: {position_tracking}\n\nSi no se detectó ninguna identidad de recepción/estado, la persiana aún se puede controlar y su posición se estima a partir de los comandos de Home Assistant.",
+          "submit": "Hecho"
+        },
+        "pair_test": {
+          "title": "Emparejar y probar",
+          "description": "Después de pulsar Emparejar, utilice un mando físico ya emparejado en un plazo de 2 minutos: seleccione el motor/canal, pulse su botón de programación hasta que el LED del canal parpadee, luego pulse Stop y espere a que el motor emita un pitido o traqueteo. Home Assistant detectará la trama y enviará el comando de aprendizaje 60 seguido del comando de finalización 40 en el mismo enum. Un ACK de la memoria USB no demuestra que el motor haya aprendido el transmisor. A continuación se realiza una breve prueba de Abrir/Stop; confirme si el motor se movió realmente.",
+          "submit": "Emparejar"
+        },
+        "manual_next": {
+          "title": "Persiana manual lista",
+          "menu_options": {
+            "test_motor": "Probar comando del motor",
+            "save_manual": "Guardar sin probar"
+          }
+        },
+        "test_motor": {
+          "title": "Probar comando del motor",
+          "description": "Esto envía un breve comando de Abrir y luego Stop a la identidad de comando {device_id}/{device_enum}. Observe el motor y pulse Probar.",
+          "submit": "Probar"
+        },
+        "did_motor_move": {
+          "title": "¿Se movió el motor?",
+          "description": "Identidad de comando probada {device_id}/{device_enum}.",
+          "data": {
+            "motor_moved": "El motor se movió"
+          },
+          "submit": "Continuar"
+        },
+        "test_success": {
+          "title": "Prueba de comando exitosa",
+          "menu_options": {
+            "calibration_close": "Continuar a la calibración",
+            "manual_times": "Guardar con tiempos manuales"
+          }
+        },
+        "manual_times": {
+          "title": "Introducir tiempos de recorrido",
+          "description": "Introduzca los tiempos completos de apertura y cierre medidos.",
+          "data": {
+            "open_time_seconds": "Tiempo de apertura",
+            "close_time_seconds": "Tiempo de cierre"
+          },
+          "submit": "Guardar"
+        },
+        "reconfigure": {
+          "title": "Configurar persiana",
+          "menu_options": {
+            "edit": "Editar identidades y tiempos de recorrido",
+            "test_existing": "Probar comando del motor",
+            "developer_tools": "Herramientas de desarrollador",
+            "calibrate": "Calibrar"
+          }
+        },
+        "developer_tools": {
+          "title": "Herramientas de desarrollador",
+          "description": "Persiana seleccionada: {selected_blind}\n\nÚltima trama coincidente (cualquier identidad):\nID de dispositivo: {last_device_id}\nEnum: {last_enum}\nComando: {last_command}\nRol de identidad: {last_identity_role}\nInterpretación: {last_interpretation}\nSeguimiento de posición: {last_position_tracking}\nHora: {last_time}\n\nÚltima trama de seguimiento primaria:\nID de dispositivo: {primary_last_device_id}\nEnum: {primary_last_enum}\nComando: {primary_last_command}\nInterpretación: {primary_last_interpretation}\nHora: {primary_last_time}\n\nÚltima trama secundaria:\nID de dispositivo: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nComando: {secondary_last_command}\nInterpretación: {secondary_last_interpretation}\nHora: {secondary_last_time}\n\nÚltima actualización de posición:\nOrigen: {position_source}\nDirección: {position_direction}\nPosición anterior: {position_previous}\nPosición nueva: {position_new}\nEstado: {position_status}\nHora: {position_time}\n\nDiagnóstico de posición actual:\nPosición estimada actual: {current_position}\nÚltima sincronización manual: {last_manual_sync_time}\nConfianza: {position_confidence}\nConfirmada desde el reinicio: {position_confirmed_since_restart}\n\nObjetivo de transmisión actual:\nID de dispositivo: {command_device_id}\nEnum: {command_enum}\n\nIdentidades de estado configuradas:\nPrimaria: {primary_status_device_id}/{primary_status_enum}\nOrigen: {status_identity_source}\nSecundarias:\n{secondary_status_identities}\n\nÚltima calibración:\nCompletada: {last_calibration_time}\nMotivo de finalización: {calibration_end_reason}\nIdentidades candidatas:\n{calibration_candidates}\nTramas observadas:\n{calibration_frames}\n\nEstado de la memoria USB:\nConectada: {stick_connected}\nModo: {stick_mode}\nLista: {stick_ready}\nOcupada: {stick_busy}\n\n{result}\n\nAbrir y Cerrar continúan moviéndose hasta que se pulse Stop o se alcance una posición final.\n\nNota sobre ACK: t1/t0 solo confirma que el transmisor de la memoria USB se encendió/apagó. No confirma la recepción ni el movimiento del motor.",
+          "menu_options": {
+            "test_open": "Probar apertura",
+            "test_close": "Probar cierre",
+            "test_stop": "Probar stop",
+            "discover_status": "Detectar estado desde el mando original",
+            "set_position_open": "Establecer posición totalmente abierta",
+            "set_position_closed": "Establecer posición totalmente cerrada",
+            "set_position_manual": "Establecer posición manualmente",
+            "reset_stick": "Reiniciar memoria / reconectar puerto serie",
+            "copy_diagnostics": "Copiar diagnóstico",
+            "teach_motor": "Programar motor / activar transmisor USB",
+            "send_raw_command": "Enviar trama RF sin procesar"
+          }
+        },
+        "discover_status": {
+          "title": "Detectar estado desde el mando original",
+          "description": "Persiana seleccionada: {selected_blind}\nIdentidad de comando/transmisión: {command_identity}\n\nDespués de pulsar Iniciar escucha, utilice el mando original de Schellenberg para este canal de persiana: pulse ABRIR, STOP, CERRAR, STOP. Home Assistant escucha durante 45 segundos y agrupa cada ID de dispositivo, enum, comando y marca de tiempo recibidos.",
+          "submit": "Iniciar escucha"
+        },
+        "confirm_status_discovery": {
+          "title": "Confirmar identidades de estado detectadas",
+          "description": "Identidad de comando/transmisión: {command_identity}\nTramas observadas: {frame_count}\n\nIdentidad de estado principal detectada: {primary_identity}\nComandos principales observados: {primary_commands}\nMarcas de tiempo principales: {primary_timestamps}\n\nIdentidades secundarias detectadas:\n{secondary_identities}\n\nComandos desconocidos observados:\n{unknown_commands}\n\nSeguimiento de posición: {position_tracking}",
+          "submit": "Guardar identidades detectadas"
+        },
+        "set_position_manual": {
+          "title": "Establecer posición manualmente",
+          "description": "Establezca la posición actual de {selected_blind} sin mover el motor. Posición registrada actualmente: {current_position}.",
+          "data": {
+            "position": "Posición"
+          },
+          "submit": "Confirmar posición"
+        },
+        "copy_diagnostics": {
+          "title": "Copiar diagnóstico",
+          "description": "Seleccione y copie el texto de diagnóstico a continuación. Pulse Enviar para volver.",
+          "data": {
+            "diagnostics": "Diagnóstico"
+          },
+          "submit": "Volver"
+        },
+        "edit": {
+          "title": "Editar ajustes de la persiana",
+          "description": "Cambiar las identidades de protocolo no cambia el ID único de la entidad en Home Assistant. La identidad de estado principal controla el seguimiento de posición. Introduzca identidades adicionales como ID_DISPOSITIVO/ENUM, una por línea o separadas por comas. Las identidades secundarias se utilizan para diagnóstico, pero no cambian la posición. Deje ambos campos de estado principal en blanco si se desconocen; la identidad de transmisión no se usará como estado a menos que se haya observado realmente o la introduzca manualmente.",
+          "data": {
+            "device_name": "Nombre",
+            "device_id": "ID del dispositivo de comando",
+            "device_enum": "Enum de comando",
+            "status_device_id": "ID de estado principal (opcional)",
+            "status_enum": "Enum de estado principal (opcional)",
+            "open_time_seconds": "Tiempo de apertura",
+            "close_time_seconds": "Tiempo de cierre",
+            "invert_direction": "Invertir dirección de apertura/cierre",
+            "secondary_status_identities": "Identidades de estado adicionales (opcional)"
+          },
+          "submit": "Guardar"
+        },
+        "teach_motor": {
+          "title": "Programar motor / activar transmisor USB",
+          "description": "Persiana seleccionada: {selected_blind}\nIdentidad de comando: {command_device_id}/{command_enum}\n\nAntes de enviar: seleccione este motor/canal en un mando físico ya emparejado, pulse su botón de programación hasta que el LED del canal parpadee, luego pulse Stop y espere a que el motor emita un pitido o traqueteo. Envíe solo entonces. Home Assistant envía el comando de aprendizaje 60, espera el ACK de la memoria, envía el comando de finalización 40 en el mismo enum y luego realiza una breve prueba de Abrir/Stop. Los ACK de la memoria no demuestran que el motor haya aprendido o se haya movido. No repita el comando 60 fuera de la secuencia de programación del motor; también puede cambiar el sentido de giro.",
+          "submit": "Enviar comando de aprendizaje y probar"
+        },
+        "send_raw_command": {
+          "title": "Enviar trama RF sin procesar",
+          "description": "Persiana seleccionada: {selected_blind}\nEnum configurado: {command_enum}\n\nIntroduzca exactamente 11 caracteres: ss + enum de dos dígitos + dígito repetido + comando de dos dígitos + 0000. Ejemplo: ss109010000. Los comandos son 00 Stop, 01 Subir/Abrir, 02 Bajar/Cerrar, 40 Finalizar/Permitir emparejamiento y 60 Aprender/Cambiar dirección. t1/t0 solo confirma el ciclo del transmisor de la memoria.",
+          "data": {
+            "payload": "Trama RF sin procesar"
+          },
+          "submit": "Enviar trama sin procesar"
+        }
+      },
+      "error": {
+        "required": "Este campo es obligatorio.",
+        "invalid_device_id": "El ID del dispositivo debe contener exactamente 6 caracteres hexadecimales.",
+        "invalid_device_enum": "El enum debe contener exactamente 2 caracteres hexadecimales.",
+        "invalid_travel_time": "El tiempo de recorrido debe ser mayor que cero.",
+        "already_configured": "Este dispositivo ya está configurado.",
+        "calibration_timeout": "Tiempo de calibración agotado. La persiana tardó más de 5 minutos en completar el movimiento. Por favor, verifique el dispositivo e inténtelo de nuevo.",
+        "calibration_start_timeout": "Tiempo de espera agotado para que la persiana comience a moverse. Por favor, asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
+        "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
+        "command_failed": "No se pudo poner en cola el comando serie. Compruebe la conexión USB y los registros.",
+        "invalid_raw_payload": "Introduzca exactamente 11 caracteres: 'ss' seguido de 9 caracteres hexadecimales.",
+        "transmit_failed": "No se pudo transmitir la trama sin procesar. Compruebe el estado del dispositivo USB y los registros.",
+        "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_DISPOSITIVO/ENUM, separada por comas o líneas nuevas (por ejemplo F2B8D5/23).",
+        "status_identity_incomplete": "Introduzca ambos campos de estado principal o déjelos vacíos.",
+        "status_discovery_unavailable": "La memoria USB no está conectada. Vuelva a conectarla e inténtelo de nuevo.",
+        "status_discovery_busy": "Ya hay otra captura de tramas en curso. Espere a que finalice e inténtelo de nuevo."
+      },
+      "abort": {
+        "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
+        "pairing_failed": "Error en el emparejamiento.",
+        "device_not_found": "No se pudo encontrar la persiana seleccionada. Por favor, inicie este paso de nuevo.",
+        "reconfigure_successful": "Configuración de la persiana actualizada correctamente",
+        "command_test_successful": "La prueba de comando del motor se completó correctamente."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Edite la ruta del puerto serie para el hub USB Schellenberg.",
+        "data": {
+          "serial_port": "Puerto serie"
+        },
+        "submit": "Guardar"
+      }
+    },
+    "error": {
+      "cannot_connect": "Error al conectar con el puerto serie",
+      "unknown": "Se produjo un error inesperado"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Estado de conexión",
+        "state": {
+          "connected": "Conectado",
+          "disconnected": "Desconectado"
+        }
+      },
+      "firmware_version": {
+        "name": "Versión del firmware"
+      },
+      "operating_mode": {
+        "name": "Modo de operación",
+        "state": {
+          "bootloader": "Bootloader",
+          "initial": "Inicial",
+          "listening": "Escuchando",
+          "pairing": "Emparejamiento",
+          "unknown": "Desconocido"
+        }
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "test_command": {
+      "name": "Probar comando de persiana",
+      "description": "Envía abrir, cerrar o detener a un enum de dispositivo sin crear una persiana."
+    }
+  }
+}

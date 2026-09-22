@@ -1,0 +1,291 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Schellenberg USB Stick",
+        "description": "Enter the serial port path for your Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirm Schellenberg USB Stick",
+        "description": "Confirm the serial port path for your discovered Schellenberg USB stick.",
+        "data": {
+          "serial_port": "Serial port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the serial port",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Blind",
+      "initiate_flow": {
+        "user": "Add blind",
+        "reconfigure": "Configure"
+      },
+      "step": {
+        "user": {
+          "title": "Add a blind",
+          "menu_options": {
+            "pair_test": "Pair and test (recommended)",
+            "pair_device": "Pair and calibrate (legacy)",
+            "manual": "Add manually"
+          }
+        },
+        "pair_device": {
+          "title": "Pair and calibrate",
+          "description": "After pressing Pair, use an already paired physical remote within 2 minutes: select the motor/channel, press its programming button until the channel LED blinks, then press Stop and wait for the motor to beep or rattle. Home Assistant will detect the frame and send teach command 60 followed by finish command 40 on the same enum. A USB stick ACK does not prove the motor learned the transmitter.",
+          "submit": "Pair"
+        },
+        "pair_test": {
+          "title": "Pair and test",
+          "description": "After pressing Pair, use an already paired physical remote within 2 minutes: select the motor/channel, press its programming button until the channel LED blinks, then press Stop and wait for the motor to beep or rattle. Home Assistant will detect the frame and send teach command 60 followed by finish command 40 on the same enum. A USB stick ACK does not prove the motor learned the transmitter. A short Open/Stop test follows; confirm whether the motor actually moved.",
+          "submit": "Pair"
+        },
+        "manual": {
+          "title": "Configure blind identities",
+          "description": "The command identity is used for outgoing control. The optional status identity is matched against received movement messages; leave it blank to use the command identity. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position. Leave both primary status fields blank when unknown; the transmit identity will not be used as status unless it was actually observed or you enter it manually.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Command device ID",
+            "device_enum": "Command enum",
+            "status_device_id": "Primary status device ID (optional)",
+            "status_enum": "Primary status enum (optional)",
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time",
+            "invert_direction": "Invert open/close direction",
+            "secondary_status_identities": "Additional status identities (optional)"
+          },
+          "submit": "Continue"
+        },
+        "manual_next": {
+          "title": "Manual blind ready",
+          "menu_options": {
+            "test_motor": "Test motor command",
+            "save_manual": "Save without testing"
+          }
+        },
+        "name_device": {
+          "title": "Name your device",
+          "description": "A pairing candidate was detected and the USB stick teach command was transmitted for device ID {device_id}. The stick ACK cannot prove that the motor authorized it. Name the blind, then verify actual movement.",
+          "data": {
+            "device_name": "Device name"
+          }
+        },
+        "test_motor": {
+          "title": "Test motor command",
+          "description": "This sends a short Open command and then Stop to command identity {device_id}/{device_enum}. Watch the motor and press Test.",
+          "submit": "Test"
+        },
+        "did_motor_move": {
+          "title": "Did the motor move?",
+          "description": "Tested command identity {device_id}/{device_enum}.",
+          "data": {
+            "motor_moved": "The motor moved"
+          },
+          "submit": "Continue"
+        },
+        "test_success": {
+          "title": "Command test successful",
+          "menu_options": {
+            "calibration_close": "Continue to calibration",
+            "manual_times": "Save with manual travel times"
+          }
+        },
+        "manual_times": {
+          "title": "Enter travel times",
+          "description": "Enter the measured full opening and closing times.",
+          "data": {
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time"
+          },
+          "submit": "Save"
+        },
+        "reconfigure": {
+          "title": "Configure blind",
+          "menu_options": {
+            "edit": "Edit identities and travel times",
+            "test_existing": "Test motor command",
+            "developer_tools": "Developer tools",
+            "calibrate": "Calibrate"
+          }
+        },
+        "developer_tools": {
+          "title": "Developer tools",
+          "description": "Selected blind: {selected_blind}\n\nLast matched frame (any identity):\nDevice ID: {last_device_id}\nEnum: {last_enum}\nCommand: {last_command}\nIdentity role: {last_identity_role}\nInterpretation: {last_interpretation}\nPosition tracking: {last_position_tracking}\nTime: {last_time}\n\nLast primary tracking frame:\nDevice ID: {primary_last_device_id}\nEnum: {primary_last_enum}\nCommand: {primary_last_command}\nInterpretation: {primary_last_interpretation}\nTime: {primary_last_time}\n\nLast secondary frame:\nDevice ID: {secondary_last_device_id}\nEnum: {secondary_last_enum}\nCommand: {secondary_last_command}\nInterpretation: {secondary_last_interpretation}\nTime: {secondary_last_time}\n\nLast position update:\nSource: {position_source}\nDirection: {position_direction}\nPrevious position: {position_previous}\nNew position: {position_new}\nStatus: {position_status}\nTime: {position_time}\n\nCurrent position diagnostics:\nCurrent estimated position: {current_position}\nLast manual sync time: {last_manual_sync_time}\nConfidence: {position_confidence}\nConfirmed since restart: {position_confirmed_since_restart}\n\nCurrent transmit target:\nDevice ID: {command_device_id}\nEnum: {command_enum}\n\nConfigured status identities:\nPrimary: {primary_status_device_id}/{primary_status_enum}\nSource: {status_identity_source}\nSecondary:\n{secondary_status_identities}\n\nLast calibration run:\nCompleted: {last_calibration_time}\nEnd reason: {calibration_end_reason}\nCandidate identities:\n{calibration_candidates}\nFrames observed:\n{calibration_frames}\n\nStick state:\nConnected: {stick_connected}\nMode: {stick_mode}\nReady: {stick_ready}\nBusy latched: {stick_busy}\n\n{result}\n\nOpen and Close continue moving until Stop or an end position is reached.\n\nACK note: t1/t0 confirms only that the USB stick transmitter turned on/off. It does not confirm motor reception or movement.",
+          "menu_options": {
+            "test_open": "Test Open",
+            "test_close": "Test Close",
+            "test_stop": "Test Stop",
+            "discover_status": "Discover status from original remote",
+            "set_position_open": "Set position fully open",
+            "set_position_closed": "Set position fully closed",
+            "set_position_manual": "Set position manually",
+            "reset_stick": "Reset stick / reconnect serial",
+            "copy_diagnostics": "Copy diagnostics",
+            "teach_motor": "Teach motor / activate USB transmitter",
+            "send_raw_command": "Send raw RF payload"
+          }
+        },
+        "discover_status": {
+          "title": "Discover status from original remote",
+          "description": "Selected blind: {selected_blind}\nCommand/transmit identity: {command_identity}\n\nAfter pressing Start listening, use the original Schellenberg remote for this shutter channel: press OPEN, STOP, CLOSE, STOP. Home Assistant listens for 45 seconds and groups every received device ID, enum, command, and timestamp.",
+          "submit": "Start listening"
+        },
+        "confirm_status_discovery": {
+          "title": "Confirm discovered status identities",
+          "description": "Command/transmit identity: {command_identity}\nFrames observed: {frame_count}\n\nDetected primary status identity: {primary_identity}\nPrimary commands observed: {primary_commands}\nPrimary timestamps: {primary_timestamps}\n\nDetected secondary identities:\n{secondary_identities}\n\nUnknown commands observed:\n{unknown_commands}\n\nPosition tracking: {position_tracking}",
+          "submit": "Save detected identities"
+        },
+        "set_position_manual": {
+          "title": "Set position manually",
+          "description": "Set the current position for {selected_blind} without moving the motor. Current tracked position: {current_position}.",
+          "data": {
+            "position": "Position"
+          },
+          "submit": "Confirm position"
+        },
+        "copy_diagnostics": {
+          "title": "Copy diagnostics",
+          "description": "Select and copy the diagnostic text below. Press Submit to return.",
+          "data": {
+            "diagnostics": "Diagnostics"
+          },
+          "submit": "Return"
+        },
+        "edit": {
+          "title": "Edit blind settings",
+          "description": "Changing protocol identities does not change the Home Assistant entity unique ID. The primary status identity drives position tracking. Enter additional identities as DEVICE_ID/ENUM, one per line or comma-separated. Secondary identities are matched for diagnostics but do not change position. Leave both primary status fields blank when unknown; the transmit identity will not be used as status unless it was actually observed or you enter it manually.",
+          "data": {
+            "device_name": "Name",
+            "device_id": "Command device ID",
+            "device_enum": "Command enum",
+            "status_device_id": "Primary status device ID (optional)",
+            "status_enum": "Primary status enum (optional)",
+            "open_time_seconds": "Open time",
+            "close_time_seconds": "Close time",
+            "invert_direction": "Invert open/close direction",
+            "secondary_status_identities": "Additional status identities (optional)"
+          },
+          "submit": "Save"
+        },
+        "calibration_close": {
+          "title": "Step 1: Close the blind",
+          "description": "First, ensure {device_name} is fully closed (all the way down). Press 'Next' when ready.",
+          "submit": "Next"
+        },
+        "calibration_open_instruction": {
+          "title": "Step 2: Open the blind",
+          "description": "Now we will measure how long it takes to open {device_name}. Press Start **then** press the open button on the control to start measuring. No need to rush — the timer doesn't start until we receive an upward movement message from the blind.",
+          "submit": "Start"
+        },
+        "calibration_close_instruction": {
+          "title": "Step 3: Close the blind",
+          "description": "Now we will measure how long it takes to close {device_name}. Press Start **then** press the close button on the control to start measuring. No need to rush — the timer doesn't start until we receive a downward movement message from the blind.",
+          "submit": "Start"
+        },
+        "calibration_complete": {
+          "title": "Calibration complete",
+          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times will be used to accurately track the blind's position.\n\nStatus discovery from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Frames observed: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the blind can still be controlled and its position estimated from Home Assistant commands.",
+          "submit": "Done"
+        },
+        "teach_motor": {
+          "title": "Teach motor / activate USB transmitter",
+          "description": "Selected blind: {selected_blind}\nCommand identity: {command_device_id}/{command_enum}\n\nBefore submitting: select this motor/channel on an already paired physical remote, press the remote programming button until its channel LED blinks, then press Stop and wait for the motor to beep or rattle. Submit only then. Home Assistant sends teach command 60, waits for the stick ACK, sends finish command 40 on the same enum, and then performs a short Open/Stop test. Stick ACKs do not prove that the motor learned or moved. Do not repeat command 60 outside the motor programming sequence; it can also change rotation direction.",
+          "submit": "Send teach command and test"
+        },
+        "send_raw_command": {
+          "title": "Send raw RF payload",
+          "description": "Selected blind: {selected_blind}\nConfigured enum: {command_enum}\n\nEnter exactly 11 characters: ss + two-digit enum + repeat digit + two-digit command + 0000. Example: ss109010000. Commands are 00 Stop, 01 Up/Open, 02 Down/Close, 40 Finish/Allow Pairing, and 60 Teach/Change Direction. t1/t0 only acknowledges the stick transmitter cycle.",
+          "data": {
+            "payload": "Raw RF payload"
+          },
+          "submit": "Send raw payload"
+        }
+      },
+      "error": {
+        "required": "This field is required.",
+        "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
+        "invalid_device_enum": "Enum must contain exactly 2 hexadecimal characters.",
+        "invalid_travel_time": "Travel time must be greater than zero.",
+        "already_configured": "This command device ID is already configured.",
+        "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
+        "calibration_timeout": "Calibration timed out. The blind took more than 5 minutes to complete the movement. Please check the device and try again.",
+        "calibration_start_timeout": "Timeout waiting for the blind to start moving. Please make sure the device is properly connected, and try again.",
+        "unknown": "An unexpected error occurred during calibration. Please try again.",
+        "invalid_raw_payload": "Enter exactly 11 characters: 'ss' followed by 9 hexadecimal characters.",
+        "transmit_failed": "The raw payload could not be transmitted. Check the stick state and logs.",
+        "invalid_status_identities": "Enter each additional status identity as DEVICE_ID/ENUM, separated by commas or new lines (for example F2B8D5/23).",
+        "status_identity_incomplete": "Enter both primary status fields or leave both blank.",
+        "status_discovery_unavailable": "The USB stick is not connected. Reconnect it and try again.",
+        "status_discovery_busy": "Another frame capture is already active. Wait for it to finish and try again."
+      },
+      "abort": {
+        "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+        "pairing_failed": "Pairing failed.",
+        "device_not_found": "The selected blind could not be found. Please start this step again.",
+        "command_test_successful": "The motor command test succeeded.",
+        "reconfigure_successful": "Blind configuration updated successfully"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Edit the serial port path for the Schellenberg USB hub.",
+        "data": {
+          "serial_port": "Serial port"
+        },
+        "submit": "Save"
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the serial port",
+      "unknown": "Unexpected error occurred"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Connection status",
+        "state": {
+          "connected": "Connected",
+          "disconnected": "Disconnected"
+        }
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "operating_mode": {
+        "name": "Operating mode",
+        "state": {
+          "bootloader": "Bootloader",
+          "initial": "Initial",
+          "listening": "Listening",
+          "pairing": "Pairing",
+          "unknown": "Unknown"
+        }
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "test_command": {
+      "name": "Test blind command",
+      "description": "Send open, close, or stop to a device enum without creating a cover."
+    }
+  }
+}

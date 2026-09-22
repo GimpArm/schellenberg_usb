@@ -1,0 +1,291 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurer la clé USB Schellenberg",
+        "description": "Entrez le chemin du port série pour votre clé USB Schellenberg.",
+        "data": {
+          "serial_port": "Port série"
+        }
+      },
+      "usb_confirm": {
+        "title": "Confirmer la clé USB Schellenberg",
+        "description": "Confirmez le chemin du port série pour votre clé USB Schellenberg détectée.",
+        "data": {
+          "serial_port": "Port série"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Échec de la connexion au port série",
+      "unknown": "Une erreur inattendue s'est produite"
+    },
+    "abort": {
+      "already_configured": "L'appareil est déjà configuré"
+    }
+  },
+  "config_subentries": {
+    "blind": {
+      "entry_type": "Volet",
+      "initiate_flow": {
+        "user": "Ajouter un volet",
+        "reconfigure": "Configurer"
+      },
+      "step": {
+        "user": {
+          "title": "Ajouter un volet",
+          "menu_options": {
+            "pair_device": "Appairer et calibrer (ancien)",
+            "manual": "Ajouter manuellement",
+            "pair_test": "Appairer et tester (recommandé)"
+          }
+        },
+        "pair_device": {
+          "title": "Appairer un nouvel appareil",
+          "description": "Après avoir appuyé sur Appairer, utilisez une télécommande physique déjà appairée dans les 2 minutes : sélectionnez le moteur/canal, appuyez sur son bouton de programmation jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop et attendez que le moteur émette un bip ou un cliquetis. Home Assistant détectera la trame et enverra la commande d'apprentissage 60 suivie de la commande de fin 40 sur la même énumération. Un ACK de la clé USB ne prouve pas que le moteur a appris l'émetteur.",
+          "submit": "Appairer"
+        },
+        "manual": {
+          "title": "Ajouter un volet manuellement",
+          "description": "L'identité de commande est utilisée pour le contrôle sortant. L'identité de statut facultative est comparée aux messages de mouvement reçus ; laissez-la vide pour utiliser l'identité de commande. L'identité de statut principale pilote le suivi de position. Saisissez les identités supplémentaires sous la forme ID_APPAREIL/ÉNUMÉRATION, une par ligne ou séparées par des virgules. Les identités secondaires sont utilisées à des fins de diagnostic mais ne modifient pas la position. Laissez les deux champs de statut principal vides s'ils sont inconnus ; l'identité de transmission ne sera pas utilisée comme statut sauf si elle a été réellement observée ou si vous la saisissez manuellement.",
+          "data": {
+            "device_name": "Nom",
+            "device_id": "ID de l'appareil",
+            "device_enum": "Énumération",
+            "open_time_seconds": "Durée d'ouverture",
+            "close_time_seconds": "Durée de fermeture",
+            "status_device_id": "ID d’état principale (facultatif)",
+            "status_enum": "Énumération d’état principale (facultatif)",
+            "invert_direction": "Inverser le sens d'ouverture/fermeture",
+            "secondary_status_identities": "Identités d’état supplémentaires (facultatif)"
+          },
+          "submit": "Ajouter"
+        },
+        "name_device": {
+          "title": "Nommer votre appareil",
+          "description": "Un candidat à l'appairage a été détecté et la commande d'apprentissage de la clé USB a été transmise pour l'ID d'appareil {device_id}. L'ACK de la clé ne prouve pas que le moteur l'a autorisé. Nommez le volet, puis vérifiez le mouvement réel.",
+          "data": {
+            "device_name": "Nom de l'appareil"
+          }
+        },
+        "calibration_close": {
+          "title": "Étape 1 : Fermer le volet",
+          "description": "Tout d'abord, assurez-vous que {device_name} est complètement fermé (tout en bas). Appuyez sur 'Suivant' lorsque vous êtes prêt.",
+          "submit": "Suivant"
+        },
+        "calibration_open_instruction": {
+          "title": "Étape 2 : Ouvrir le volet",
+          "description": "Nous allons maintenant mesurer le temps nécessaire pour ouvrir {device_name}. Appuyez sur Démarrer **puis** appuyez sur le bouton d'ouverture de la commande pour commencer la mesure. Pas besoin de vous précipiter, le chronomètre ne démarre que lorsque nous recevons un message de montée du volet.",
+          "submit": "Démarrer"
+        },
+        "calibration_close_instruction": {
+          "title": "Étape 3 : Fermer le volet",
+          "description": "Nous allons maintenant mesurer le temps nécessaire pour fermer {device_name}. Appuyez sur Démarrer **puis** appuyez sur le bouton de fermeture de la commande pour commencer la mesure. Pas besoin de vous précipiter, le chronomètre ne démarre que lorsque nous recevons un message de descente du volet.",
+          "submit": "Démarrer"
+        },
+        "calibration_complete": {
+          "title": "Calibration terminée",
+          "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps seront utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé et sa position estimée à partir des commandes de Home Assistant.",
+          "submit": "Terminé"
+        },
+        "pair_test": {
+          "title": "Appairer et tester",
+          "description": "Après avoir appuyé sur Appairer, utilisez une télécommande physique déjà appairée dans les 2 minutes : sélectionnez le moteur/canal, appuyez sur son bouton de programmation jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop et attendez que le moteur émette un bip ou un cliquetis. Home Assistant détectera la trame et enverra la commande d'apprentissage 60 suivie de la commande de fin 40 sur la même énumération. Un ACK de la clé USB ne prouve pas que le moteur a appris l'émetteur. Un court test Ouvrir/Stop suit ; confirmez si le moteur a réellement bougé.",
+          "submit": "Appairer"
+        },
+        "manual_next": {
+          "title": "Volet manuel prêt",
+          "menu_options": {
+            "test_motor": "Tester la commande du moteur",
+            "save_manual": "Enregistrer sans tester"
+          }
+        },
+        "test_motor": {
+          "title": "Tester la commande du moteur",
+          "description": "Ceci envoie une brève commande Ouvrir puis Stop à l'identité de commande {device_id}/{device_enum}. Observez le moteur et appuyez sur Tester.",
+          "submit": "Tester"
+        },
+        "did_motor_move": {
+          "title": "Le moteur a-t-il bougé ?",
+          "description": "Identité de commande testée {device_id}/{device_enum}.",
+          "data": {
+            "motor_moved": "Le moteur a bougé"
+          },
+          "submit": "Continuer"
+        },
+        "test_success": {
+          "title": "Test de commande réussi",
+          "menu_options": {
+            "calibration_close": "Continuer vers la calibration",
+            "manual_times": "Enregistrer avec des durées manuelles"
+          }
+        },
+        "manual_times": {
+          "title": "Saisir les durées de course",
+          "description": "Saisissez les durées complètes d'ouverture et de fermeture mesurées.",
+          "data": {
+            "open_time_seconds": "Durée d'ouverture",
+            "close_time_seconds": "Durée de fermeture"
+          },
+          "submit": "Enregistrer"
+        },
+        "reconfigure": {
+          "title": "Configurer le volet",
+          "menu_options": {
+            "edit": "Modifier les identités et durées de course",
+            "test_existing": "Tester la commande du moteur",
+            "developer_tools": "Outils de développement",
+            "calibrate": "Calibrer"
+          }
+        },
+        "developer_tools": {
+          "title": "Outils de développement",
+          "description": "Volet sélectionné : {selected_blind}\n\nDernière trame correspondante (identité quelconque) :\nID d'appareil : {last_device_id}\nÉnumération : {last_enum}\nCommande : {last_command}\nRôle de l'identité : {last_identity_role}\nInterprétation : {last_interpretation}\nSuivi de position : {last_position_tracking}\nHeure : {last_time}\n\nDernière trame de suivi primaire :\nID d'appareil : {primary_last_device_id}\nÉnumération : {primary_last_enum}\nCommande : {primary_last_command}\nInterprétation : {primary_last_interpretation}\nHeure : {primary_last_time}\n\nDernière trame secondaire :\nID d'appareil : {secondary_last_device_id}\nÉnumération : {secondary_last_enum}\nCommande : {secondary_last_command}\nInterprétation : {secondary_last_interpretation}\nHeure : {secondary_last_time}\n\nDernière mise à jour de position :\nSource : {position_source}\nDirection : {position_direction}\nPosition précédente : {position_previous}\nNouvelle position : {position_new}\nStatut : {position_status}\nHeure : {position_time}\n\nDiagnostic de position actuel :\nPosition estimée actuelle : {current_position}\nDernière synchronisation manuelle : {last_manual_sync_time}\nConfiance : {position_confidence}\nConfirmée depuis le redémarrage : {position_confirmed_since_restart}\n\nCible de transmission actuelle :\nID d'appareil : {command_device_id}\nÉnumération : {command_enum}\n\nIdentités de statut configurées :\nPrimaire : {primary_status_device_id}/{primary_status_enum}\nSource : {status_identity_source}\nSecondaires :\n{secondary_status_identities}\n\nDernière calibration :\nTerminée : {last_calibration_time}\nMotif de fin : {calibration_end_reason}\nIdentités candidates :\n{calibration_candidates}\nTrames observées :\n{calibration_frames}\n\nÉtat de la clé :\nConnectée : {stick_connected}\nMode : {stick_mode}\nPrête : {stick_ready}\nOccupée : {stick_busy}\n\n{result}\n\nOuvrir et Fermer continuent de bouger jusqu'à ce que Stop soit pressé ou qu'une position finale soit atteinte.\n\nRemarque sur l'ACK : t1/t0 confirme uniquement que l'émetteur de la clé USB s'est allumé/éteint. Cela ne confirme pas la réception ni le mouvement du moteur.",
+          "menu_options": {
+            "test_open": "Tester ouverture",
+            "test_close": "Tester fermeture",
+            "test_stop": "Tester stop",
+            "discover_status": "Détecter le statut depuis la télécommande d'origine",
+            "set_position_open": "Définir la position complètement ouverte",
+            "set_position_closed": "Définir la position complètement fermée",
+            "set_position_manual": "Définir la position manuellement",
+            "reset_stick": "Réinitialiser la clé / reconnecter le port série",
+            "copy_diagnostics": "Copier le diagnostic",
+            "teach_motor": "Appairer le moteur / activer l’émetteur USB",
+            "send_raw_command": "Envoyer une trame radio brute"
+          }
+        },
+        "discover_status": {
+          "title": "Détecter le statut depuis la télécommande d'origine",
+          "description": "Volet sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_identity}\n\nAprès avoir appuyé sur Démarrer l'écoute, utilisez la télécommande Schellenberg d'origine pour ce canal de volet : appuyez sur OUVRIR, STOP, FERMER, STOP. Home Assistant écoute pendant 45 secondes et regroupe chaque ID d'appareil, énumération, commande et horodatage reçus.",
+          "submit": "Démarrer l'écoute"
+        },
+        "confirm_status_discovery": {
+          "title": "Confirmer les identités de statut détectées",
+          "description": "Identité de commande/transmission : {command_identity}\nTrames observées : {frame_count}\n\nIdentité de statut principale détectée : {primary_identity}\nCommandes principales observées : {primary_commands}\nHorodatages principaux : {primary_timestamps}\n\nIdentités secondaires détectées :\n{secondary_identities}\n\nCommandes inconnues observées :\n{unknown_commands}\n\nSuivi de position : {position_tracking}",
+          "submit": "Enregistrer les identités détectées"
+        },
+        "set_position_manual": {
+          "title": "Définir la position manuellement",
+          "description": "Définissez la position actuelle de {selected_blind} sans déplacer le moteur. Position actuellement suivie : {current_position}.",
+          "data": {
+            "position": "Position"
+          },
+          "submit": "Confirmer la position"
+        },
+        "copy_diagnostics": {
+          "title": "Copier le diagnostic",
+          "description": "Sélectionnez et copiez le texte de diagnostic ci-dessous. Appuyez sur Envoyer pour revenir.",
+          "data": {
+            "diagnostics": "Diagnostic"
+          },
+          "submit": "Retour"
+        },
+        "edit": {
+          "title": "Modifier les paramètres du volet",
+          "description": "La modification des identités de protocole ne modifie pas l'ID unique de l'entité dans Home Assistant. L'identité de statut principale pilote le suivi de position. Saisissez les identités supplémentaires sous la forme ID_APPAREIL/ÉNUMÉRATION, une par ligne ou séparées par des virgules. Les identités secondaires sont utilisées à des fins de diagnostic mais ne modifient pas la position. Laissez les deux champs de statut principal vides s'ils sont inconnus ; l'identité de transmission ne sera pas utilisée comme statut sauf si elle a été réellement observée ou si vous la saisissez manuellement.",
+          "data": {
+            "device_name": "Nom",
+            "device_id": "ID de l'appareil de commande",
+            "device_enum": "Énumération de commande",
+            "status_device_id": "ID d’état principale (facultatif)",
+            "status_enum": "Énumération d’état principale (facultatif)",
+            "open_time_seconds": "Durée d'ouverture",
+            "close_time_seconds": "Durée de fermeture",
+            "invert_direction": "Inverser le sens d'ouverture/fermeture",
+            "secondary_status_identities": "Identités d’état supplémentaires (facultatif)"
+          },
+          "submit": "Enregistrer"
+        },
+        "teach_motor": {
+          "title": "Appairer le moteur / activer l’émetteur USB",
+          "description": "Volet sélectionné : {selected_blind}\nIdentité de commande : {command_device_id}/{command_enum}\n\nAvant d'envoyer : sélectionnez ce moteur/canal sur une télécommande physique déjà appairée, appuyez sur son bouton de programmation jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop et attendez que le moteur émette un bip ou un cliquetis. Envoyez seulement à ce moment-là. Home Assistant envoie la commande d'apprentissage 60, attend l'ACK de la clé, envoie la commande de fin 40 sur la même énumération, puis effectue un court test Ouvrir/Stop. Les ACK de la clé ne prouvent pas que le moteur a appris ou a bougé. Ne répétez pas la commande 60 en dehors de la séquence de programmation du moteur ; elle peut aussi changer le sens de rotation.",
+          "submit": "Envoyer la commande d'apprentissage et tester"
+        },
+        "send_raw_command": {
+          "title": "Envoyer une trame radio brute",
+          "description": "Volet sélectionné : {selected_blind}\nÉnumération configurée : {command_enum}\n\nSaisissez exactement 11 caractères : ss + énumération à deux chiffres + chiffre répété + commande à deux chiffres + 0000. Exemple : ss109010000. Les commandes sont 00 Stop, 01 Monter/Ouvrir, 02 Descendre/Fermer, 40 Fin/Autoriser l'appairage, et 60 Apprentissage/Changer de sens. t1/t0 confirme uniquement le cycle de l'émetteur de la clé.",
+          "data": {
+            "payload": "Trame radio brute"
+          },
+          "submit": "Envoyer la trame brute"
+        }
+      },
+      "error": {
+        "required": "Ce champ est obligatoire.",
+        "invalid_device_id": "L'ID de l'appareil doit contenir exactement 6 caractères hexadécimaux.",
+        "invalid_device_enum": "L'énumération doit contenir exactement 2 caractères hexadécimaux.",
+        "invalid_travel_time": "La durée de course doit être supérieure à zéro.",
+        "already_configured": "Cet appareil est déjà configuré.",
+        "calibration_timeout": "Délai de calibration dépassé. Le volet a mis plus de 5 minutes pour terminer le mouvement. Veuillez vérifier l'appareil et réessayer.",
+        "calibration_start_timeout": "Délai d'attente dépassé pour le début du mouvement du volet. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
+        "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
+        "command_failed": "La commande série n'a pas pu être mise en file d'attente. Vérifiez la connexion USB et les journaux.",
+        "invalid_raw_payload": "Saisissez exactement 11 caractères : 'ss' suivi de 9 caractères hexadécimaux.",
+        "transmit_failed": "La trame brute n’a pas pu être transmise. Vérifiez l’état de la clé et les journaux.",
+        "invalid_status_identities": "Saisissez chaque identité d’état supplémentaire sous la forme ID_APPAREIL/ENUM, séparée par une virgule ou une nouvelle ligne (par exemple F2B8D5/23).",
+        "status_identity_incomplete": "Saisissez les deux champs d'état principal ou laissez-les tous les deux vides.",
+        "status_discovery_unavailable": "La clé USB n'est pas connectée. Reconnectez-la et réessayez.",
+        "status_discovery_busy": "Une autre capture de trames est déjà en cours. Attendez qu'elle se termine et réessayez."
+      },
+      "abort": {
+        "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",
+        "pairing_failed": "Échec de l'appairage.",
+        "device_not_found": "Le volet sélectionné est introuvable. Veuillez recommencer cette étape.",
+        "reconfigure_successful": "Configuration du volet mise à jour avec succès",
+        "command_test_successful": "Le test de commande du moteur a réussi."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Schellenberg USB",
+        "description": "Modifiez le chemin du port série pour le hub USB Schellenberg.",
+        "data": {
+          "serial_port": "Port série"
+        },
+        "submit": "Enregistrer"
+      }
+    },
+    "error": {
+      "cannot_connect": "Échec de la connexion au port série",
+      "unknown": "Une erreur inattendue s'est produite"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "État de connexion",
+        "state": {
+          "connected": "Connecté",
+          "disconnected": "Déconnecté"
+        }
+      },
+      "firmware_version": {
+        "name": "Version du firmware"
+      },
+      "operating_mode": {
+        "name": "Mode de fonctionnement",
+        "state": {
+          "bootloader": "Bootloader",
+          "initial": "Initial",
+          "listening": "À l'écoute",
+          "pairing": "Appairage",
+          "unknown": "Inconnu"
+        }
+      }
+    },
+    "switch": {
+      "led": {
+        "name": "LED"
+      }
+    }
+  },
+  "services": {
+    "test_command": {
+      "name": "Tester une commande de volet",
+      "description": "Envoie ouvrir, fermer ou arrêter à une énumération d'appareil sans créer de volet."
+    }
+  }
+}
