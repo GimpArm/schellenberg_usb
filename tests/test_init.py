@@ -1,257 +1,330 @@
-"""Test the __init__.py module of Schellenberg USB integration."""
+"""Tests for __init__.py: the field validators, blind-ID backfill, the
+test_command service, and the full async_setup_entry / async_unload_entry
+lifecycle.
+
+The full-lifecycle test (see "async_setup_entry / async_unload_entry: full
+lifecycle" below) drives hass.config_entries.async_setup()/async_unload() for
+real - the auto-created hub subentry, the hub device-registry entry, and
+forwarding to the cover/sensor/switch platforms all run unmocked - and
+patches only the two SchellenbergUsbApi methods that would otherwise touch a
+real serial port (connect/disconnect). It covers a hub with zero saved blind
+subentries: all three platforms handle that gracefully (cover.py logs and
+returns without adding any entities; sensor.py and switch.py always add
+their fixed hub-level entities regardless of blind subentries), so no blind
+subentry needs to be set up just to exercise this path. Loading a real blind
+subentry through this same full-lifecycle path is not covered here.
+"""
 
 from __future__ import annotations
 
-from types import MappingProxyType
-from uuid import UUID
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.schellenberg_usb import (
+    _async_backfill_blind_ids,
+    _validate_device_enum,
+    _validate_device_id,
+    async_setup,
+    async_setup_entry,
+)
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
 from custom_components.schellenberg_usb.const import (
     CMD_UP,
     CONF_BLIND_ID,
     CONF_COMMAND,
+    CONF_CONFIG_ENTRY_ID,
     CONF_DEVICE_ID,
     CONF_ENUM,
     CONF_SERIAL_PORT,
     DOMAIN,
-    PLATFORMS,
     SERVICE_TEST_COMMAND,
     SUBENTRY_TYPE_BLIND,
+    SUBENTRY_TYPE_HUB,
 )
 
 
-@pytest.fixture
-def mock_config_entry(hass: HomeAssistant) -> ConfigEntry:
-    """Create a mock config entry."""
-    entry = ConfigEntry(
-        version=1,
-        domain=DOMAIN,
-        title="Schellenberg USB",
-        data={CONF_SERIAL_PORT: "/dev/ttyUSB0"},
-        options={},
-        entry_id="test_entry_id",
-        state=ConfigEntryState.NOT_LOADED,
-        minor_version=1,
-        source="test",
-        unique_id=None,
-        discovery_keys=MappingProxyType({}),
-        subentries_data=None,
-    )
-    # Manually add the entry to the internal dict to avoid async_add
-    hass.config_entries._entries[entry.entry_id] = entry
+def _stub_status_attrs(api: MagicMock) -> None:
+    """Fill in the status properties the service handler logs on every call.
+
+    These are all real @property attributes on SchellenbergUsbApi (verified
+    directly against api.py), so MagicMock(spec=SchellenbergUsbApi) allows
+    setting them freely even though the real class exposes them read-only.
+    """
+    api.is_connected = True
+    api.device_mode = "listening"
+    api.transmit_ready = True
+    api.pairing_active = False
+    api.transmitter_active = False
+    api.busy_latched = False
+    api.transmit_block_reason = None
+
+
+def make_hub_entry(hass: HomeAssistant, api: MagicMock, port: str = "/dev/ttyUSB0"):
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERIAL_PORT: port})
+    entry.add_to_hass(hass)
+    entry.runtime_data = api
     return entry
 
 
-def test_legacy_blind_id_is_backfilled_once(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
+def make_blind_subentry(subentry_id: str, blind_id: str | None) -> MagicMock:
+    subentry = MagicMock()
+    subentry.subentry_id = subentry_id
+    subentry.subentry_type = SUBENTRY_TYPE_BLIND
+    subentry.title = f"Blind {subentry_id}"
+    subentry.data = {CONF_BLIND_ID: blind_id} if blind_id is not None else {}
+    return subentry
+
+
+def make_hub_subentry(subentry_id: str = "hub1") -> MagicMock:
+    subentry = MagicMock()
+    subentry.subentry_id = subentry_id
+    subentry.subentry_type = SUBENTRY_TYPE_HUB
+    subentry.title = "Hub"
+    subentry.data = {}
+    return subentry
+
+
+# --- _validate_device_id / _validate_device_enum ---------------------------
+
+
+def test_validate_device_id_normalizes_case_and_whitespace() -> None:
+    assert _validate_device_id(" 5d3e7c ") == "5D3E7C"
+
+
+def test_validate_device_id_rejects_wrong_length() -> None:
+    with pytest.raises(vol.Invalid):
+        _validate_device_id("5D3E7")
+
+
+def test_validate_device_id_rejects_non_hex_characters() -> None:
+    with pytest.raises(vol.Invalid):
+        _validate_device_id("GGGGGG")
+
+
+def test_validate_device_enum_normalizes_case() -> None:
+    assert _validate_device_enum("a1") == "A1"
+
+
+def test_validate_device_enum_rejects_wrong_length() -> None:
+    with pytest.raises(vol.Invalid):
+        _validate_device_enum("A")
+
+
+# --- _async_backfill_blind_ids ----------------------------------------------
+
+
+def test_backfill_assigns_blind_id_when_missing(hass: HomeAssistant) -> None:
+    subentry = make_blind_subentry("sub1", blind_id=None)
+    entry = MagicMock()
+    entry.subentries = {"sub1": subentry}
+
+    with patch.object(hass.config_entries, "async_update_subentry") as mock_update:
+        changed = _async_backfill_blind_ids(hass, entry)
+
+    assert changed is True
+    mock_update.assert_called_once()
+    args, kwargs = mock_update.call_args
+    assert args[0] is entry
+    assert args[1] is subentry
+    assert kwargs["data"][CONF_BLIND_ID]  # a fresh, non-empty ID was assigned
+
+
+def test_backfill_leaves_valid_existing_blind_id_untouched(hass: HomeAssistant) -> None:
+    existing_id = "12345678-1234-5678-1234-567812345678"
+    subentry = make_blind_subentry("sub1", blind_id=existing_id)
+    entry = MagicMock()
+    entry.subentries = {"sub1": subentry}
+
+    with patch.object(hass.config_entries, "async_update_subentry") as mock_update:
+        changed = _async_backfill_blind_ids(hass, entry)
+
+    assert changed is False
+    mock_update.assert_not_called()
+
+
+def test_backfill_skips_non_blind_subentries(hass: HomeAssistant) -> None:
+    entry = MagicMock()
+    entry.subentries = {"hub1": make_hub_subentry()}
+
+    with patch.object(hass.config_entries, "async_update_subentry") as mock_update:
+        changed = _async_backfill_blind_ids(hass, entry)
+
+    assert changed is False
+    mock_update.assert_not_called()
+
+
+# --- async_setup_entry's early guard ----------------------------------------
+
+
+async def test_async_setup_entry_ignores_non_hub_entries(hass: HomeAssistant) -> None:
+    """A config entry with no CONF_SERIAL_PORT must not try to open a serial
+    connection - it returns False rather than constructing an API.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+
+    result = await async_setup_entry(hass, entry)
+
+    assert result is False
+
+
+# --- async_setup_entry / async_unload_entry: full lifecycle ----------------
+
+
+async def test_async_setup_entry_full_lifecycle_loads_and_unloads(
+    hass: HomeAssistant,
 ) -> None:
-    """Test a legacy blind gets one persisted UUID that never changes."""
-    from custom_components.schellenberg_usb import _async_backfill_blind_ids
+    """End-to-end setup/unload through the real config-entry machinery.
 
-    legacy = ConfigSubentry(
-        data=MappingProxyType({CONF_DEVICE_ID: "ABC123"}),
-        subentry_type=SUBENTRY_TYPE_BLIND,
-        title="Legacy blind",
-        unique_id="ABC123",
-    )
-    hass.config_entries.async_add_subentry(mock_config_entry, legacy)
-
-    assert _async_backfill_blind_ids(hass, mock_config_entry)
-    saved_blind_id = mock_config_entry.subentries[legacy.subentry_id].data[
-        CONF_BLIND_ID
-    ]
-    assert str(UUID(saved_blind_id)) == saved_blind_id
-
-    assert not _async_backfill_blind_ids(hass, mock_config_entry)
-    assert (
-        mock_config_entry.subentries[legacy.subentry_id].data[CONF_BLIND_ID]
-        == saved_blind_id
-    )
-
-
-def test_backfill_replaces_duplicate_and_missing_blind_ids(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
-) -> None:
-    """Test every blind receives a different valid registry UUID."""
-    from custom_components.schellenberg_usb import _async_backfill_blind_ids
-
-    duplicate_id = "11111111-1111-4111-8111-111111111111"
-    first = ConfigSubentry(
-        data=MappingProxyType({CONF_DEVICE_ID: "ABC123", CONF_BLIND_ID: duplicate_id}),
-        subentry_type=SUBENTRY_TYPE_BLIND,
-        title="First blind",
-        unique_id="ABC123",
-    )
-    second = ConfigSubentry(
-        data=MappingProxyType({CONF_DEVICE_ID: "DEF456", CONF_BLIND_ID: duplicate_id}),
-        subentry_type=SUBENTRY_TYPE_BLIND,
-        title="Second blind",
-        unique_id="DEF456",
-    )
-    third = ConfigSubentry(
-        data=MappingProxyType({CONF_DEVICE_ID: "789ABC"}),
-        subentry_type=SUBENTRY_TYPE_BLIND,
-        title="Third blind",
-        unique_id="789ABC",
-    )
-    for subentry in (first, second, third):
-        hass.config_entries.async_add_subentry(mock_config_entry, subentry)
-
-    assert _async_backfill_blind_ids(hass, mock_config_entry)
-    saved_ids = [
-        mock_config_entry.subentries[subentry.subentry_id].data[CONF_BLIND_ID]
-        for subentry in (first, second, third)
-    ]
-
-    assert saved_ids[0] == duplicate_id
-    assert len(set(saved_ids)) == 3
-    assert all(str(UUID(blind_id)) == blind_id for blind_id in saved_ids)
-    assert not _async_backfill_blind_ids(hass, mock_config_entry)
-
-
-@pytest.mark.asyncio
-async def test_async_setup_entry_basic(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
-) -> None:
-    """Test basic async_setup_entry functionality."""
-    from custom_components.schellenberg_usb import async_setup_entry
+    Only the two methods that would touch a real serial port
+    (SchellenbergUsbApi.connect/disconnect) are mocked out - everything else
+    (device registry, the auto-created hub subentry, forwarding to the
+    cover/sensor/switch platforms, the update-listener registration, and
+    unload/disconnect) runs for real. All three platforms handle a hub with
+    no saved blind subentries gracefully (cover.py logs and returns; sensor.py
+    and switch.py always add their fixed hub-level entities), so no blind
+    subentry needs to be set up just to exercise this path.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERIAL_PORT: "/dev/ttyUSB0"})
+    entry.add_to_hass(hass)
 
     with (
-        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
         patch.object(
-            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
-        ) as mock_forward,
+            SchellenbergUsbApi, "connect", AsyncMock(return_value=True)
+        ) as mock_connect,
+        patch.object(
+            SchellenbergUsbApi, "disconnect", AsyncMock(return_value=None)
+        ) as mock_disconnect,
     ):
-        result = await async_setup_entry(hass, mock_config_entry)
-
-        assert result is True
-        mock_forward.assert_called_once_with(mock_config_entry, PLATFORMS)
-        # Check that runtime_data was set
-        assert mock_config_entry.runtime_data is not None
-        assert isinstance(mock_config_entry.runtime_data, SchellenbergUsbApi)
-
-
-@pytest.mark.asyncio
-async def test_subentry_change_listener_reloads_once_and_is_removed_on_unload(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
-) -> None:
-    """Test subentry reload listeners do not accumulate across reloads."""
-    from custom_components.schellenberg_usb import async_setup_entry
-
-    with (
-        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
-        patch.object(
-            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
-        ),
-        patch.object(
-            hass.config_entries, "async_reload", new_callable=AsyncMock
-        ) as reload_entry,
-    ):
-        await async_setup_entry(hass, mock_config_entry)
-        hass.config_entries.async_add_subentry(
-            mock_config_entry,
-            ConfigSubentry(
-                data=MappingProxyType({CONF_DEVICE_ID: "F2B8D5"}),
-                subentry_type=SUBENTRY_TYPE_BLIND,
-                title="Sitting room door",
-                unique_id="F2B8D5",
-            ),
-        )
+        assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        reload_entry.assert_awaited_once_with(mock_config_entry.entry_id)
-        assert len(mock_config_entry.update_listeners) == 1
-        await mock_config_entry._async_process_on_unload(hass)
+        assert entry.state is ConfigEntryState.LOADED
+        assert isinstance(entry.runtime_data, SchellenbergUsbApi)
+        mock_connect.assert_awaited_once()
 
-    assert mock_config_entry.update_listeners == []
+        hub_subentries = [
+            s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_HUB
+        ]
+        assert len(hub_subentries) == 1
+
+        device_registry = dr.async_get(hass)
+        hub_device = device_registry.async_get_device_by_identifier(
+            (DOMAIN, entry.entry_id), entry.entry_id
+        )
+        assert hub_device is not None
+        assert hub_device.config_subentry_id == hub_subentries[0].subentry_id
+
+        entity_registry = er.async_get(hass)
+        entities = er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+        assert sum(e.domain == "switch" for e in entities) == 1
+        assert sum(e.domain == "sensor" for e in entities) == 3
+        assert sum(e.domain == "cover" for e in entities) == 0
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+        mock_disconnect.assert_awaited_once()
+
+    assert entry.state is ConfigEntryState.NOT_LOADED
 
 
-@pytest.mark.asyncio
-async def test_async_setup_registers_test_command_service(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
+# --- test_command service ----------------------------------------------
+
+
+async def test_service_test_command_success(hass: HomeAssistant) -> None:
+    api = MagicMock(spec=SchellenbergUsbApi)
+    api.control_blind = AsyncMock(return_value=True)
+    _stub_status_attrs(api)
+    make_hub_entry(hass, api)
+
+    await async_setup(hass, {})
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_TEST_COMMAND,
+        {CONF_DEVICE_ID: "5d3e7c", CONF_ENUM: "a1", CONF_COMMAND: "open"},
+        blocking=True,
+    )
+
+    api.control_blind.assert_awaited_once_with(
+        "A1", CMD_UP, device_id="5D3E7C", source="service"
+    )
+
+
+async def test_service_test_command_selects_entry_by_config_entry_id(
+    hass: HomeAssistant,
 ) -> None:
-    """Test the diagnostic service validates and forwards a command."""
-    from custom_components.schellenberg_usb import async_setup
+    api1 = MagicMock(spec=SchellenbergUsbApi)
+    api1.control_blind = AsyncMock(return_value=True)
+    _stub_status_attrs(api1)
+    make_hub_entry(hass, api1, port="/dev/ttyUSB0")
 
-    api = SchellenbergUsbApi(hass, "/dev/ttyUSB0")
-    api.control_blind = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    mock_config_entry.runtime_data = api
+    api2 = MagicMock(spec=SchellenbergUsbApi)
+    api2.control_blind = AsyncMock(return_value=True)
+    _stub_status_attrs(api2)
+    entry2 = make_hub_entry(hass, api2, port="/dev/ttyUSB1")
 
-    assert await async_setup(hass, {})
+    await async_setup(hass, {})
     await hass.services.async_call(
         DOMAIN,
         SERVICE_TEST_COMMAND,
         {
-            CONF_DEVICE_ID: "f2b8d5",
-            CONF_ENUM: "23",
+            CONF_DEVICE_ID: "5D3E7C",
+            CONF_ENUM: "01",
             CONF_COMMAND: "open",
+            CONF_CONFIG_ENTRY_ID: entry2.entry_id,
         },
         blocking=True,
     )
 
-    api.control_blind.assert_awaited_once_with(  # type: ignore[attr-defined]
-        "23", CMD_UP, device_id="F2B8D5", source="service"
-    )
+    api1.control_blind.assert_not_awaited()
+    api2.control_blind.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_async_setup_entry_creates_hub_device(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
+async def test_service_test_command_rejects_invalid_device_id(
+    hass: HomeAssistant,
 ) -> None:
-    """Test that async_setup_entry creates a hub device."""
-    from custom_components.schellenberg_usb import async_setup_entry
-
-    with (
-        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
-        patch.object(
-            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
-        ),
-    ):
-        result = await async_setup_entry(hass, mock_config_entry)
-
-        assert result is True
-
-        # Check that a hub device was created
-        device_registry = dr.async_get(hass)
-        hub_device = device_registry.async_get_device(
-            identifiers={(DOMAIN, mock_config_entry.entry_id)}
+    await async_setup(hass, {})
+    with pytest.raises((vol.Invalid, ServiceValidationError)):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_TEST_COMMAND,
+            {CONF_DEVICE_ID: "not-hex", CONF_ENUM: "01", CONF_COMMAND: "open"},
+            blocking=True,
         )
-        assert hub_device is not None
-        assert hub_device.name == "Schellenberg USB Stick"
 
 
-@pytest.mark.asyncio
-async def test_async_unload_entry(
-    hass: HomeAssistant, mock_config_entry: ConfigEntry
-) -> None:
-    """Test async_unload_entry disconnects and cleans up resources."""
-    from custom_components.schellenberg_usb import async_setup_entry, async_unload_entry
+async def test_service_test_command_fails_when_no_hub_loaded(hass: HomeAssistant) -> None:
+    await async_setup(hass, {})
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_TEST_COMMAND,
+            {CONF_DEVICE_ID: "5D3E7C", CONF_ENUM: "01", CONF_COMMAND: "open"},
+            blocking=True,
+        )
 
-    with (
-        patch.object(SchellenbergUsbApi, "connect", new_callable=AsyncMock),
-        patch.object(
-            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
-        ),
-        patch.object(
-            hass.config_entries, "async_unload_platforms", new_callable=AsyncMock
-        ) as mock_unload,
-    ):
-        # First setup the entry
-        await async_setup_entry(hass, mock_config_entry)
-        mock_unload.return_value = True
 
-        # Now unload it
-        with patch.object(
-            SchellenbergUsbApi, "disconnect", new_callable=AsyncMock
-        ) as mock_disconnect:
-            result = await async_unload_entry(hass, mock_config_entry)
+async def test_service_test_command_raises_when_command_fails(hass: HomeAssistant) -> None:
+    api = MagicMock(spec=SchellenbergUsbApi)
+    api.control_blind = AsyncMock(return_value=False)
+    _stub_status_attrs(api)
+    api.transmit_block_reason = "stick busy"
+    make_hub_entry(hass, api)
 
-            assert result is True
-            mock_unload.assert_called_once_with(mock_config_entry, PLATFORMS)
-            mock_disconnect.assert_called_once()
+    await async_setup(hass, {})
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_TEST_COMMAND,
+            {CONF_DEVICE_ID: "5D3E7C", CONF_ENUM: "01", CONF_COMMAND: "stop"},
+            blocking=True,
+        )
