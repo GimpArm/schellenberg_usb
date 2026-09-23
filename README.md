@@ -50,6 +50,7 @@ Please keep these limitations in mind:
 - Stable Home Assistant entity unique IDs
 - Diagnostics and troubleshooting tools
 - Compatibility with legacy blind configurations
+- Available in English, German, Spanish, and French
 
 ## Requirements
 
@@ -361,53 +362,164 @@ For a local development checkout, copy the integration directory into
 **Settings > System > Logs**. HACS may overwrite locally copied test files during
 an update.
 
-## Advanced protocol notes
+## Optional: fine position control and Alexa voice control (example configuration)
 
 > [!NOTE]
-> This section is intended for developers and advanced troubleshooting. It is not
-> required for normal installation or pairing.
+> This is not part of the integration itself. It is an example configuration
+> contributed by a user, built entirely from standard Home Assistant building
+> blocks (a helper, two scripts, and template covers) on top of the `cover.*`
+> entities this integration already creates. Names, entity IDs, and travel
+> times below are examples — replace them with your own.
 
-- The command/transmit identity can differ from the receive/status identity.
-- A primary status identity is selected from streams containing recognized command
-  values: `00` Stop, `01` Open/Up, and `02` Close/Down.
-- Secondary identities may emit other command families. Unknown secondary commands
-  are matched for diagnostics but do not change position.
-- `t1` indicates that the USB stick transmitter started and `t0` indicates that it
-  finished. Neither response confirms reception or movement at the motor.
-- Movement transmissions use the 11-character format
-  `ss{two-digit enum}9{two-digit command}0000`.
-- For example, Open on enum `10` is `ss109010000`.
-- Motor teach-in uses command `60`, followed by finish/allow-pairing command `40`
-  on the same enum. Do not send teach commands casually; on some devices command
-  `60` can also affect direction.
-- **Send raw RF payload** accepts exactly `ss` followed by nine hexadecimal
-  characters. Use it only when you understand the protocol and have a recovery
-  path.
+This setup gives you two extra things on top of the integration's own cover
+entities:
 
-Protocol behavior is based on the
-[reverse-engineered Schellenberg USB protocol](https://github.com/Hypfer/schellenberg-qivicon-usb).
+1. A cover that can be commanded to **any position from 0–100%**, by timing
+   open/close commands using the travel times you already measured during
+   [calibration](#calibration-explained-simply).
+2. A second, English-named copy of that cover meant to be exposed to Alexa
+   only, so voice control keeps working even when Alexa re-sends a position
+   it already thinks the blind is at.
 
-## Tested setup
+It uses three building blocks: one **number helper** per blind, two
+**scripts** that translate a requested position into a timed move, and one or
+two **template covers** per blind that tie it all together.
 
-Tested with a Schellenberg USB FunkStick and multiple installed Schellenberg RF
-shutter motors. Compatibility can vary by motor, remote, firmware, and local RF
-conditions.
+### Step 1: Create a number helper for each blind
 
-## Contributing and issue reports
+For every blind, go to **Settings > Devices & services > Helpers > Add
+helper > Number** and create one with:
 
-Bug reports and tested improvements are welcome. Please include:
+- Minimum value: `0`
+- Maximum value: `100`
+- Step size: `1`
 
-- Home Assistant version
-- Integration version, release, or commit
-- USB stick path
-- Motor and remote model, if known
-- Whether movement from Home Assistant works
-- Whether movement from the original remote is reflected in Home Assistant
-- Copied diagnostics
-- Debug logs only when they are needed
+Give it a clear name, for example "Helper: Living room blind". Note the
+resulting entity ID, for example `input_number.helper_living_room_blind` —
+you'll need it below. Both template covers for the same physical blind (the
+normal one and its Alexa twin) share this single helper.
 
-Remove or replace any identifiers you do not want to share publicly.
+### Step 2: Add the two scripts
 
-## License
+Add both scripts below, for example to `scripts.yaml`. If you prefer the UI,
+create a new script under **Settings > Automations & scenes > Scripts**,
+switch it to YAML mode, and paste in everything from `alias:` down.
 
-See [LICENSE](LICENSE).
+| Field | Meaning |
+|---|---|
+| `ziel` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
+| `helfer` | The number helper for this blind, from step 1 |
+| `auf` | Measured seconds for a full **opening** run |
+| `ab` | Measured seconds for a full **closing** run |
+| `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
+
+**Script A — for normal use** (dashboards, automations). It does nothing if
+the requested position already matches the stored one:
+
+```yaml
+interne_rollladenlogik_fuer_home_assistant:
+  alias: Interne Rollladenlogik für Home Assistant
+  mode: parallel
+  max: 12
+  sequence:
+    - condition: template
+      value_template: "{{ ziel | int != states(helfer) | int }}"
+    - variables:
+        soll: "{{ ziel | float(0) }}"
+        ist: "{{ states(helfer) | float(0) }}"
+        f_auf: "{{ auf | float(25) }}"
+        f_ab: "{{ ab | float(25) }}"
+        richtung_runter: "{{ soll > ist }}"
+        dauer: >
+          {% set diff = (ist - soll) | abs %} {% set faktor = f_ab if
+          richtung_runter else f_auf %} {{ ((diff / 100.0) * faktor) | round(2) }}
+        rest_dauer: "{{ [0, dauer - 1.0] | max | round(2) }}"
+        korrektur_dauer: |
+          {% if soll == 0 %}
+            {{ (ist / 100.0 * f_auf) | round(2) }}
+          {% elif soll == 100 %}
+            {{ ((100 - ist) / 100.0 * f_ab) | round(2) }}
+          {% else %}
+            0
+          {% endif %}
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ not richtung_runter }}"
+          sequence:
+            - action: cover.open_cover
+              target:
+                entity_id: "{{ entity }}"
+            - delay:
+                hours: 0
+                minutes: 0
+                seconds: 1
+                milliseconds: 0
+            - action: cover.open_cover
+              target:
+                entity_id: "{{ entity }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ richtung_runter }}"
+          sequence:
+            - action: cover.close_cover
+              target:
+                entity_id: "{{ entity }}"
+            - delay:
+                hours: 0
+                minutes: 0
+                seconds: 1
+                milliseconds: 0
+            - action: cover.close_cover
+              target:
+                entity_id: "{{ entity }}"
+    - delay: "{{ rest_dauer }}"
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ soll | int != 0 and soll | int != 100 }}"
+          sequence:
+            - action: cover.stop_cover
+              target:
+                entity_id: "{{ entity }}"
+            - delay:
+                hours: 0
+                minutes: 0
+                seconds: 1
+                milliseconds: 0
+            - action: cover.stop_cover
+              target:
+                entity_id: "{{ entity }}"
+        - conditions:
+            - condition: template
+              value_template: "{{ soll | int == 0 or soll | int == 100 }}"
+          sequence:
+            - delay:
+                seconds: "{{ korrektur_dauer }}"
+    - action: input_number.set_value
+      target:
+        entity_id: "{{ helfer }}"
+      data:
+        value: "{{ soll | float(0) }}"
+```
+
+**Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
+re-send the same target position it already believes a blind is at, which
+script A would then ignore. Script B instead treats "target equals current"
+as an instruction to run a full close (target ≥ 50) or full open (target <
+50), so a repeated Alexa command still moves the blind:
+
+```yaml
+rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
+  alias: Rollladenlogik fuer Alexasprachsteuerungen für Rollladen
+  mode: parallel
+  max: 12
+  sequence:
+    - variables:
+        soll: "{{ ziel | float(0) }}"
+        ist: "{{ states(helfer) | float(0) }}"
+        f_auf: "{{ auf | float(25) }}"
+        f_ab: "{{ ab | float(25) }}"
+        reset_richtung_runter: "{{ soll >= 50 }}"
+        richtung_runter: |
+          {% if 
