@@ -203,7 +203,7 @@ async def async_setup_entry(
             # NOTE: `dr.async_get_device_id_by_identifier` never existed in Home
             # Assistant (calling it raised AttributeError, not caught by the
             # ValueError handler that used to sit here). Identifiers are also no
-            # longer globally unique as of HA 2026.8 (they are scoped per config
+            # longer globally unique as of HA 2026.9 (they are scoped per config
             # entry), so the lookup itself must be scoped: use the registry's
             # async_get_device_by_identifier(identifier, entry_id), which returns
             # the DeviceEntry directly (or None), instead of the removed
