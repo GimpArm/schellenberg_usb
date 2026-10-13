@@ -1,10 +1,10 @@
 """Core protocol tests for SchellenbergUsbApi.
 
-Covers the transmit lock (regular, non-movement commands must still fully
-serialize through it), the direct unlocked write used for blind moves
-(open/close/stop - see control_blind), the busy/retry cycle (including the
-eager-task-start regression described below), the connection-loss/disconnect
-cleanup of that same retry state, and the three multi-phase RF sequences
+Covers the transmit lock (every command, blind moves included, fully
+serializes through it), the busy/retry cycle a blind move answered with tE
+now goes through (including the eager-task-start regression described
+below), the connection-loss/disconnect cleanup of that same retry state, and
+the three multi-phase RF sequences
 (teach_motor, pair_device_and_wait, send_raw_transmit) - these were
 previously only exercised indirectly through tests/test_config_flow.py's
 config-flow-level tests (real API + FakeTransport, but driven through the
@@ -173,120 +173,52 @@ async def test_regular_commands_still_fully_serialize_through_the_transmit_lock(
     assert written(connected_api) == [b"!?\r\n"]
 
 
-async def test_control_blind_sends_one_direct_unlocked_write(
+async def test_control_blind_waits_for_the_transmit_lock(
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """control_blind() must reach the wire immediately, never queued behind the lock.
+    """control_blind() must go through the lock, not write around it.
 
-    Regression: confirmed against real hardware that routing a blind move
-    through the transmit lock and busy-retry cycle, while stop went through
-    a separate lock-bypassing path, let the two fight over the stick's one
-    RF transmitter - a move's own busy-retry could still be resending its
-    payload seconds after a stop had already gone out, and on exhausting its
-    retries would latch a busy fault that had nothing to do with the stop.
-    control_blind() now writes directly, holding the transmit lock for
-    nothing and never becoming eligible for that retry cycle in the first
-    place - proven here by a held lock not blocking it at all.
+    Regression: confirmed against real hardware that a blind move written
+    straight to the transport while another move was still in flight was
+    answered with tE ("stick busy") and then dropped - nothing had registered
+    it as the pending transmission, so the tE handler had nothing to resend,
+    while the cover still reported as moving. Routing the move through
+    send_command() serialises its write behind _transmit_lock and registers
+    it as that pending transmission, which is what this pins: a held lock
+    delays the write instead of being ignored.
     """
     await connected_api._transmit_lock.acquire()
+    task = asyncio.ensure_future(
+        connected_api.control_blind("10", CMD_STOP, device_id="ABCDEF")
+    )
     try:
-        result = await asyncio.wait_for(
-            connected_api.control_blind("10", CMD_STOP, device_id="ABCDEF"),
-            timeout=1,
-        )
+        await asyncio.sleep(0)  # let the task run up to the lock and block
+        assert not task.done()
+        assert written(connected_api) == []
     finally:
         connected_api._transmit_lock.release()
 
-    assert result is True
+    assert await task is True
     expected = f"{CMD_TRANSMIT}109{CMD_STOP}0000\r\n".encode("ascii")
     assert written(connected_api) == [expected]
 
 
-async def test_control_blind_does_not_enter_the_busy_retry_cycle(
-    connected_api: SchellenbergUsbApi,
-) -> None:
-    """A blind move must never be retried or latch a busy fault on tE.
-
-    This link gives no delivery confirmation for a move to begin with (the
-    USB stick's t1/t0/tE responses report only its own transmitter state,
-    never what the motor did), so there is nothing worth retrying for open,
-    close, or stop: control_blind() writes once, straight to the transport,
-    and never sets _pending_retry_command - a tE that follows it must be a
-    no-op, not the start of a multi-second retry-then-latch sequence.
-    """
-    assert await connected_api.control_blind("10", CMD_UP, device_id="ABCDEF") is True
-    assert len(written(connected_api)) == 1
-
-    connected_api._handle_message("tE")
-
-    assert connected_api._retry_task is None
-    assert connected_api.busy_latched is False
-    assert len(written(connected_api)) == 1
-
-
-async def test_control_blind_write_without_a_pending_command_stays_unflagged(
-    connected_api: SchellenbergUsbApi,
-) -> None:
-    """The ordinary case - nothing pending via send_command() - must not flag.
-
-    Companion to test_control_blind_does_not_enter_the_busy_retry_cycle
-    above: that test covers the resulting tE behavior when nothing is
-    pending; this checks the new _control_blind_write_pending_conflict
-    flag itself stays False, matching control_blind()'s own
-    `if self._pending_retry_command is not None` guard around setting it.
-    """
-    assert await connected_api.control_blind("10", CMD_UP, device_id="ABCDEF") is True
-
-    assert connected_api._control_blind_write_pending_conflict is False
-
-
-async def test_control_blind_write_while_command_pending_marks_next_tE_ambiguous(
-    connected_api: SchellenbergUsbApi,
-) -> None:
-    """A tE arriving after an overlapping control_blind() write is ambiguous.
-
-    control_blind() (open/close/stop) writes straight to the transport with
-    no lock and no bookkeeping of its own - see its own docstring - so if it
-    writes while a send_command()-tracked transmission (teach, pairing,
-    raw-transmit, verify) is still waiting on its own t0, the next tE could
-    be about either write; the protocol gives no id saying which. Blindly
-    retrying the pending command in that situation risks resending it for
-    no reason, which for teach specifically can change the motor's rotation
-    direction (see teach_motor()'s own docstring). This tE must be skipped
-    instead of guessed at, and it must not touch the pending command's own
-    retry count or the sticky busy-latch fault flag - both of which stay
-    reserved for a stick that is genuinely, unambiguously stuck.
-    """
-    assert await connected_api.send_command(f"{CMD_TRANSMIT}109{CMD_UP}0000") is True
-    assert len(written(connected_api)) == 1
-
-    assert await connected_api.control_blind("20", CMD_STOP, device_id="112233") is True
-    assert len(written(connected_api)) == 2
-
-    connected_api._handle_message("tE")
-
-    # No resend of the pending command - the second write above was the
-    # control_blind() one, not a retry of it.
-    assert len(written(connected_api)) == 2
-    assert connected_api._retry_task is None
-    assert connected_api._retry_count == 0
-    assert connected_api.busy_latched is False
-    # The pending command itself is untouched - a later, unambiguous tE
-    # (no intervening control_blind() write) must still retry it normally;
-    # see the next test.
-    assert connected_api._pending_retry_command == f"{CMD_TRANSMIT}109{CMD_UP}0000"
-    assert connected_api._control_blind_write_pending_conflict is False
-
-
-async def test_ambiguous_tE_does_not_block_a_later_unambiguous_retry(
+async def test_control_blind_retries_a_busy_stick_instead_of_dropping(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Skipping one ambiguous tE must not disable retrying altogether.
+    """A move answered with tE ("stick busy") must be resent, not dropped.
 
-    Only the one reply that arrived while a control_blind() write was also
-    in flight is ambiguous. If the stick is genuinely still busy afterwards,
-    with no further control_blind() write in between, that next tE is
-    unambiguous again and must retry the still-pending command normally.
+    This is the real-hardware regression: two covers told to close in the
+    same second. The stick has a single RF transmitter, so the second frame
+    is answered tE while the first is still on the air. control_blind() used
+    to write straight to the transport and return, leaving nothing
+    registered as the pending transmission, so the tE handler had nothing to
+    resend and the move was silently lost - while the cover still reported
+    as moving, because the write itself had succeeded.
+
+    asyncio.sleep is mocked to resolve instantly so the retry completes
+    inside the eager task start and can be asserted synchronously, the same
+    way test_busy_retry_stops_after_max_attempts does it.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -294,17 +226,33 @@ async def test_ambiguous_tE_does_not_block_a_later_unambiguous_retry(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
-    assert await connected_api.send_command(f"{CMD_TRANSMIT}109{CMD_UP}0000") is True
-    await connected_api.control_blind("20", CMD_STOP, device_id="112233")
-    connected_api._handle_message("tE")  # ambiguous, skipped (previous test)
-    assert len(written(connected_api)) == 2
+    assert await connected_api.control_blind("10", CMD_UP, device_id="ABCDEF") is True
+    assert len(written(connected_api)) == 1
+    # The move registered itself - that is what makes the tE actionable.
+    assert connected_api._pending_retry_command == f"{CMD_TRANSMIT}109{CMD_UP}0000"
 
-    connected_api._handle_message("tE")  # no further control_blind() write since
+    connected_api._handle_message("tE")
 
     assert connected_api._retry_count == 1
-    # The initial send_command() write, the control_blind() write, and now
-    # one resend of the still-pending command.
-    assert len(written(connected_api)) == 3
+    assert connected_api.busy_latched is False
+    # The original frame, plus one resend of that very same payload.
+    assert len(written(connected_api)) == 2
+    assert written(connected_api)[1] == written(connected_api)[0]
+
+
+async def test_control_blind_write_without_a_pending_command_stays_unflagged(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A blind move must not set the ambiguous-tE conflict flag.
+
+    Companion to test_control_blind_retries_a_busy_stick_instead_of_dropping
+    above: control_blind() now goes through send_command() like every other
+    transmission, so there is no out-of-band write left for a tE to be
+    ambiguous about and the flag stays False.
+    """
+    assert await connected_api.control_blind("10", CMD_UP, device_id="ABCDEF") is True
+
+    assert connected_api._control_blind_write_pending_conflict is False
 
 
 async def test_a_fresh_pending_command_clears_a_stale_conflict_flag(
@@ -329,10 +277,9 @@ async def test_busy_retry_stops_after_max_attempts(
     """A stick that stays busy is retried up to the limit, then latched.
 
     Uses a raw transmit sent through send_command() rather than
-    control_blind() - a blind move never enters this cycle at all (see
-    test_control_blind_does_not_enter_the_busy_retry_cycle below); this
-    test is about the generic machinery that teach/pairing/raw-transmit
-    still rely on.
+    control_blind() purely to keep the payload obvious - a blind move now
+    enters this same cycle, see
+    test_control_blind_retries_a_busy_stick_instead_of_dropping above.
 
     Regression: Home Assistant's task factories start a created task
     "eagerly" - it runs synchronously up to its first real suspension point

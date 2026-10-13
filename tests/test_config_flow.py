@@ -1659,6 +1659,15 @@ async def test_developer_tools_test_open_close_stop_each_send_one_command(
             "command sent successfully" in result["description_placeholders"]["result"]
         )
 
+        # A move registers itself as the pending transmission - that is what
+        # makes a tE busy reply retryable - and transmit_block_reason() keeps
+        # reporting pending_retry until the stick's t0 completes the cycle.
+        # The Developer Tools step deliberately refuses to start another
+        # command while one is still outstanding, since that is how frames
+        # got dropped, so this models the ACK real hardware sends once the RF
+        # frame is done.
+        connected_api._handle_message("t0")
+
 
 async def test_developer_tools_set_position_open_and_closed_sync_without_sending_rf(
     hass: HomeAssistant, connected_api: SchellenbergUsbApi

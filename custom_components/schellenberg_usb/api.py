@@ -454,10 +454,9 @@ class SchellenbergUsbApi:
                 else logging.DEBUG
             )
             if not self._pending_retry_command:
-                # control_blind() (open/close/stop) never sets this - see
-                # its own docstring - so a busy reply to one of those three
-                # is expected sometimes and not actionable here: there is no
-                # in-flight retryable command to resend.
+                # Nothing retryable is in flight: a busy reply to a
+                # non-transmit request, or one that arrived after the pending
+                # command was already cleared by its own t0.
                 _LOGGER.log(
                     level, "Transmit error - stick busy, no pending command to retry"
                 )
@@ -1237,21 +1236,19 @@ class SchellenbergUsbApi:
         device_id: str | None = None,
         source: str = "cover",
     ) -> bool:
-        """Send an open/close/stop command straight to the serial port.
+        """Send an open/close/stop command through the normal command path.
 
-        One write, immediately, never queued behind _transmit_lock and never
-        entered into the tE busy-retry cycle - open, close, and stop are all
-        sent exactly this same way. Confirmed against real hardware that
-        routing stop through a separate lock-bypassing path while open/close
-        went through a locked, retried path let the two fight over the
-        stick's one RF transmitter: a move's own busy-retry could still be
-        re-sending its payload seconds after a stop had already gone out,
-        and on exhausting its retries would latch a busy fault that had
-        nothing to do with the stop. This link gives no delivery
-        confirmation for any of these three commands to begin with - the
-        stick's t1/t0 report only its own transmitter on/off, never what the
-        motor did - so there is nothing worth queueing or retrying for:
-        every call here sends once and returns.
+        The frame is handed to send_command() rather than written to the
+        transport here, so it is serialised behind _transmit_lock and
+        registered as the pending transmission. Both matter on real
+        hardware: the stick has a single RF transmitter, so two moves issued
+        in the same second - e.g. two covers closing together - cannot both
+        be on the air at once, and the second one is answered with tE
+        ("stick busy") instead. Only a registered pending command makes that
+        reply actionable; without one the move was dropped silently while
+        the cover still reported as moving. See _handle_message's tE branch,
+        which resends the pending payload once the stick reports its
+        transmitter idle again.
 
         Still refuses to transmit when the stick fundamentally cannot right
         now (disconnected, closing transport, pairing active, not in
@@ -1306,14 +1303,13 @@ class SchellenbergUsbApi:
             normalized_enum,
             raw_payload,
         )
-        full_command = f"{raw_payload}\r\n".encode("ascii")
-        try:
-            # _transmit_capability_block_reason() above already established
-            # self._transport is a live, non-closing transport.
-            assert self._transport is not None
-            self._transport.write(full_command)
-        except (OSError, RuntimeError):
-            _LOGGER.exception(
+        # Delegating rather than writing here is what makes the stick's tE
+        # ("busy") reply actionable: send_command() holds _transmit_lock
+        # across the write and records this payload as the pending
+        # transmission, which _handle_message's tE branch then resends once
+        # the stick is free again.
+        if not await self.send_command(raw_payload, source=source):
+            _LOGGER.error(
                 "Blind transmit write result source=%s command=%s payload=%s "
                 "result=failed",
                 source,
@@ -1321,21 +1317,6 @@ class SchellenbergUsbApi:
                 raw_payload,
             )
             return False
-        _LOGGER.log(
-            visible_level,
-            "Blind transmit write result source=%s command=%s payload=%s "
-            "result=written_no_lock_no_ack_wait",
-            source,
-            action_name,
-            raw_payload,
-        )
-        if self._pending_retry_command is not None:
-            # A send_command()-tracked transmission (teach, pairing,
-            # raw-transmit, verify) is still waiting on its own t0 - see
-            # _control_blind_write_pending_conflict's own comment in
-            # __init__ for why that makes the *next* tE ambiguous rather
-            # than clearly about that pending command.
-            self._control_blind_write_pending_conflict = True
         return True
 
     def initialize_next_device_enum(self) -> str:
