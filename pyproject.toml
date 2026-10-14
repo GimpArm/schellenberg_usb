@@ -15,7 +15,7 @@ dependencies = [
     # rejects an exact pin that no longer matches Core's. >= stays
     # compatible with whatever Core currently needs, same fix other HACS
     # integrations have used for this exact class of hassfest failure.
-    "serialx>=1.10.0",
+    "serialx>=1.11.0",
 ]
 
 [dependency-groups]

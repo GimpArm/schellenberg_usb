@@ -3041,7 +3041,7 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "serialx", specifier = ">=1.10.0" }]
+requires-dist = [{ name = "serialx", specifier = ">=1.11.0" }]
 
 [package.metadata.requires-dev]
 dev = [
