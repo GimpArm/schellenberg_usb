@@ -20,10 +20,13 @@ Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **No
    The loop's final ack-wait uses the fixed `MOVE_ACK_TIMEOUT` (1.0s) instead of the remaining time left in the budget. Needs lock contention from another near-simultaneous blind command to have already eaten most of the 2.0s budget, *plus* a slow/lost ack for the stop write itself. When it fires, the actual stop write has normally already gone out (the shutter still stops on time) — visible only via two warning log lines (`No t1/tE reply to stop write...`, `Giving up on stop after...falling back to a plain write`), not via the shutter's physical behavior — unless the original write itself (not just its ack) was the thing that got lost, in which case a retry really does delay the physical stop by a similar margin.
    The identical pattern exists in the ordinary move-retry path (`control_blind_with_retry`), but is immaterial there because its overall budget (`MOVE_RETRY_OVERALL_TIMEOUT` = 15.0s) makes the same ~1s slip negligible — not tracked as a separate finding.
 
-## Medium severity
+6. **The shared status-frame capture buffer has no per-operation owner, and two concurrent calibration/discovery flows for *different* blinds can and do steal it from each other — settled (2026-10-24): confirmed reachable through the real HA UI today, upgraded from Medium to High.**
+   `api.py`'s `_status_discovery_frames` is one slot per USB-stick hub, shared by every blind on it. `start_status_frame_capture()` doesn't queue or fail when a capture is already open — it forcibly destroys the existing one (discarding its contents, uncounted) and opens a fresh one for itself. `finish_status_frame_capture()` has no owner-check at all: it unconditionally tears down and returns whatever is *currently* live, whether or not that's the caller's own capture.
+   Nothing in the integration prevents two different subentry flows (two "Calibrate"/"Add device" wizards for two different blinds) from running at once — confirmed no exclusivity guard exists anywhere (`manifest.json` has no `single_config_entry`, no lock, no `already_in_progress` check), and both flows share the one hub-wide `SchellenbergUsbApi` instance via `runtime_data`. This needs two browser tabs (or two people) open against the same Home Assistant instance at once — a normal way to use an integration whose "whole point," per its own code comments, is driving several blinds together.
+   **Worst case, fully traced:** pairing a brand-new blind ("New") and recalibrating an already-working one ("Hallway") at the same time. Hallway's calibration start steals New's open capture; New's own remote operation then gets appended into Hallway's buffer; whichever flow finishes last receives *whichever buffer is currently live*, not necessarily its own. For a brand-new pairing specifically, there is no existing identity to sanity-check the result against (that protection only exists for recalibrating an already-confirmed blind), so the wrong identity gets written straight into permanent config data with zero UI warning. When the new entity registers that identity, it silently steals it from Hallway's own entity too (one `_LOGGER.warning` line, nothing user-visible) — breaking a second, previously-working blind as collateral damage.
+   No existing test exercises this (existing tests only mock an immediate "busy" error on the caller's side, never the real steal-and-corrupt path or its effect on the victim). The steal itself is a clean synchronous operation with no `await` in between — confirmed this is a semantic ownership bug, not a literal torn-write race condition, so the bug class should not be overstated.
 
-6. **Shared capture buffer for calibration/pairing/discovery has no per-operation owner.**
-   Two concurrent operations for different blinds on the same stick can steal each other's captured frames. Confirmed mechanism in the code; not yet settled whether it's reachable through the real HA UI as things stand today. Findings 7 and 8 below are downstream consequences of this same root cause, each reachable via its own independent path.
+## Medium severity
 
 7. **`cover.py`'s own status-identity resolution in `async_setup_entry()` diverges from the canonical logic in `identities.py`.**
    `identities.py`'s `resolve_blind_identities()` nulls a stale `status_device_id` when the status identity source is `UNKNOWN`. `async_setup_entry()` doesn't, and that raw stale value briefly reaches `api.register_entity()` as this entity's primary status identity before the entity's own, separately-correct re-derivation corrects it — the first, wrong registration is never retracted. Not reachable through the current UI (today's write paths clean up the fields correctly); would strike with hand-edited or old/legacy config data.
@@ -53,6 +56,7 @@ Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **No
 16. A brief, self-correcting LED flicker at Home Assistant startup.
 17. A dead translation key that happens to be identical across all languages anyway.
 18. The "Copy diagnostics" text export shows literal `None` instead of `--` for the previous position on a freshly-set-up or just-restarted blind (the live dev-tools panel already handles this correctly — only the text export doesn't). Purely cosmetic.
+19. A translation that's never shown: `"superseded_by_calibration"` has proper, distinct German/Spanish/French translations, but the only place that produces this value (finding 6's steal branch) immediately discards its return value — no code path ever stores or displays it. The one deliberate attempt to tell a superseded user why their result looks wrong never actually reaches anyone — a small, concrete symptom of finding 6's same root cause.
 
 ## Also checked, found clean — not bugs
 
@@ -67,12 +71,20 @@ Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **No
 - `verify_device()`, `get_device_id()`, `pair_device_and_wait()`, `async_discover_status_identities()` all bound their waits with `asyncio.wait_for(..., timeout=...)` — no unbounded await tied to incoming serial data.
 - `_last_position_updates`, `_last_manual_position_syncs`, `_registered_devices`, `_registered_entity_keys`, `_fresh_calibration_positions` are keyed off HA-config-derived identities (bounded by configured blind count) and rebuilt from scratch on a full reload — they don't share finding 12's unbounded-growth risk.
 - `_last_primary_tracking_messages` is only written for an already-registered real cover, so unmatched garbage frames can't inflate it the way they can finding 12's dict.
+- `teach_motor()`, `send_raw_transmit()`, `pair_device_and_wait()` — confirmed clean of finding 6's mechanism; they use a separate, correctly-scoped `_pairing_active` flag instead.
+- `_fresh_calibration_positions`, `_last_received_messages`, `_last_primary_tracking_messages`, `_last_position_updates`, `_last_manual_position_syncs` — all keyed per blind/identity, not global scalars, so none share finding 6's cross-blind clobbering problem.
+- `_foreign_capture_device_ids()` — confirmed scoped exactly as documented, only to the movement-detection wait signal; provides zero protection for finding 6's steal mechanism or finding 8's final-result gap (expected — that boundary is what findings 6 and 8 already describe, not a new gap).
 
 ## Audit status
 
-Three initial specialized rounds (entity/cover-state layer; config-flow/calibration layer; translations + build files) plus a cross-cutting round (data-path tracing across layers, and the test suite as its own subject) are done. That cross-cutting round still turned up new findings (7–9 above, plus the hybrid-pairing doc gap), so a further round was dispatched targeting two angles:
+Three initial specialized rounds (entity/cover-state layer; config-flow/calibration layer; translations + build files) plus a cross-cutting round (data-path tracing across layers, and the test suite as its own subject) are done. That cross-cutting round still turned up new findings (7–9 above, plus the hybrid-pairing doc gap), so a further round was dispatched targeting two angles, both now done:
 
-- a security/robustness pass (malformed/corrupted serial data, resource exhaustion) — **done, findings 11–13 above are its result.**
-- a deep dive on the shared capture-buffer/identity mechanism specifically (root cause behind findings 6 and 8) — **still in progress.**
+- a security/robustness pass (malformed/corrupted serial data, resource exhaustion) — findings 11–13 above are its result.
+- a deep dive on the shared capture-buffer/identity mechanism specifically — settled finding 6 (confirmed reachable, upgraded Medium → High) and surfaced finding 19.
+
+Both of those found something new, so a further round is now in progress targeting two more angles not yet explicitly covered:
+
+- a dedicated asyncio concurrency/race-condition audit across `api.py` and the flow handlers — genuine interleaving races (two coroutines truly overlapping on shared mutable state), as distinct from finding 6's confirmed-semantic (not literal-race) ownership bug.
+- Home Assistant entity/config-entry lifecycle robustness — subentry/entry removal, reload, unload, and migration while a move/calibration/pairing operation is in flight.
 
 Plan: keep running further targeted rounds until one comes back with nothing new. Nothing gets fixed yet — all of this is scoped for a future release once the audit is exhausted.
