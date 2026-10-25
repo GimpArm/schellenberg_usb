@@ -49,6 +49,33 @@ _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_DELAY = 5.0
 RESET_SETTLE_DELAY = 0.25
+
+# How long after a successful connect() to withhold a *secondary*
+# (remote/wall-switch) identity's frame from async_dispatcher_send,
+# rather than let it reach _handle_secondary_event and arm cover.py's
+# assume-closed/assume-open timer. The stick's own serial receive buffer
+# can hold RF frames transmitted while nothing was listening - most
+# relevantly, while Home Assistant itself was restarting - and those are
+# delivered as a burst the instant this integration starts actively
+# reading again, not at the real-world pace they were originally sent
+# at. A secondary frame like this is pure risk: it only ever makes
+# _handle_secondary_event *assume* a position once its timer elapses,
+# with no live motor echo to fall back on for exactly the blinds that
+# feature exists for, so a stale one can silently assume a wrong
+# position nothing will ever correct. A primary (motor) frame carries no
+# equivalent risk - it reports a real motor event that genuinely
+# happened, however late it's read - so it is never withheld by this,
+# regardless of age; withholding it would also remove the one signal
+# that can correct a bad secondary-triggered assumption. Mature
+# third-party integrations for this same DuoFern-based RF hardware
+# independently converged on giving a freshly (re)connected stick a
+# short settle period before trusting it (e.g. pyduofern's own setup
+# example waits ~10s after connecting before treating the stick as
+# ready); a few seconds is ample here, since this only needs to drain a
+# handful of short frames sitting in a hardware buffer, not wait out a
+# slow link.
+POST_CONNECT_SECONDARY_GRACE_SECONDS = 3.0
+
 DIAGNOSTIC_TRANSMIT_SOURCES = frozenset({"developer_tools", "service"})
 
 # How long to wait for a transmitter-idle (t0) ACK after a write before
@@ -392,6 +419,12 @@ class SchellenbergUsbApi:
         self._is_connected = False
         self._device_version: str | None = None
         self._device_mode: str | None = None  # boot, initial, or listening
+        # Set to time.monotonic() by connect() on success; read by
+        # _within_post_connect_secondary_grace_period() below. Not reset on
+        # disconnect: _handle_message() (its only real caller) never runs
+        # while disconnected, so a stale value here is simply never read
+        # before the next successful connect() overwrites it.
+        self._connected_at: float | None = None
         self._verify_future: asyncio.Future[bool] | None = None
         self._device_id_future: asyncio.Future[str] | None = None
         self._hub_id: str | None = None
@@ -536,6 +569,11 @@ class SchellenbergUsbApi:
                 return False
 
             self._is_connected = True
+            # Marks "now" as the start of the post-connect grace period a
+            # freshly (re)opened serial port's own buffered/stale frames
+            # get read within - see POST_CONNECT_SECONDARY_GRACE_SECONDS's
+            # own comment for why.
+            self._connected_at = time.monotonic()
             self._update_status()
 
             if not await self._enter_listening_mode():
@@ -696,6 +734,16 @@ class SchellenbergUsbApi:
         if len(self._last_received_messages) > MAX_LAST_RECEIVED_MESSAGES:
             oldest_identity = next(iter(self._last_received_messages))
             del self._last_received_messages[oldest_identity]
+
+    def _within_post_connect_secondary_grace_period(self) -> bool:
+        """Return whether a secondary-identity frame right now is too soon
+        after connecting to trust - see POST_CONNECT_SECONDARY_GRACE_SECONDS.
+        """
+        return (
+            self._connected_at is not None
+            and time.monotonic() - self._connected_at
+            < POST_CONNECT_SECONDARY_GRACE_SECONDS
+        )
 
     @callback
     def _handle_message(self, message: str) -> None:
@@ -1066,21 +1114,39 @@ class SchellenbergUsbApi:
                     normalized_command,
                 )
                 if registration is not None:
-                    # effective_command, not normalized_command: this is
-                    # the signal _handle_event (primary) and
-                    # _handle_secondary_event (secondary) both subscribe
-                    # to - see _resolve_secondary_command's own docstring
-                    # for why a secondary frame's own command byte isn't
-                    # always safe to forward as-is. Identical to
-                    # normalized_command for every primary frame and for
-                    # a secondary frame whose command byte already
-                    # decodes cleanly, so neither is affected.
-                    async_dispatcher_send(
-                        self.hass,
-                        f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
-                        f"{normalized_device_enum}",
-                        effective_command,
+                    suppressed_as_stale = (
+                        identity_role == "secondary"
+                        and self._within_post_connect_secondary_grace_period()
                     )
+                    if suppressed_as_stale:
+                        _LOGGER.debug(
+                            "Withholding secondary-identity dispatch for "
+                            "device_id=%s enum=%s interpreted=%s: received "
+                            "within %.1fs of connecting, likely a stale "
+                            "frame the stick buffered before this "
+                            "integration started listening, not a live "
+                            "remote press",
+                            normalized_device_id,
+                            normalized_device_enum,
+                            interpretation,
+                            POST_CONNECT_SECONDARY_GRACE_SECONDS,
+                        )
+                    else:
+                        # effective_command, not normalized_command: this is
+                        # the signal _handle_event (primary) and
+                        # _handle_secondary_event (secondary) both subscribe
+                        # to - see _resolve_secondary_command's own docstring
+                        # for why a secondary frame's own command byte isn't
+                        # always safe to forward as-is. Identical to
+                        # normalized_command for every primary frame and for
+                        # a secondary frame whose command byte already
+                        # decodes cleanly, so neither is affected.
+                        async_dispatcher_send(
+                            self.hass,
+                            f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
+                            f"{normalized_device_enum}",
+                            effective_command,
+                        )
                 # Also broadcast on the capture-wide signal while a status-
                 # frame capture window is open, independent of
                 # normalized_device_id: the ID-only signal above only
