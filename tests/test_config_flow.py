@@ -30,6 +30,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+import custom_components.schellenberg_usb.api as api_module
 import custom_components.schellenberg_usb.config_flow as config_flow_module
 import custom_components.schellenberg_usb.options_flow_calibration as calibration_module
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi
@@ -577,6 +578,14 @@ async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice
         AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
     )
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    # No stick reply is ever fed to either write below, so without this,
+    # control_blind_exclusive()'s own ack-wait (added for audit finding 7)
+    # would block for the real MOVE_ACK_TIMEOUT on each one - mocking
+    # asyncio.sleep above does not cover this, since asyncio.wait_for's own
+    # timeout path needs genuinely elapsed time regardless (see
+    # test_control_blind_with_retry_treats_a_silent_ack_timeout_like_busy
+    # in test_api.py for the same caveat).
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     result = await _start_pairing_flow(hass, entry)
 
     result = await hass.config_entries.subentries.async_configure(
@@ -1064,6 +1073,59 @@ async def test_discover_status_success_confirms_and_updates_existing_blind(
     assert updated.data[CONF_STATUS_ENUM] == "01"
 
 
+async def test_discover_status_finding_nothing_keeps_the_existing_identity(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for audit finding 4.
+
+    An inconclusive discovery attempt (wrong button, pressed too fast, RF
+    interference - no primary frame captured) used to unconditionally pop
+    the existing CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM on "Save" anyway,
+    silently erasing a previously-working status identity with no
+    warning. _add_existing_blind()'s blind already has one (matching
+    DEVICE_ID/DEVICE_ENUM); it must survive an empty discovery result
+    untouched, unlike test_discover_status_success_confirms_and_updates_
+    existing_blind above, where discovery genuinely finds something.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    blind = _add_existing_blind(hass, entry)
+    discovery_result = {
+        "primary": None,
+        "secondary": [],
+        "unknown_commands": [],
+        "frames": [],
+    }
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(return_value=discovery_result),
+    )
+    result = await _start_reconfigure_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "developer_tools"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = entry.subentries[blind.subentry_id]
+    assert updated.data[CONF_STATUS_DEVICE_ID] == DEVICE_ID
+    assert updated.data[CONF_STATUS_ENUM] == DEVICE_ENUM
+
+
 # ---------------------------------------------------------------------------
 # Subentry flow: reconfigure an existing blind (edit / test_existing)
 # ---------------------------------------------------------------------------
@@ -1306,6 +1368,11 @@ async def test_test_existing_leads_into_the_short_command_test(
     tracked position doesn't override the choice either.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
+    # choice's own comment on this same patch: without it, each write below
+    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
+    # never fed.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
     result = await _start_reconfigure_flow(hass, entry, blind)
@@ -1343,6 +1410,11 @@ async def test_test_existing_honors_chosen_direction_when_recorded_closed(
     would have picked, and getting exactly that sent.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
+    # choice's own comment on this same patch: without it, each write below
+    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
+    # never fed.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
     connected_api.record_position_update(
@@ -1387,6 +1459,11 @@ async def test_test_existing_honors_chosen_direction_when_recorded_open(
     - still sends exactly the chosen direction.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
+    # choice's own comment on this same patch: without it, each write below
+    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
+    # never fed.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
     connected_api.record_position_update(
@@ -1584,8 +1661,16 @@ async def test_developer_tools_shows_the_full_diagnostics_menu(
 
 
 async def test_developer_tools_test_open_close_stop_each_send_one_command(
-    hass: HomeAssistant, connected_api: SchellenbergUsbApi
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # No stick reply is ever fed for any of the three writes below, so
+    # without this, control_blind_exclusive()'s own ack-wait (added for
+    # audit finding 7) would block for the real MOVE_ACK_TIMEOUT on each
+    # one - see test_add_shutter_from_remote_runs_test_motor_before_
+    # calibration_choice's own comment on this same patch.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
 
@@ -1683,6 +1768,13 @@ async def test_developer_tools_teach_motor_success_sends_teach_open_and_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    # The trailing open+stop test (after a successful teach) never gets a
+    # stick reply fed either, so without this, control_blind_exclusive()'s
+    # own ack-wait (added for audit finding 7) would block for the real
+    # MOVE_ACK_TIMEOUT on each of those two writes - see
+    # test_add_shutter_from_remote_runs_test_motor_before_calibration_
+    # choice's own comment on this same patch.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
     result = await _start_reconfigure_flow(hass, entry, blind)
@@ -1828,6 +1920,39 @@ async def test_developer_tools_copy_diagnostics_shows_a_text_snapshot_then_retur
     )
 
     assert result["step_id"] == "developer_tools"
+
+
+async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
+    hass: HomeAssistant, connected_api: SchellenbergUsbApi
+) -> None:
+    """Regression for audit finding 21.
+
+    _add_existing_blind()'s device never has a position update recorded,
+    so api.get_last_position_update() falls back to a dict with
+    previous_position/new_position both None - exactly a freshly set up
+    or just-restarted blind. The live developer_tools panel's own
+    description (via _developer_snapshot()'s position_previous/
+    position_new placeholders) already renders that as "--"; this text
+    export used to pass those same None values straight into
+    _t(..., value=...) instead, rendering the literal word "None" for
+    all three position lines below.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    blind = _add_existing_blind(hass, entry)
+    result = await _start_reconfigure_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "developer_tools"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "copy_diagnostics"}
+    )
+
+    diagnostics_text = result["data_schema"]({})["diagnostics"]
+
+    assert "Previous position: --" in diagnostics_text
+    assert "New position: --" in diagnostics_text
+    assert "Current estimated position: --" in diagnostics_text
+    assert "None" not in diagnostics_text
 
 
 def _load_calibration_close_step(language: str) -> dict[str, Any]:

@@ -92,34 +92,125 @@ class CalibrationFlowHandler:
         self._pending_status_identity_source: str | None = None
         self._calibration_discovery_result: dict[str, Any] | None = None
         self._pending_invert_direction = False
+        # Tracks whether this flow currently believes it owns an open
+        # status-frame capture - see _set_calibration_capture_phase()'s own
+        # comment for why this is needed on top of api.py's own capture
+        # state.
+        self._capture_active = False
+        # The SchellenbergUsbApi instance the currently-active capture was
+        # actually started on, if any - see _start_calibration_capture()'s
+        # own comment (audit finding 15) for why _set_calibration_capture_
+        # phase()/_finish_calibration_capture() read this instead of each
+        # re-fetching entry.runtime_data while a capture is active.
+        self._capture_api: SchellenbergUsbApi | None = None
 
     def _runtime_api(self) -> SchellenbergUsbApi | None:
         entry = self.flow._get_entry()
         api = entry.runtime_data
         return api if isinstance(api, SchellenbergUsbApi) else None
 
-    def _start_calibration_capture(self, *, phase: str) -> None:
+    def _start_calibration_capture(self, *, phase: str) -> bool:
+        """Claim the hub-wide status-frame capture buffer for this blind.
+
+        Returns False, without starting anything, when a different
+        blind's calibration or status-discovery flow already owns the
+        buffer. This used to catch that RuntimeError and force its way
+        in anyway - finishing and discarding whatever capture was
+        already running, then starting a new one in its place - which
+        let two concurrent flows for two *different* blinds silently
+        corrupt each other's result, up to and including writing the
+        wrong status identity into a blind's permanent config data.
+        async_discover_status_identities() in config_flow.py already
+        gets this right for the exact same buffer: it lets the
+        RuntimeError propagate so its caller can show a "busy" error
+        instead of stealing. This mirrors that behavior here - found
+        during the lifecycle audit round.
+        """
         api = self._runtime_api()
         if api is None:
-            return
+            return False
         try:
             api.start_status_frame_capture(phase=phase)
         except RuntimeError:
-            api.finish_status_frame_capture(end_reason="superseded_by_calibration")
-            api.start_status_frame_capture(phase=phase)
+            return False
+        self._capture_active = True
+        # Audit finding 15: cache the instance this capture actually
+        # started on, rather than letting _set_calibration_capture_phase()/
+        # _finish_calibration_capture() each re-fetch entry.runtime_data
+        # (via self._runtime_api()) on every call. Every subentry add/
+        # remove/edit on this hub - including some other, unrelated
+        # blind's, not just this one's own - reloads the whole config
+        # entry, which replaces entry.runtime_data with a brand-new
+        # SchellenbergUsbApi. Re-fetching it mid-capture would hand
+        # _finish_calibration_capture() that new, never-started instance
+        # instead - nothing to read, a silent, empty result - while the
+        # real frames this capture actually buffered stay stranded on the
+        # old, now-abandoned one. Caching it here means the capture that
+        # was actually opened is also the one that gets read back,
+        # finishing correctly on its own real data even if a reload raced
+        # it in between - the same class of hazard already solved for
+        # _fresh_calibration_positions, a different piece of per-instance
+        # state (see cover.py's own comment on it for that one).
+        self._capture_api = api
+        return True
 
-    def _set_calibration_capture_phase(self, phase: str) -> None:
-        api = self._runtime_api()
-        if api is not None:
-            api.set_status_frame_capture_phase(phase)
+    def _set_calibration_capture_phase(self, phase: str) -> bool:
+        """Advance the active capture to `phase`, returning whether it is
+        (still) this blind's own capture afterwards.
+        """
+        if not self._capture_active:
+            # A previous timeout or error in this same leg already tore
+            # down the capture via _finish_calibration_capture() below,
+            # and this call is a retry re-entering the same step. api.py's
+            # set_status_frame_capture_phase() silently no-ops once no
+            # capture is open, so without this check a retry would wait
+            # for the movement-start/stop dispatcher signals as normal
+            # (those do not depend on the capture buffer) and can still
+            # look like it succeeded, while actually capturing zero status
+            # frames - leaving the blind at "status unknown" with no
+            # position tracking and no indication the earlier timeout was
+            # the cause. Start a fresh capture instead of labelling one
+            # that no longer exists - found during the lifecycle audit
+            # round. That fresh start can itself find another blind's
+            # capture already running, so callers must still check the
+            # return value rather than assuming a retry always succeeds.
+            return self._start_calibration_capture(phase=phase)
+        # Audit finding 15: read the instance this same capture actually
+        # started on (see _start_calibration_capture()'s own comment),
+        # never a fresh self._runtime_api() lookup - entry.runtime_data may
+        # already point at a different, newer instance by now.
+        api = self._capture_api
+        if api is None:
+            return False
+        api.set_status_frame_capture_phase(phase)
+        return True
 
     def _finish_calibration_capture(self, end_reason: str) -> None:
-        api = self._runtime_api()
+        # Audit finding 15: same reasoning as _set_calibration_capture_
+        # phase() above - read back from the instance this capture was
+        # actually started on, not whatever entry.runtime_data currently
+        # points at.
+        api = self._capture_api
         if api is None:
             return
-        self._calibration_discovery_result = api.finish_status_frame_capture(
-            end_reason=end_reason
+        # Same foreign-id set _wait_for_movement_start() already uses to
+        # keep a different, already-paired blind's own movement from
+        # falsely satisfying *this* blind's movement-detected wait (see
+        # that method's own comment) - without also passing it here, that
+        # other blind's real frames, captured into this same hub-wide
+        # buffer regardless of either protection, could still outscore
+        # this blind's own and get chosen as its identity instead. Audit
+        # finding 9: the wait was already scoped this way, the actual
+        # identity decision below was not.
+        foreign_device_ids: frozenset[str] = (
+            (self._selected_device or {}).get("foreign_capture_device_ids")
+            or frozenset()
         )
+        self._calibration_discovery_result = api.finish_status_frame_capture(
+            end_reason=end_reason, exclude_device_ids=foreign_device_ids
+        )
+        self._capture_active = False
+        self._capture_api = None
 
     def _apply_calibration_status_candidates(self) -> None:
         result = self._calibration_discovery_result
@@ -202,14 +293,20 @@ class CalibrationFlowHandler:
         if user_input is not None:
             initial_state = user_input.get("initial_state")
             if initial_state == "open":
-                self._start_calibration_capture(phase="closing")
-                return await self.async_step_calibration_close_instruction()
-            if initial_state == "closed":
-                self._start_calibration_capture(phase="opening")
-                return await self.async_step_calibration_open_instruction()
-            # Neither real option was chosen - see the schema comment below
-            # for why this is reachable even though the field is required.
-            errors["base"] = "initial_state_required"
+                if not self._start_calibration_capture(phase="closing"):
+                    errors["base"] = "calibration_capture_busy"
+                else:
+                    return await self.async_step_calibration_close_instruction()
+            elif initial_state == "closed":
+                if not self._start_calibration_capture(phase="opening"):
+                    errors["base"] = "calibration_capture_busy"
+                else:
+                    return await self.async_step_calibration_open_instruction()
+            else:
+                # Neither real option was chosen - see the schema comment
+                # below for why this is reachable even though the field is
+                # required.
+                errors["base"] = "initial_state_required"
 
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
@@ -271,7 +368,17 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        self._set_calibration_capture_phase("opening")
+        if not self._set_calibration_capture_phase("opening"):
+            errors["base"] = "calibration_capture_busy"
+            return self.flow.async_show_form(
+                step_id="calibration_open_instruction",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
+                errors=errors,
+                last_step=False,
+            )
         try:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_UP)
             if not start_ok:
@@ -349,7 +456,17 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        self._set_calibration_capture_phase("closing")
+        if not self._set_calibration_capture_phase("closing"):
+            errors["base"] = "calibration_capture_busy"
+            return self.flow.async_show_form(
+                step_id="calibration_close_instruction",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "device_name": self._selected_device["name"],
+                },
+                errors=errors,
+                last_step=False,
+            )
         try:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_DOWN)
             if not start_ok:

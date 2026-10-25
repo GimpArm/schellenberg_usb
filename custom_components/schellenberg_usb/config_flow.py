@@ -53,6 +53,7 @@ from .const import (
 )
 from .identities import (
     format_status_identities,
+    normalize_status_identity,
     normalize_status_identities,
     parse_status_identities_text,
     resolve_blind_identities,
@@ -561,7 +562,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         action = open_action if test_toward_open else close_action
 
         api = self._get_entry().runtime_data
-        if not await api.control_blind(
+        if not await api.control_blind_exclusive(
             self._pending_device_enum,
             action,
             device_id=self._pending_device_id,
@@ -590,7 +591,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             )
             await asyncio.sleep(TEST_COMMAND_DELAY)
         finally:
-            stopped = await api.control_blind(
+            stopped = await api.control_blind_exclusive(
                 self._pending_device_enum,
                 CMD_STOP,
                 device_id=self._pending_device_id,
@@ -1105,7 +1106,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             details["command_enum"],
         )
         try:
-            sent = await api.control_blind(
+            sent = await api.control_blind_exclusive(
                 details["command_enum"],
                 action,
                 device_id=details["command_device_id"],
@@ -1386,17 +1387,53 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             entry = self._get_entry()
             subentry = self._get_reconfigure_subentry()
             data = dict(subentry.data)
-            data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
-            data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
-                self._pending_secondary_status_identities
-            )
             if (
                 self._pending_status_device_id is not None
                 and self._pending_status_enum is not None
             ):
+                # Discovery found something - this flow's whole purpose on
+                # an already-configured blind is to let the person
+                # deliberately (re)set its status identity via the
+                # remote, so a clean result always applies, even if it
+                # differs from whatever was there before.
+                data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                    self._pending_secondary_status_identities
+                )
                 data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
                 data[CONF_STATUS_ENUM] = self._pending_status_enum
+            elif (
+                normalize_status_identity(
+                    data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
+                )
+                is not None
+                and data.get(CONF_STATUS_IDENTITY_SOURCE) != STATUS_IDENTITY_SOURCE_UNKNOWN
+            ):
+                # Discovery found nothing usable - wrong button, pressed
+                # too fast, RF interference - which is an inconclusive
+                # attempt, not a deliberate "clear this" action. Before
+                # this fix, clicking "Save" anyway unconditionally popped
+                # the existing, already-working CONF_STATUS_DEVICE_ID/
+                # CONF_STATUS_ENUM with no warning at all, silently
+                # erasing a working identity mapping - found during the
+                # lifecycle audit round. Mirrors the kind of protection
+                # recalibration's own async_step_calibration_complete()
+                # (options_flow_calibration.py) already has for its own,
+                # analogous "discovered nothing" case. Leave data
+                # untouched: keeps the existing identity exactly as it was.
+                _LOGGER.info(
+                    "Status discovery for %s found nothing usable; "
+                    "keeping the existing status identity instead of "
+                    "erasing it",
+                    self._pending_device_name or "unknown device",
+                )
             else:
+                # Nothing existing worth protecting - safe to record this
+                # as unknown, same as always.
+                data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                    self._pending_secondary_status_identities
+                )
                 data.pop(CONF_STATUS_DEVICE_ID, None)
                 data.pop(CONF_STATUS_ENUM, None)
             return self.async_update_and_abort(entry, subentry, data=data)
@@ -1462,7 +1499,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 open_action = resolve_direction_command(
                     "open", details["invert_direction"]
                 )
-                opened = await api.control_blind(
+                opened = await api.control_blind_exclusive(
                     details["command_enum"],
                     open_action,
                     device_id=details["command_device_id"],
@@ -1477,7 +1514,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                         "finishing the teach-and-test move before stopping it"
                     )
                     await asyncio.sleep(TEST_COMMAND_DELAY)
-                    stopped = await api.control_blind(
+                    stopped = await api.control_blind_exclusive(
                         details["command_enum"],
                         CMD_STOP,
                         device_id=details["command_device_id"],
@@ -1584,6 +1621,23 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         def _t(key: str, **kwargs: Any) -> str:
             return _runtime_translation_text(hass, key, **kwargs)
 
+        def _position_text(value: int | None) -> str:
+            """Render a position percentage the same way the live panel does.
+
+            Mirrors _developer_snapshot()'s own position_previous/
+            position_new description placeholders below, which already
+            guard this - this text export used to pass last_position's
+            raw, possibly-None previous_position/new_position straight
+            into _t(...) instead, rendering the literal word "None" here
+            for a freshly set up or just-restarted blind (nothing
+            recorded yet) where the live panel already showed "--"
+            (audit finding 21). Applied to current_estimated_position
+            too, just below - the same field as new_position, read a
+            second time for the confidence section, and wrong there for
+            the exact same reason.
+            """
+            return "--" if value is None else f"{value}%"
+
         diagnostics = "\n".join(
             (
                 _t("diag_title"),
@@ -1663,8 +1717,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                     "diag_direction",
                     value=_translate_phrase(hass, last_position["direction"]),
                 ),
-                _t("diag_previous_position", value=last_position["previous_position"]),
-                _t("diag_new_position", value=last_position["new_position"]),
+                _t(
+                    "diag_previous_position",
+                    value=_position_text(last_position["previous_position"]),
+                ),
+                _t(
+                    "diag_new_position",
+                    value=_position_text(last_position["new_position"]),
+                ),
                 _t(
                     "diag_status",
                     value=_translate_phrase(hass, last_position["status"]),
@@ -1674,7 +1734,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 _t("diag_section_position_confidence"),
                 _t(
                     "diag_current_estimated_position",
-                    value=last_position["new_position"],
+                    value=_position_text(last_position["new_position"]),
                 ),
                 _t("diag_last_manual_sync_time", value=last_manual_sync["time"]),
                 _t(

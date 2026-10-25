@@ -214,7 +214,8 @@
         "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_dispositivo/enum, separada por comas o líneas nuevas (por ejemplo F2B8D5/23).",
         "status_identity_incomplete": "Introduzca ambos campos de estado principal o déjelos ambos en blanco.",
         "status_discovery_unavailable": "La memoria USB no está conectada. Vuelva a conectarla e inténtelo de nuevo.",
-        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo."
+        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo.",
+        "calibration_capture_busy": "Otra persiana ya está utilizando la grabación de tramas compartida. Espere a que finalice e inténtelo de nuevo."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
@@ -228,7 +229,6 @@
   "options": {
     "step": {
       "init": {
-        "title": "Schellenberg USB",
         "description": "Edite la ruta del puerto serie para el hub USB Schellenberg.",
         "data": {
           "serial_port": "Puerto serie"
