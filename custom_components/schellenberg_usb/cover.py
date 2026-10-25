@@ -1916,19 +1916,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         needs to cover the method's *entire* body, every exit path
         included, not just its first await.
         """
-        # Fresh, authoritative information straight from Home Assistant
-        # itself (or set_cover_position(), chaining into this via
-        # _preserve_target) - must always supersede a merely-speculative
-        # secondary-identity "assume closed"/"assume open" timer (see
-        # _handle_secondary_event), the same reasoning _handle_event()
-        # already applies for a primary status event. Without this, a
-        # stale pending timer from an earlier secondary-identity press
-        # could still fire later and overwrite whatever this call's own
-        # open actually settles the entity at - its own guard against that
-        # (checking is_opening/is_closing when it fires) is only a
-        # snapshot, not a substitute for cancelling it outright.
-        self._cancel_secondary_close_timer("direct Home Assistant open command")
-        self._cancel_secondary_open_timer("direct Home Assistant open command")
         if not _preserve_target:
             # A plain open request (not a set_cover_position leg) always
             # means "go all the way to 100" - clear any stale target left
@@ -2120,9 +2107,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         """The actual work of async_close_cover() - see async_open_cover()'s
         own mirror of this split for why it exists.
         """
-        # Same reasoning as async_open_cover() - see its own comment.
-        self._cancel_secondary_close_timer("direct Home Assistant close command")
-        self._cancel_secondary_open_timer("direct Home Assistant close command")
         if not _preserve_target:
             # Same reasoning as async_open_cover: a plain close always
             # targets 0, so drop any stale partial-move target first.
@@ -2312,14 +2296,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # there is no window in which this task could yield to that retry
         # loop before the cancellation is actually requested.
         self._api.cancel_pending_move(self._command_device_id)
-        # Same reasoning as async_open_cover()/async_close_cover() - a
-        # direct stop is fresh, authoritative information that must
-        # supersede a merely-speculative secondary-identity timer too.
-        # Placed here, right alongside cancel_pending_move() above and
-        # still with no await before it, for the same no-window reason
-        # that call is already placed first.
-        self._cancel_secondary_close_timer("direct Home Assistant stop command")
-        self._cancel_secondary_open_timer("direct Home Assistant stop command")
         _LOGGER.debug(
             "Stopping cover %s (command_id=%s enum=%s)",
             self._device_name,
