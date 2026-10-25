@@ -2093,7 +2093,8 @@ class SchellenbergUsbApi:
         different blind's real move or stop was still waiting on that
         same slot: a genuine asyncio race (two coroutines actually
         overlapping at a real await), confirmed reachable through every
-        one of these callers - see AUDIT_FINDINGS.md finding 7.
+        one of these callers - see CHANGELOG.md's v1.3.0 entry for
+        audit finding 7.
 
         Takes the lock ordinary (non-priority), exactly like an ordinary
         move - a test command is not the safety-critical operation

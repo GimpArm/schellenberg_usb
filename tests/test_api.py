@@ -1306,9 +1306,10 @@ async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
     ack-wait, could have a totally unrelated test of blind B write right
     over it: B's write going out while A's slot is still marked
     outstanding means the stick's reply for B gets attributed to A
-    instead - exactly the concrete trace in AUDIT_FINDINGS.md finding 7,
-    reproduced here with a real control_blind_with_retry() call standing
-    in for blind A's own in-flight move.
+    instead - exactly the concrete trace behind audit finding 7 (see
+    CHANGELOG.md's v1.3.0 entry), reproduced here with a real
+    control_blind_with_retry() call standing in for blind A's own
+    in-flight move.
     """
     task_a = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
