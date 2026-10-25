@@ -1,30 +1,36 @@
-# Audit Findings — Unfixed (deferred to a future release)
+# Audit Findings — v1.2.1 disposition
 
-Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **Nothing below has been fixed yet** — fixes are intentionally deferred to a future release, once repeated audit passes stop turning up anything new. This file exists so a new session or a new audit agent doesn't have to reconstruct the list from conversation history, and so further rounds can be told "these are already known, only report genuinely new issues."
+Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. Originally **nothing below had been fixed** — every fix was intentionally deferred until repeated audit passes stopped turning up anything new. That point was reached, and **v1.2.1 fixes every finding below except #11**, which stays intentionally excluded (see its own entry for why). This file exists so a new session or a new audit agent doesn't have to reconstruct the list from conversation history, and so further rounds can be told "these are already known, only report genuinely new issues." Each finding below keeps its original bug description exactly as first written — it's still the accurate record of what was wrong before the fix — with a short disposition note added at the end. Full fix detail (what changed, why, and what test covers it) lives in `CHANGELOG.md`'s `## v1.2.1` section, not duplicated here.
 
 ## High severity
 
 1. **`cover.py` — a failed auto-stop at target position is silently ignored.**
    In `_async_position_update_loop()`, when a `set_cover_position()` leg reaches its intermediate target, the return value of `control_blind_stop()` is never checked before `is_opening`/`is_closing`/target-position tracking state is unconditionally cleared. If the stop call fails (a USB hiccup, or another blind's pairing/teach/raw-transmit active on the same hub at that moment), the motor keeps running to its real physical end stop, but Home Assistant permanently reports the wrong position — and discards the motor's later, genuine stop confirmation because the tracking state was already torn down.
+   **Fixed in v1.2.1.**
 
 2. **`cover.py` — a stale leftover target from a failed position move can prematurely stop an unrelated later move.**
    If a `set_cover_position()` call fails and leaves an old target in place, a later, completely unrelated move triggered by the original remote control can be auto-stopped at that stale, long-invalid target. Related to the already-discussed and already-correct secondary-remote-control direction limitation, but a distinct bug of its own, not an instance of that known limitation.
+   **Fixed in v1.2.1.**
 
 3. **`options_flow_calibration.py` — a single timeout during calibration permanently kills status-identity discovery for the rest of that run.**
    Every error exit from either calibration leg tears down the capture state. A retry after the error only resets the UI phase, not the capture itself — it looks like it succeeded, but the blind ends up at "status unknown" with no position tracking, with no indication the earlier timeout was the cause.
+   **Fixed in v1.2.1.**
 
 4. **`config_flow.py` — "Determine status from original remote" can silently overwrite a working blind's status identity.**
    If the detection attempt finds nothing (wrong button, pressed too fast, RF interference), there is no warning and no protection of the kind recalibration already has. Clicking "Save" anyway erases the previously-working identity mapping.
+   **Fixed in v1.2.1.**
 
 5. **`api.py` — `control_blind_stop()` can overrun its own `STOP_RETRY_BUDGET` by up to ~1 second.**
    The loop's final ack-wait uses the fixed `MOVE_ACK_TIMEOUT` (1.0s) instead of the remaining time left in the budget. Needs lock contention from another near-simultaneous blind command to have already eaten most of the 2.0s budget, *plus* a slow/lost ack for the stop write itself. When it fires, the actual stop write has normally already gone out (the shutter still stops on time) — visible only via two warning log lines (`No t1/tE reply to stop write...`, `Giving up on stop after...falling back to a plain write`), not via the shutter's physical behavior — unless the original write itself (not just its ack) was the thing that got lost, in which case a retry really does delay the physical stop by a similar margin.
    The identical pattern exists in the ordinary move-retry path (`control_blind_with_retry`), but is immaterial there because its overall budget (`MOVE_RETRY_OVERALL_TIMEOUT` = 15.0s) makes the same ~1s slip negligible — not tracked as a separate finding.
+   **Fixed in v1.2.1.**
 
 6. **The shared status-frame capture buffer has no per-operation owner, and two concurrent calibration/discovery flows for *different* blinds can and do steal it from each other — settled (2026-10-24): confirmed reachable through the real HA UI today.**
    `api.py`'s `_status_discovery_frames` is one slot per USB-stick hub, shared by every blind on it. `start_status_frame_capture()` doesn't queue or fail when a capture is already open — it forcibly destroys the existing one (discarding its contents, uncounted) and opens a fresh one for itself. `finish_status_frame_capture()` has no owner-check at all: it unconditionally tears down and returns whatever is *currently* live, whether or not that's the caller's own capture.
    Nothing in the integration prevents two different subentry flows (two "Calibrate"/"Add device" wizards for two different blinds) from running at once — confirmed no exclusivity guard exists anywhere (`manifest.json` has no `single_config_entry`, no lock, no `already_in_progress` check), and both flows share the one hub-wide `SchellenbergUsbApi` instance via `runtime_data`. This needs two browser tabs (or two people) open against the same Home Assistant instance at once — a normal way to use an integration whose "whole point," per its own code comments, is driving several blinds together.
    **Worst case, fully traced:** pairing a brand-new blind ("New") and recalibrating an already-working one ("Hallway") at the same time. Hallway's calibration start steals New's open capture; New's own remote operation then gets appended into Hallway's buffer; whichever flow finishes last receives *whichever buffer is currently live*, not necessarily its own. For a brand-new pairing specifically, there is no existing identity to sanity-check the result against (that protection only exists for recalibrating an already-confirmed blind), so the wrong identity gets written straight into permanent config data with zero UI warning. When the new entity registers that identity, it silently steals it from Hallway's own entity too (one `_LOGGER.warning` line, nothing user-visible) — breaking a second, previously-working blind as collateral damage.
    No existing test exercises this. The steal itself is a clean synchronous operation with no `await` in between — confirmed this is a semantic ownership bug, not a literal torn-write race condition (see finding 7 for an actual race).
+   **Fixed in v1.2.1.** (Also the fix that incidentally resolved finding 23 — see that entry.)
 
 7. **Unlocked, untracked `control_blind()` callers can steal/corrupt the hub-wide move-ack slot of an in-flight, lock-holding move or stop — a genuine asyncio race, distinct from finding 6.**
    `_move_awaiting_ack`/`_move_ack_event`/`_move_ack_result` (`api.py`) is a *single hub-wide slot*. `_handle_message()`'s t1/t0/tE reply handling attributes *any* reply to whichever call currently has `_move_awaiting_ack == True` — the wire protocol carries no correlation id, so this is only safe if at most one write is outstanding against this slot at a time. That invariant is enforced for move-vs-move and move-vs-stop (`_move_lock`) and for keeping `control_blind()` quiet during pairing/teach/raw-transmit's active window (`_pairing_active`) — but **not** in the other direction: several call sites call `control_blind()` directly, bypassing `_move_lock` entirely, and `control_blind()`'s only gate (`_transmit_capability_block_reason()`) never checks `_move_lock`/`_move_awaiting_ack` at all:
@@ -34,46 +40,56 @@ Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **No
    - `__init__.py`'s `_handle_test_command()`, backing the public `schellenberg_usb.test_command` service — callable at any time, for any device, by any script or automation.
    **Concrete trace:** blind A's ordinary open/close is mid-ack-wait (its own normal up-to-1.0s window). Someone tests blind B via any path above; B's write goes out on the same wire while A's ack slot is still marked outstanding. The stick's reply for B gets attributed to A by `_handle_message()` (A's `_move_awaiting_ack` is still `True`) — so A's move resolves as "accepted" or "busy, retrying" based on a hardware reply that has nothing to do with A's own write. A "busy" misattribution can make A retry a command that may have already gone out cleanly, risking a real duplicate RF transmission.
    Confirmed as a genuine interleaving race (two coroutines actually overlapping at a real `await`), not a restatement of finding 6 — and confirmed, separately, that this does *not* corrupt pairing/teach/raw-transmit's own retry bookkeeping, since `control_blind()` refuses to write at all while `_pairing_active` is set.
+   **Fixed in v1.2.1.**
 
 ## Medium severity
 
 8. **`cover.py`'s own status-identity resolution in `async_setup_entry()` diverges from the canonical logic in `identities.py`.**
    `identities.py`'s `resolve_blind_identities()` nulls a stale `status_device_id` when the status identity source is `UNKNOWN`. `async_setup_entry()` doesn't, and that raw stale value briefly reaches `api.register_entity()` as this entity's primary status identity before the entity's own, separately-correct re-derivation corrects it — the first, wrong registration is never retracted. Not reachable through the current UI (today's write paths clean up the fields correctly); would strike with hand-edited or old/legacy config data.
+   **Fixed in v1.2.1.**
 
 9. **Calibration's cross-blind interference protection only guards the "movement detected" wait, not the final identity result.**
    If another already-paired, normally-working blind moves (its own automation, its own remote) *while* a different blind is being calibrated, that other blind's real frames can win the race and get wrongly stored as the identity of the blind currently being calibrated — without the collision check manual editing has. Confirmed as a real test gap, not just theoretical.
+   **Fixed in v1.2.1.**
 
 10. **USB-stick (hub) diagnostics download returns only a generic error instead of real data.**
     The diagnostics check only covers blind subentries, not the hub device itself.
+    **Fixed in v1.2.1.**
 
 11. **Incoming `"ss"` frame length check is stricter than necessary.**
     Could silently discard valid short frames; unclear whether the stick actually sends such short frames in practice.
+    **Deferred — intentionally excluded from v1.2.1, at the maintainer's explicit request.** A real fix here is bigger than a length-check tweak: loosening the check safely needs two-step remote training so position tracking stays in sync with whatever a shorter frame actually represents, which is a separate, larger piece of work than this release's scope. Still open for a future release; not forgotten.
 
 12. **Unbounded buffer growth in the serial receive loop if no newline ever arrives.**
     `api.py`, `SchellenbergProtocol.data_received()`: `self.buffer += data.decode(...)` with nothing draining it except finding a `"\n"`. If a flaky USB-CDC connection, a firmware glitch, a brownout, or a misconfigured port ever stops producing a clean line terminator, the buffer grows without limit for as long as that lasts — and since Python strings are immutable, each `+=` also re-copies the whole buffer, so per-chunk CPU cost grows too, not just memory. A reconnect clears it, but nothing detects runaway growth and forces one on its own.
+    **Fixed in v1.2.1.**
 
 13. **`_last_received_messages` grows without bound, keyed directly off unvalidated wire bytes, and isn't cleared by a reconnect.**
     `identity = (normalized_device_id, normalized_device_enum)` is built from raw substrings of the decoded line with no validation (unlike `identities.normalize_status_identity()`, used everywhere else). The write happens unconditionally, before checking whether this identity is even registered. No cap or cleanup exists except a full config-entry reload or an HA restart. In a noisy RF environment, every distinct spurious/corrupted frame becomes a permanent entry, accumulating indefinitely.
+    **Fixed in v1.2.1.**
 
 14. **(Lower confidence/severity) Capture-window frame list has no cap on frame count.**
     `_status_discovery_frames` is appended to for every `"ss"` frame received while a capture window (up to 300s/45s) is open, with no size limit. The real calibration decision is still properly validated downstream, so garbage can't masquerade as a real identity — but the raw list itself has no cap during the window.
+    **Fixed in v1.2.1.**
 
 15. **Reloading the hub for one blind's subentry change silently discards another blind's in-progress calibration/discovery capture.**
     Every subentry add/remove/edit reloads the whole hub entry, building a brand-new `SchellenbergUsbApi` instance. The calibration flow fetches `entry.runtime_data` fresh on every call with no caching — so if a reload happens between a capture's start and finish, finish reads the *new*, never-started instance (empty) while the *old* instance, which actually buffered the blind's real frames, is dropped. Degrades gracefully (no live position feedback) rather than corrupting an existing identity — silent either way. The codebase already fixed this exact "reload replaces runtime_data" hazard for a *different* piece of state (`_fresh_calibration_positions`) — the status-discovery buffer never got the same treatment. Smaller related inaccuracy: a reload caused by a sibling blind mid-pairing gets reported as an ordinary "pairing timeout."
+    **Fixed in v1.2.1** for the capture-buffer loss itself (the calibration flow now caches the API instance reference that started the capture, so the same instance that started it is the one that finishes it, regardless of an intervening reload). The smaller "pairing-timeout mislabeling" inaccuracy noted in the last sentence above is a separate, different code path and was **deliberately left unaddressed in this pass** — still a known, open, smaller inaccuracy for a future release.
 
 16. **Removing a blind's subentry doesn't cancel its in-flight move/stop; only the side-effect hub reload eventually does, hub-wide.**
     There's no "remove blind" code in this integration — subentry deletion goes through Home Assistant's generic UI, which only triggers the same generic full reload as any other change. `cover.py` cancels only its position-polling task on removal, never the move/stop itself — there's no task handle kept anywhere to cancel. The only thing that unblocks an in-flight retry loop is `disconnect()`, which only runs once the subsequent reload's unload phase reaches it, and then wakes every blind on the hub, not just the removed one. Between removal and that point, a just-deleted blind's retry loop can still transmit a real RF command, or process a stray ack, for a blind HA no longer has an entity for. Whether a still-in-flight `async_write_ha_state()` on the now-removed entity raises or no-ops is Home-Assistant-version-dependent and wasn't independently confirmed.
+    **Fixed in v1.2.1.**
 
 ## Low / cosmetic
 
-17. A logging field for blind moves is never updated (diagnostics-only impact, no functional bug).
-18. A percentage calculation has no floor, relevant only for very short/distorted travel times.
-19. A brief, self-correcting LED flicker at Home Assistant startup.
-20. A dead translation key that happens to be identical across all languages anyway.
-21. The "Copy diagnostics" text export shows literal `None` instead of `--` for the previous position on a freshly-set-up or just-restarted blind (the live dev-tools panel already handles this correctly). Purely cosmetic.
-22. No listener for Home Assistant Core stopping exists at the hub/API level (only at the entity level, where it's handled correctly) — the serial transport is never deliberately closed on Core stop/restart, just abandoned to process exit. Low-impact (nothing buffered to flush; HA's own shutdown sequence cancels remaining tasks anyway).
-23. A translation that's never shown: `"superseded_by_calibration"` has proper, distinct translations in three languages, but the only code path that produces this value (finding 6's steal branch) immediately discards its return value — nothing ever stores or displays it.
-24. `control_blind()` never sets `_last_transmit_source`, so after any direct `control_blind()` write (the same call sites as finding 7), t1/t0 log lines and the `_busy_latched` reset reflect whatever the *previous* caller's source was. Diagnostic/log-attribution only — `_busy_latched` is documented as never blocking a new command regardless.
+17. A logging field for blind moves is never updated (diagnostics-only impact, no functional bug). **Fixed in v1.2.1.**
+18. A percentage calculation has no floor, relevant only for very short/distorted travel times. **Fixed in v1.2.1.**
+19. A brief, self-correcting LED flicker at Home Assistant startup. **Fixed in v1.2.1** — turned out to be a genuine startup race (not just inherent hardware behavior), closed in `switch.py`.
+20. A dead translation key that happens to be identical across all languages anyway. **Fixed in v1.2.1** — removed from `strings.json` and all four `translations/*.json` files.
+21. The "Copy diagnostics" text export shows literal `None` instead of `--` for the previous position on a freshly-set-up or just-restarted blind (the live dev-tools panel already handles this correctly). Purely cosmetic. **Fixed in v1.2.1** — same fix also applied to the sibling "new position" and "current estimated position" lines, which shared the identical root cause and were equally wrong for the same freshly-set-up/just-restarted blind, even though only "previous position" was named above.
+22. No listener for Home Assistant Core stopping exists at the hub/API level (only at the entity level, where it's handled correctly) — the serial transport is never deliberately closed on Core stop/restart, just abandoned to process exit. Low-impact (nothing buffered to flush; HA's own shutdown sequence cancels remaining tasks anyway). **Fixed in v1.2.1.**
+23. A translation that's never shown: `"superseded_by_calibration"` has proper, distinct translations in three languages, but the only code path that produces this value (finding 6's steal branch) immediately discards its return value — nothing ever stores or displays it. **Resolved as a side effect of finding 6's fix — no dedicated change was needed for this finding itself.** (The dead translation strings were removed as part of that fix.)
+24. `control_blind()` never sets `_last_transmit_source`, so after any direct `control_blind()` write (the same call sites as finding 7), t1/t0 log lines and the `_busy_latched` reset reflect whatever the *previous* caller's source was. Diagnostic/log-attribution only — `_busy_latched` is documented as never blocking a new command regardless. **Fixed in v1.2.1.**
 
 ## Also checked, found clean — not bugs
 
@@ -97,7 +113,7 @@ Tracking doc for issues found during the post-v1.2.0 (PR #70) audit rounds. **No
 - No config-entry migration exists (`VERSION` has always been `1`) — genuinely nothing to migrate, not an oversight. The one real data-shape migration (legacy-unique-ID backfill) is naturally idempotent and re-derived fresh on every setup, so an interrupted run can't leave an inconsistent state.
 - Startup ordering (`runtime_data` set before connecting starts) and the early-service-call race (`test_command` before the hub finishes connecting) — both handled cleanly.
 - Shutdown via `disconnect()` while pairing/teach is in flight — both fail cleanly with proper `finally` cleanup, no stuck state.
-- Per-entity `EVENT_HOMEASSISTANT_STOP` handling — correctly self-cleaning, freezes the position estimate (contrast with finding 22's hub-level gap).
+- Per-entity `EVENT_HOMEASSISTANT_STOP` handling — correctly self-cleaning, freezes the position estimate (finding 22's matching hub-level gap is now closed too, as of v1.2.1).
 
 ## Audit status — breadth-of-angle coverage complete
 
@@ -105,4 +121,4 @@ Eight distinct angles have now each had at least one dedicated audit pass: entit
 
 That doesn't reset the plan. The criterion for "thoroughly audited" was covering this full, named breadth — not every round individually coming back empty — and that breadth is now covered. No further rounds are being dispatched automatically from here. Chasing additional, increasingly narrow angles beyond this list would mean inventing new categories on the fly rather than following a bounded methodology, and isn't planned unless specifically asked for.
 
-Nothing above is fixed yet — all of it, including finding 7 (probably the most practically significant thing found across the whole audit: an ordinary motor test on one blind can corrupt another blind's in-flight move/stop state), is scoped for a future release.
+**v1.2.1 fixes every finding above except #11**, which stays intentionally deferred (see its own entry for why) — including finding 7 (probably the most practically significant thing found across the whole audit: an ordinary motor test on one blind could corrupt another blind's in-flight move/stop state). See `CHANGELOG.md`'s `## v1.2.1` section for what each fix actually does and which test(s) cover it.
