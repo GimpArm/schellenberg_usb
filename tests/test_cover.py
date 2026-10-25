@@ -243,6 +243,71 @@ async def test_async_close_cover_clears_stale_target_when_a_preserved_leg_fails(
     assert cover._target_position is None
 
 
+async def test_async_open_cover_failure_does_not_clobber_anothers_live_target(
+    hass: HomeAssistant,
+) -> None:
+    """A failing *plain* open must not wipe a different leg's live target.
+
+    The two regression tests above cover a *preserved* leg's own target
+    being cleared on its own failure (_preserve_target=True) - correct,
+    since that leg owns the target it is being asked to preserve. The
+    failure path used to clear self._target_position unconditionally
+    though, regardless of *this* call's own _preserve_target - so a
+    plain open (_preserve_target=False, which has no target concept of
+    its own; any stale one of its own was already dropped at the top of
+    this same method) could still wipe a target that arrived in the
+    meantime and belongs to someone else entirely: self._target_position
+    is shared, per-entity state, and this call's own two awaits (the
+    cancel-tracking call, and this one) are real suspension points a
+    different, genuinely live set_cover_position() leg's own first,
+    synchronous write can land inside, same as the STARTED_MOVING/STOPPED
+    tests elsewhere in this file already establish for other fields.
+    Reproduced here without needing any precise interleaving: the
+    control_blind_with_retry mock itself sets the other leg's target
+    before failing, which is enough to show the failure path's own
+    unconditional clear was the only thing that could still destroy it.
+    """
+
+    async def fake_retry_then_fail(*_args: object, **_kwargs: object) -> bool:
+        # A different, genuinely live set_cover_position() leg's target
+        # landing while this plain open's own write is in flight - then
+        # this call's own write fails outright.
+        cover._target_position = 40
+        return False
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry_then_fail)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover()  # plain open - _preserve_target defaults False
+
+    assert cover._target_position == 40
+
+
+async def test_async_close_cover_failure_does_not_clobber_anothers_live_target(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors the open-side regression guard above for close."""
+
+    async def fake_retry_then_fail(*_args: object, **_kwargs: object) -> bool:
+        cover._target_position = 60
+        return False
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry_then_fail)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_close_cover()  # plain close - _preserve_target defaults False
+
+    assert cover._target_position == 60
+
+
 async def test_async_open_cover_does_not_start_tracking_before_retry_succeeds(
     hass: HomeAssistant,
 ) -> None:
@@ -1836,6 +1901,71 @@ async def test_handle_event_during_a_pending_command_does_not_clear_its_target(
     cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
     cover._target_position = 70  # a genuinely in-progress set_cover_position()
     assert cover._position_update_task is None  # tracking hasn't started yet
+
+    await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._target_position == 70
+
+
+async def test_handle_event_stopped_does_not_clear_a_concurrent_commands_target(
+    hass: HomeAssistant,
+) -> None:
+    """A STOPPED echo for a just-superseded move must not clear a new leg's target.
+
+    Same self._command_in_flight window as the two tests above, but for
+    the STOPPED branch instead of STARTED_MOVING - nothing there ever
+    checked it, even though the branch's own comment already acknowledges
+    a target can still be set when STOPPED arrives (it reads that as
+    proof of an *external* interruption and clears it unconditionally on
+    that assumption).
+
+    Concrete scenario this misses: a set_cover_position() leg reverses
+    direction while an older, different move is still live - say that
+    older move is closing, and _async_position_update_loop()'s own
+    auto-stop-at-target branch has already sent it a real stop. The new
+    leg sets self._target_position to its own, brand new target
+    synchronously (see async_set_cover_position()), then its own async_
+    open_cover()/async_close_cover() call awaits _async_cancel_position_
+    tracking() to tear down the superseded move's tracking task - a real
+    suspension point, during which self._position_update_task is already
+    cleared (the real method clears it synchronously before its own
+    await), so _has_live_position_tracking() alone cannot tell this
+    window apart from genuine idle, exactly as test_handle_event_during_
+    a_pending_command_does_not_clear_its_target already established for
+    STARTED_MOVING. If the older move's own genuine STOPPED echo lands
+    during exactly that window, it is not an external interruption of the
+    new leg at all - it is just confirming the move the new leg itself is
+    in the middle of superseding - so it must not null out a target that
+    belongs to a different, still in-flight command.
+    """
+
+    async def fake_cancel_tracking(*_args: object, **_kwargs: object) -> None:
+        # Mirrors _async_cancel_position_tracking()'s own real order: it
+        # clears self._position_update_task synchronously, before its own
+        # suspension point - so by the time a concurrent echo could land
+        # here, nothing is "live" there any more, and self._command_in_
+        # flight is the only thing left that can tell this apart from
+        # genuine idle.
+        cover._position_update_task = None
+        cover._handle_event(EVENT_STOPPED)
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._async_cancel_position_tracking = AsyncMock(  # type: ignore[method-assign]
+        side_effect=fake_cancel_tracking
+    )
+    # The superseded move: closing, so this new open() is not itself
+    # mistaken for a redundant resend of the same direction (which would
+    # skip the cancel-tracking await entirely via a different path).
+    cover._attr_is_closing = True
+    cover._attr_is_opening = False
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+    cover._target_position = 70  # the new leg's own, brand new target
 
     await cover.async_open_cover(_preserve_target=True)
 

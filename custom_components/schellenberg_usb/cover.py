@@ -1042,10 +1042,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # async_stop_cover, and note control_blind()/send_command() have
             # no internal await-suspension point, so nothing can interleave
             # while either is in flight). A STOPPED event that still finds a
-            # target set therefore means the blind was interrupted externally
-            # (e.g. the physical remote), in which case the commanded target
-            # was never reached and snapping to it would report a false
-            # position instead of where the blind actually stopped.
+            # target set therefore *usually* means the blind was interrupted
+            # externally (e.g. the physical remote), in which case the
+            # commanded target was never reached and snapping to it would
+            # report a false position instead of where the blind actually
+            # stopped.
             self._update_position()
             if self._attr_current_cover_position is not None:
                 self._attr_current_cover_position = max(
@@ -1082,7 +1083,29 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
             self._move_start_time = None
             self._move_start_position = None
-            self._target_position = None
+            if not self._has_live_position_tracking() and not self._command_in_flight:
+                # The "usually external interruption" reasoning above has one
+                # gap: a set_cover_position() leg that reverses direction
+                # while a *different*, superseded move is still live awaits
+                # _async_cancel_position_tracking() to tear that move's own
+                # tracking down - a real suspension point - after already
+                # setting self._target_position to its own, brand new target
+                # (see async_set_cover_position()). That method clears self.
+                # _position_update_task synchronously, before its own await,
+                # so _has_live_position_tracking() alone cannot tell this
+                # window apart from genuine idle - exactly the same gap
+                # test_handle_event_during_a_pending_command_does_not_clear_
+                # its_target already proved for the STARTED_MOVING branch.
+                # If the superseded move's own genuine STOPPED echo lands in
+                # that window, it is not reporting an external interruption
+                # of the new leg at all - it is only confirming the move the
+                # new leg is itself in the middle of superseding - so it
+                # must not null out a target that belongs to that different,
+                # still in-flight command. self._command_in_flight (set for
+                # async_open_cover()'s/async_close_cover()'s entire duration)
+                # is what tells the two apart here, the same as it already
+                # does for STARTED_MOVING.
+                self._target_position = None
         else:
             _LOGGER.debug(
                 "Device %s received unknown event: %s", self._device_name, event
@@ -2003,21 +2026,37 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # The command never reached the stick - undo the optimistic
             # "opening" state set above so the entity doesn't report a
             # movement that never physically happened. Also drop any
-            # target this call was asked to preserve (a set_cover_
+            # target *this* call was asked to preserve (a set_cover_
             # position() leg, _preserve_target=True): with no move
             # actually under way, there is nothing left for that target to
             # describe, and leaving it stale let a later, completely
             # unrelated move - typically the original remote control -
             # read it back via _async_position_update_loop() and get
-            # auto-stopped at that long-invalid position. Safe to clear
-            # unconditionally here specifically because the redundant-
-            # resend branch above (where the original move's own target is
-            # still genuinely live) already returned before reaching this
-            # point.
+            # auto-stopped at that long-invalid position.
+            #
+            # Gated on _preserve_target specifically - not unconditional -
+            # because self._target_position is shared, per-entity state: a
+            # plain open (_preserve_target=False) never owns a target
+            # concept to begin with (any stale one of its own was already
+            # dropped at the top of this method, _preserve_target already
+            # False there too), so it has no legitimate claim on whatever
+            # is sitting in self._target_position by the time it reaches
+            # this point. If a *different*, still-genuinely-live set_
+            # cover_position() leg's own target landed there in the
+            # meantime - this call's own await above is a real suspension
+            # point such a leg's first synchronous write (self._target_
+            # position = target_position in async_set_cover_position())
+            # can land inside - clearing it unconditionally here clobbered
+            # that other leg's legitimate target for no reason of this
+            # call's own. The redundant-resend branch above (where the
+            # original move's own target is still genuinely live) already
+            # returned before reaching this point, so that case needs no
+            # separate guard here.
             self._attr_is_opening = False
             self._move_start_time = None
             self._move_start_position = None
-            self._target_position = None
+            if _preserve_target:
+                self._target_position = None
             await self._async_cancel_position_tracking("open command failed")
             self.async_write_ha_state()
             reason = _translate_block_reason(
@@ -2165,12 +2204,16 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # The command never reached the stick - undo the optimistic
             # "closing" state set above so the entity doesn't report a
             # movement that never physically happened. Also drop any
-            # target this call was asked to preserve - see
-            # async_open_cover()'s mirror of this point for why.
+            # target *this* call was asked to preserve - gated on
+            # _preserve_target, not unconditional - see async_open_
+            # cover()'s mirror of this point for the full reasoning on why
+            # a plain close has no legitimate claim on whatever is
+            # sitting in the shared self._target_position by this point.
             self._attr_is_closing = False
             self._move_start_time = None
             self._move_start_position = None
-            self._target_position = None
+            if _preserve_target:
+                self._target_position = None
             await self._async_cancel_position_tracking("close command failed")
             self.async_write_ha_state()
             reason = _translate_block_reason(
