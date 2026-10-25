@@ -492,6 +492,19 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # is pending.
         self._secondary_open_timer_task: asyncio.Task[None] | None = None
         self._target_position: int | None = None
+        # True from the moment async_open_cover()/async_close_cover() are
+        # entered until they return or raise - including the whole stretch
+        # where they are suspended awaiting _async_cancel_position_tracking()
+        # or control_blind_with_retry() (see each method's own try/finally).
+        # _handle_event()'s STARTED_MOVING branch reads this alongside
+        # _has_live_position_tracking() specifically because tracking itself
+        # only starts once control_blind_with_retry() actually succeeds (see
+        # test_async_open_cover_does_not_start_tracking_before_retry_succeeds)
+        # - so a set_cover_position() leg's own, genuinely current
+        # self._target_position would otherwise look exactly like stale
+        # leftover garbage to that check for as long as the leg's own write
+        # is still queued behind another blind's transmission.
+        self._command_in_flight = False
         self._position_update_source = "not recorded"
         self._position_source_kind = "startup default"
         self._position_confirmed_since_restart = False
@@ -932,19 +945,36 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
-            if not self._has_live_position_tracking():
-                # Nothing of ours is tracking a move yet, so this echo is
-                # the *first* sign of this one. async_open_cover()/
-                # async_close_cover()/async_set_cover_position() each
-                # start tracking themselves, synchronously, the moment
-                # Home Assistant calls them - well before the stick could
-                # relay this echo back (see async_open_cover()'s own
-                # comment) - so live tracking already existing here always
-                # means this echo is merely confirming one of those. Its
-                # absence means the opposite: this move was not started
-                # through this entity at all, only *reported* by the
-                # motor's own echo - i.e. a paired remote control or wall
-                # switch drove it directly.
+            if (
+                not self._has_live_position_tracking()
+                and not self._command_in_flight
+            ):
+                # Neither a tracking task nor a command of ours is in
+                # flight, so this echo can only be *reporting* a move this
+                # entity did not itself start - a paired remote control, a
+                # wall switch, or a Gurtwickler winder's own local buttons
+                # drove it directly - never one merely *confirming* a move
+                # already requested through async_open_cover()/async_
+                # close_cover()/async_set_cover_position().
+                #
+                # The second half of that check matters just as much as
+                # the first: those three methods do NOT start tracking
+                # synchronously - self._command_in_flight's own comment in
+                # __init__, and test_async_open_cover_does_not_start_
+                # tracking_before_retry_succeeds, explain why tracking only
+                # starts once control_blind_with_retry() actually succeeds,
+                # which can suspend for a real stretch (hub-wide lock
+                # contention, the busy-retry wait) with self._target_position
+                # already set - for a set_cover_position() leg specifically
+                # - but no tracking task live yet. Checking only
+                # _has_live_position_tracking() here would wrongly treat
+                # that genuinely in-flight target as stale and null it out
+                # from underneath a command this same entity is still in
+                # the middle of sending. self._command_in_flight is True
+                # for exactly that whole stretch (see the two methods' own
+                # try/finally), so the combined check only treats a target
+                # as stale once truly nothing of this entity's own is
+                # using it any more.
                 #
                 # Whatever _target_position still holds at that point is
                 # therefore stale, left over from an earlier set_cover_
@@ -1071,14 +1101,20 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         the same distinction _has_live_tracking_in_direction() draws for
         its own, narrower purpose. Used here by _start_position_tracking()
         itself to decide whether a (re)start is needed, and by
-        _handle_event() to tell an echo that merely *confirms* a move
-        this entity already started tracking (a Home Assistant open/
-        close/set_position command: see async_open_cover()'s own comment
-        on why those start tracking themselves, synchronously, before any
-        echo could arrive) apart from one *reporting* a move it did not -
-        see _handle_event()'s own comment for why that distinction is
-        what decides whether a lingering _target_position is still
-        legitimate or merely stale.
+        _handle_event(), *alongside* self._command_in_flight - not
+        alone - to tell an echo that merely *confirms* a move this entity
+        already requested (a Home Assistant open/close/set_position
+        command) apart from one *reporting* a move it did not. This alone
+        is not sufficient for that: a Home Assistant command's own
+        tracking only starts once its own control_blind_with_retry() call
+        actually succeeds, not from the moment it is called (see
+        self._command_in_flight's own comment in __init__, and
+        test_async_open_cover_does_not_start_tracking_before_retry_
+        succeeds) - so this can read False for a stretch while a
+        set_cover_position() leg's own, still genuinely current target is
+        already set. See _handle_event()'s own comment for the full
+        reasoning on why both checks together are what decides whether a
+        lingering _target_position is still legitimate or merely stale.
         """
         task = self._position_update_task
         return task is not None and not task.done() and not task.cancelling()
@@ -1847,6 +1883,21 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self, *, _preserve_target: bool = False, **kwargs: Any
     ) -> None:
         """Open the cover, or drive it upward as a leg of set_cover_position."""
+        self._command_in_flight = True
+        try:
+            await self._async_open_cover_body(_preserve_target=_preserve_target)
+        finally:
+            self._command_in_flight = False
+
+    async def _async_open_cover_body(
+        self, *, _preserve_target: bool = False
+    ) -> None:
+        """The actual work of async_open_cover(), wrapped by its own
+        self._command_in_flight bookkeeping - see that method and
+        self._command_in_flight's own comment in __init__ for why this
+        needs to cover the method's *entire* body, every exit path
+        included, not just its first await.
+        """
         # Fresh, authoritative information straight from Home Assistant
         # itself (or set_cover_position(), chaining into this via
         # _preserve_target) - must always supersede a merely-speculative
@@ -2025,6 +2076,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self, *, _preserve_target: bool = False, **kwargs: Any
     ) -> None:
         """Close the cover, or drive it downward as a leg of set_cover_position."""
+        self._command_in_flight = True
+        try:
+            await self._async_close_cover_body(_preserve_target=_preserve_target)
+        finally:
+            self._command_in_flight = False
+
+    async def _async_close_cover_body(
+        self, *, _preserve_target: bool = False
+    ) -> None:
+        """The actual work of async_close_cover() - see async_open_cover()'s
+        own mirror of this split for why it exists.
+        """
         # Same reasoning as async_open_cover() - see its own comment.
         self._cancel_secondary_close_timer("direct Home Assistant close command")
         self._cancel_secondary_open_timer("direct Home Assistant close command")

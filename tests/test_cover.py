@@ -1769,13 +1769,15 @@ async def test_handle_event_started_moving_preserves_a_live_targets_position(
     """A STARTED_MOVING echo confirming our own command must keep its target.
 
     Mirrors the regression guard above for the opposite case: when a
-    position-tracking task is already live - exactly what async_open_
-    cover()/async_close_cover()/async_set_cover_position() each start
-    themselves, synchronously, before any echo could arrive (see
-    async_open_cover()'s own comment) - this echo is only confirming a
-    move this entity already knows about, so its _target_position (a
-    set_cover_position() leg's own, genuinely current target) is not
-    stale and must survive untouched.
+    position-tracking task is already live - which happens once async_
+    open_cover()/async_close_cover()'s own control_blind_with_retry() call
+    has actually succeeded - this echo is only confirming a move this
+    entity already knows about, so its _target_position (a set_cover_
+    position() leg's own, genuinely current target) is not stale and must
+    survive untouched. See test_handle_event_during_a_pending_command_
+    does_not_clear_its_target below for the other half of this same
+    guard: a command still in flight, before its own tracking task exists
+    yet.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)
@@ -1789,6 +1791,55 @@ async def test_handle_event_started_moving_preserves_a_live_targets_position(
     cover._handle_event(EVENT_STARTED_MOVING_UP)
 
     assert cover._target_position == 55
+
+
+async def test_handle_event_during_a_pending_command_does_not_clear_its_target(
+    hass: HomeAssistant,
+) -> None:
+    """A concurrent echo arriving mid-command must not clear its target either.
+
+    The two tests above only cover the two states that existed before
+    self._command_in_flight was introduced: nothing of ours in flight at
+    all, or a command whose own tracking task is already live. Between
+    those two moments sits a real, non-theoretical window: async_open_
+    cover()/async_close_cover() only start their own tracking task *after*
+    control_blind_with_retry() actually succeeds (see test_async_open_
+    cover_does_not_start_tracking_before_retry_succeeds), and that call
+    can itself stay suspended for a real stretch - hub-wide lock
+    contention, the busy-retry ack-wait. self._target_position is already
+    set for the whole of that stretch whenever this is a set_cover_
+    position() leg (_preserve_target=True), but self._position_update_
+    task is still None.
+
+    An independent, concurrently-triggered echo (a different remote
+    press, a wall switch, a Gurtwickler's own local buttons) can land at
+    exactly that moment. Checking only _has_live_position_tracking() - as
+    the first version of this fix did - would misread that window as
+    "nothing of ours is happening" and wrongly null out a target this
+    same entity's own in-flight command still needs, capping the leg at
+    whatever the live estimate happens to be once tracking finally starts
+    instead of the position it was actually asked to reach.
+    self._command_in_flight exists specifically to keep that window from
+    being mistaken for idle.
+    """
+
+    async def fake_retry(*_args: object, **_kwargs: object) -> bool:
+        # Simulates a concurrent, independently-triggered echo landing
+        # while this call is still suspended here - exactly the moment a
+        # real hub-wide lock wait or busy-retry ack-wait can occupy.
+        cover._handle_event(EVENT_STARTED_MOVING_UP)
+        return True
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 70  # a genuinely in-progress set_cover_position()
+    assert cover._position_update_task is None  # tracking hasn't started yet
+
+    await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._target_position == 70
 
 
 # ---------------------------------------------------------------------------
