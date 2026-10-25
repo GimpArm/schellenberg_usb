@@ -29,6 +29,7 @@ from .const import (
     CONF_SERIAL_PORT,
     DEFAULT_TRAVEL_TIME_SECONDS,
     SUBENTRY_TYPE_BLIND,
+    SUBENTRY_TYPE_HUB,
 )
 from .device_registry_compat import async_device_on_subentry_compat
 from .identities import resolve_blind_identities
@@ -73,30 +74,45 @@ async def async_get_config_entry_diagnostics(
 async def async_get_device_diagnostics(
     hass: HomeAssistant, entry: SchellenbergConfigEntry, device: DeviceEntry
 ) -> dict[str, Any]:
-    """Return diagnostics for one device - a single blind on this hub.
+    """Return diagnostics for one device - a single blind, or the hub
+    (USB stick) device itself, on this entry.
 
     ``hass`` is unused here, for the same reason as in
     async_get_config_entry_diagnostics() above.
 
     The matching subentry is found via async_device_on_subentry_compat -
-    the same version-compatible check cover.py itself uses when reassigning
-    a device, see device_registry_compat.py - rather than by parsing the
-    device's own identifiers() tuple directly, so this keeps working
-    unchanged if that encoding ever changes.
+    the same version-compatible check cover.py/__init__.py themselves use
+    when reassigning a device, see device_registry_compat.py - rather than
+    by parsing the device's own identifiers() tuple directly, so this keeps
+    working unchanged if that encoding ever changes. Every device Home
+    Assistant registers for this entry belongs to exactly one subentry: a
+    blind, or the single SUBENTRY_TYPE_HUB subentry __init__.py's
+    async_setup_entry() creates for the USB stick device itself - so both
+    are checked here, branching only once a subentry's device actually
+    matches.
+
+    Audit finding 10: this used to only ever check blind subentries (every
+    other subentry type, the hub included, was skipped outright), so asking
+    for diagnostics from the hub device's own page - not any blind's - could
+    never match anything and always fell through to the generic error below,
+    instead of the same real stick data async_get_config_entry_diagnostics()
+    already exposes at the entry level.
     """
     api = entry.runtime_data
     for subentry in entry.subentries.values():
-        if subentry.subentry_type != SUBENTRY_TYPE_BLIND:
-            continue
-        if async_device_on_subentry_compat(
+        if not async_device_on_subentry_compat(
             device, entry.entry_id, subentry.subentry_id
         ):
+            continue
+        if subentry.subentry_type == SUBENTRY_TYPE_BLIND:
             return _blind_diagnostics(subentry, api)
+        if subentry.subentry_type == SUBENTRY_TYPE_HUB:
+            return _stick_diagnostics(api)
     # Should not normally happen - Home Assistant only calls this for a
     # device it already knows belongs to this config entry - but a plain,
     # explicit result beats an unhandled None reaching the diagnostics
     # download as a crash.
-    return {"error": f"No blind subentry found for device {device.id}"}
+    return {"error": f"No subentry found for device {device.id}"}
 
 
 def _stick_diagnostics(api: SchellenbergUsbApi) -> dict[str, Any]:
