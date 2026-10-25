@@ -1330,7 +1330,17 @@ async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
 
     connected_api._handle_message("t1")  # correctly attributed to A
     assert await asyncio.wait_for(task_a, timeout=1) is True
-    assert connected_api._move_awaiting_ack is False
+    # No assertion on _move_awaiting_ack here: B is already queued right
+    # behind A on the same _move_lock, so the instant A's "async with"
+    # releases it, B's own continuation is scheduled ahead of this test
+    # coroutine's own resumption (lock.release() wakes B before task_a's
+    # done-callback wakes this await) - B reliably re-claims the slot for
+    # itself, True, before control returns here. That is correct exclusive-
+    # lock behavior, not a steal: B still could not write, and could not
+    # observe A's reply, while A actually held the slot (already proven by
+    # the asserts above), and the full round-trip below proves B's own
+    # write and its own reply attribution are still correct once it is
+    # genuinely B's turn.
 
     # Only now may B's write reach the wire.
     await _run_until(lambda: len(written(connected_api)) == 2)

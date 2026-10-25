@@ -1952,7 +1952,14 @@ async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
     assert "Previous position: --" in diagnostics_text
     assert "New position: --" in diagnostics_text
     assert "Current estimated position: --" in diagnostics_text
-    assert "None" not in diagnostics_text
+    # Deliberately scoped to the three position lines finding 21 actually
+    # covers, not a blanket "None" ban: a never-calibrated blind's
+    # entities/candidate-status-identities lines legitimately show "None"
+    # too (and "Frames observed during calibration" legitimately shows
+    # "None recorded"), none of which this finding ever claimed was wrong.
+    assert "Previous position: None" not in diagnostics_text
+    assert "New position: None" not in diagnostics_text
+    assert "Current estimated position: None" not in diagnostics_text
 
 
 def _load_calibration_close_step(language: str) -> dict[str, Any]:

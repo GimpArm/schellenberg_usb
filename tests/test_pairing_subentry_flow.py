@@ -90,6 +90,12 @@ def make_flow(hass: HomeAssistant) -> Any:
     flow.hass = hass
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
+    # control_blind_exclusive() is what the developer-tools test-open/
+    # close/stop steps and the post-teach open+stop test actually call
+    # (audit finding 7) - control_blind itself stays mocked too, since
+    # this same api spy backs tests of other flow steps that still call
+    # it directly.
+    api.control_blind_exclusive = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.manual_sync_position = MagicMock(return_value=True)
     api.teach_motor = AsyncMock(return_value=True)
@@ -131,7 +137,7 @@ async def test_developer_command_open_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_open()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_UP, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -144,7 +150,7 @@ async def test_developer_command_close_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_close()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_DOWN, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -157,7 +163,7 @@ async def test_developer_command_stop_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_stop()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_STOP, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -175,7 +181,7 @@ async def test_developer_command_respects_invert_direction(
 
     await flow.async_step_test_open()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_DOWN, device_id=DEVICE_ID, source="developer_tools"
     )
 
@@ -378,7 +384,7 @@ async def test_teach_motor_success_sends_teach_open_stop(
     flow._api.teach_motor.assert_awaited_once_with(
         DEVICE_ENUM, device_id=DEVICE_ID, source="developer_tools"
     )
-    assert flow._api.control_blind.await_count == 2
+    assert flow._api.control_blind_exclusive.await_count == 2
     assert result["type"] is FlowResultType.MENU
     assert "please verify that the motor actually reacted" in flow._developer_notice
 
