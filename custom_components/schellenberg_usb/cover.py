@@ -945,10 +945,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
-            if (
-                not self._has_live_position_tracking()
-                and not self._command_in_flight
-            ):
+            if not self._has_live_position_tracking() and not self._command_in_flight:
                 # Neither a tracking task nor a command of ours is in
                 # flight, so this echo can only be *reporting* a move this
                 # entity did not itself start - a paired remote control, a
@@ -1889,9 +1886,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         finally:
             self._command_in_flight = False
 
-    async def _async_open_cover_body(
-        self, *, _preserve_target: bool = False
-    ) -> None:
+    async def _async_open_cover_body(self, *, _preserve_target: bool = False) -> None:
         """The actual work of async_open_cover(), wrapped by its own
         self._command_in_flight bookkeeping - see that method and
         self._command_in_flight's own comment in __init__ for why this
@@ -2082,9 +2077,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         finally:
             self._command_in_flight = False
 
-    async def _async_close_cover_body(
-        self, *, _preserve_target: bool = False
-    ) -> None:
+    async def _async_close_cover_body(self, *, _preserve_target: bool = False) -> None:
         """The actual work of async_close_cover() - see async_open_cover()'s
         own mirror of this split for why it exists.
         """
