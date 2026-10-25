@@ -2825,7 +2825,7 @@ async def test_async_secondary_close_timer_assumes_closed_after_elapsed_time(
     assert cover._attr_is_closing is False
     assert cover._position_confirmed_since_restart is True
     assert cover._secondary_close_timer_task is None
-    cover.async_write_ha_state.assert_called_once()  # type: ignore[attr-defined]
+    cover.async_write_ha_state.assert_called_once()
 
 
 async def test_async_secondary_close_timer_does_nothing_if_superseded(
@@ -2902,7 +2902,7 @@ async def test_async_secondary_close_timer_cancellation_clears_its_own_slot(
         await task
 
     assert cover._secondary_close_timer_task is None
-    cover.async_write_ha_state.assert_not_called()  # type: ignore[attr-defined]
+    cover.async_write_ha_state.assert_not_called()
 
 
 async def test_handle_event_cancels_a_pending_secondary_close_timer(
@@ -2985,4 +2985,4 @@ async def test_shutdown_position_tracking_cancels_a_pending_secondary_close_time
     # is expected either - this is the "nothing to shut down on the
     # primary side" early-return path, now also reached after the new
     # cancellation above.
-    cover.async_write_ha_state.assert_not_called()  # type: ignore[attr-defined]
+    cover.async_write_ha_state.assert_not_called()
