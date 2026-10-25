@@ -932,6 +932,44 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
+            if not self._has_live_position_tracking():
+                # Nothing of ours is tracking a move yet, so this echo is
+                # the *first* sign of this one. async_open_cover()/
+                # async_close_cover()/async_set_cover_position() each
+                # start tracking themselves, synchronously, the moment
+                # Home Assistant calls them - well before the stick could
+                # relay this echo back (see async_open_cover()'s own
+                # comment) - so live tracking already existing here always
+                # means this echo is merely confirming one of those. Its
+                # absence means the opposite: this move was not started
+                # through this entity at all, only *reported* by the
+                # motor's own echo - i.e. a paired remote control or wall
+                # switch drove it directly.
+                #
+                # Whatever _target_position still holds at that point is
+                # therefore stale, left over from an earlier set_cover_
+                # position() leg that this entity never saw cleanly
+                # finish - plausibly because this same primary status
+                # identity's unreliability is also why that move's own
+                # STOPPED echo never arrived. Left in place, it silently
+                # caps this fresh, independently-triggered move at that
+                # old percentage instead of the full travel the remote/
+                # switch actually commanded: _async_position_update_loop()
+                # auto-stops once the live estimate crosses whatever
+                # _target_position still holds, not 100/0, regardless of
+                # who or what actually started the move it is now
+                # tracking. A remote press driving the blind all the way
+                # to its real end stop then reads back from Home Assistant
+                # as stuck at the old target's percentage forever -
+                # physically fully open/closed, but never shown as such.
+                # async_open_cover()/async_close_cover() already guard
+                # against this same staleness for a plain open/close
+                # reached through Home Assistant instead (see their own,
+                # identical comment) - a request that likewise never means
+                # anything other than 100/0. This is the same guard,
+                # applied at the one remaining path that reaches a fresh
+                # move without going through either of them.
+                self._target_position = None
             previous_position = self._attr_current_cover_position
             physical_up = event == EVENT_STARTED_MOVING_UP
             logical_opening = physical_up != self._invert_direction
@@ -1025,14 +1063,30 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         self.async_write_ha_state()
 
+    def _has_live_position_tracking(self) -> bool:
+        """Return whether the position-tracking task is already live.
+
+        "Live" means actually still running, not merely sitting in the
+        slot uncleared (done, or in the process of being cancelled) -
+        the same distinction _has_live_tracking_in_direction() draws for
+        its own, narrower purpose. Used here by _start_position_tracking()
+        itself to decide whether a (re)start is needed, and by
+        _handle_event() to tell an echo that merely *confirms* a move
+        this entity already started tracking (a Home Assistant open/
+        close/set_position command: see async_open_cover()'s own comment
+        on why those start tracking themselves, synchronously, before any
+        echo could arrive) apart from one *reporting* a move it did not -
+        see _handle_event()'s own comment for why that distinction is
+        what decides whether a lingering _target_position is still
+        legitimate or merely stale.
+        """
+        task = self._position_update_task
+        return task is not None and not task.done() and not task.cancelling()
+
     def _start_position_tracking(self) -> None:
         """Start the background loop that estimates position while moving."""
         existing_task = self._position_update_task
-        if (
-            existing_task is not None
-            and not existing_task.done()
-            and not existing_task.cancelling()
-        ):
+        if self._has_live_position_tracking():
             return
         if self._position_update_task is existing_task:
             self._position_update_task = None

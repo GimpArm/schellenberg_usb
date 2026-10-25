@@ -1661,6 +1661,137 @@ async def test_handle_event_ignores_an_unrecognized_event(
 
 
 # ---------------------------------------------------------------------------
+# _has_live_position_tracking(): the predicate _handle_event() and
+# _start_position_tracking() both now rely on to tell a position-tracking
+# task that is genuinely still running apart from one merely sitting in
+# the slot unmanaged (done, or mid-cancellation).
+# ---------------------------------------------------------------------------
+
+
+async def test_has_live_position_tracking_false_when_idle(
+    hass: HomeAssistant,
+) -> None:
+    """A fresh/idle cover has no live position tracking."""
+    cover = _build_cover(hass, MagicMock())
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_false_when_task_already_done(
+    hass: HomeAssistant,
+) -> None:
+    """A finished tracking task - the move already ended - is not live."""
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = True
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_false_when_task_is_cancelling(
+    hass: HomeAssistant,
+) -> None:
+    """A task mid-cancellation must not count as live either.
+
+    Mirrors _start_position_tracking()'s own pre-existing guard, which this
+    helper now backs - see its own docstring.
+    """
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = True
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_true_when_task_is_running(
+    hass: HomeAssistant,
+) -> None:
+    """A task that is neither done nor cancelling counts as live."""
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is True
+
+
+# ---------------------------------------------------------------------------
+# _handle_event() STARTED_MOVING vs. a stale _target_position: a remote
+# control or wall switch (or an electric Gurtwickler's own local buttons)
+# drives a move this entity never initiated, so _handle_event() is the
+# *only* signal it ever gets - unlike async_open_cover()/async_close_
+# cover(), it never otherwise gets a chance to clear a target left over
+# from an earlier, not-cleanly-finished set_cover_position() leg.
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_started_moving_clears_stale_target_if_untracked(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard: an independently-triggered move must not inherit a
+    stale target.
+
+    _target_position can be left behind by an earlier set_cover_position()
+    leg that never cleanly finished (test_async_open_cover_clears_stale_
+    target_when_a_preserved_leg_fails's own docstring documents one way
+    that happens - a failed leg is only one of several; a STOPPED echo
+    that never arrives at all, the exact reliability problem this project
+    keeps running into, is another). With no position-tracking task yet
+    live, a STARTED_MOVING echo can only be *reporting* a move driven
+    independently - a paired remote control, a wall switch, or an electric
+    Gurtwickler's own local buttons - never one this entity itself started
+    (see _has_live_position_tracking()'s own docstring for why). Any
+    leftover target is therefore stale and must not cut that move short:
+    before this fix, _handle_event() never touched _target_position at
+    all, so _async_position_update_loop() would auto-stop - and report -
+    the blind at the old, unrelated percentage forever, even though it
+    physically kept going to its real 100/0 end stop.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 55  # stale, left over from an earlier leg
+    assert cover._position_update_task is None  # nothing tracking yet
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._target_position is None
+    assert cover._attr_is_opening is True
+
+
+async def test_handle_event_started_moving_preserves_a_live_targets_position(
+    hass: HomeAssistant,
+) -> None:
+    """A STARTED_MOVING echo confirming our own command must keep its target.
+
+    Mirrors the regression guard above for the opposite case: when a
+    position-tracking task is already live - exactly what async_open_
+    cover()/async_close_cover()/async_set_cover_position() each start
+    themselves, synchronously, before any echo could arrive (see
+    async_open_cover()'s own comment) - this echo is only confirming a
+    move this entity already knows about, so its _target_position (a
+    set_cover_position() leg's own, genuinely current target) is not
+    stale and must survive untouched.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+    cover._target_position = 55  # a genuinely in-progress set_cover_position()
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._target_position == 55
+
+
+# ---------------------------------------------------------------------------
 # async_set_cover_position(): the position slider in the UI. Chains into
 # async_open_cover()/async_close_cover() with _preserve_target=True so the
 # tracking loop's existing partial-target logic (already covered above)
