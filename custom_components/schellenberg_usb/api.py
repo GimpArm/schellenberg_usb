@@ -282,6 +282,46 @@ def _interpret_status_command(command: str) -> str:
     }.get(command.upper(), "unknown")
 
 
+def _resolve_secondary_command(message: str, command: str) -> str:
+    """Return the direction/stop byte to act on for a *secondary* frame.
+
+    A primary (motor) status frame's documented command field (`command`,
+    `message[14:16]`) genuinely always holds CMD_STOP/CMD_UP/CMD_DOWN -
+    that has never been in question and is left completely alone here:
+    this is called only for a frame whose identity already resolved to
+    "secondary" (see the caller in _handle_message()), and even then only
+    once `command` has already failed to decode as itself.
+
+    Confirmed from raw frames captured against a real Schellenberg
+    electronic Gurtwickler winder's paired remote (CHANGELOG's v1.3.1
+    entry has the traced example): that remote's own command field does
+    not carry a direction/stop code at all - it carries a per-transmission
+    sequence counter that simply climbs by one on every single button
+    press for as long as the remote is used, stable only *within* one
+    press's own retransmissions, so it almost never equals "00"/"01"/"02"
+    and `_interpret_status_command()` reports "unknown" for virtually
+    every frame such a remote ever sends - exactly what left the v1.3.0
+    secondary-timer feature unable to ever fire for it. That same frame's
+    actual direction/stop code sits one field earlier instead: the first
+    byte of what the frame-format comment above calls the message
+    incrementor (`message[10:12]`) - genuinely unused on a motor's own
+    frames (where it stays constant), but this remote's real CC-style
+    value, paired with a second, constant byte of its own.
+
+    Only ever a fallback: a secondary frame whose own `command` already
+    decodes cleanly is returned unchanged, so a transmitter that *does*
+    follow the documented layout is completely unaffected.
+    """
+    if _interpret_status_command(command) != "unknown":
+        return command
+    if len(message) < 12:
+        return command
+    fallback_command = message[10:12].upper()
+    if _interpret_status_command(fallback_command) != "unknown":
+        return fallback_command
+    return command
+
+
 def _normalize_protocol_enum(value: object) -> str:
     """Normalize one- or two-digit protocol enums without changing other values."""
     text = str(value).strip()
@@ -909,7 +949,6 @@ class SchellenbergUsbApi:
                 normalized_command = command.upper()
                 identity = (normalized_device_id, normalized_device_enum)
                 registration = self._registered_entity_keys.get(identity)
-                interpretation = _interpret_status_command(normalized_command)
                 identity_role = (
                     "primary"
                     if registration is not None and registration.primary
@@ -917,6 +956,21 @@ class SchellenbergUsbApi:
                     if registration is not None
                     else "unmatched"
                 )
+                # A secondary (remote/wall-switch) transmitter's command
+                # byte does not always mean what a motor's own status
+                # frame's does - see _resolve_secondary_command's own
+                # docstring. Only ever consulted for an identity already
+                # known to be secondary, and only as a fallback once the
+                # documented field has already failed to decode, so a
+                # primary frame - and a secondary one whose own command
+                # field already decodes cleanly - take the exact same path
+                # as before this existed.
+                effective_command = (
+                    _resolve_secondary_command(message, normalized_command)
+                    if identity_role == "secondary"
+                    else normalized_command
+                )
+                interpretation = _interpret_status_command(effective_command)
                 position_tracking = bool(
                     registration is not None
                     and registration.primary
@@ -1012,11 +1066,20 @@ class SchellenbergUsbApi:
                     normalized_command,
                 )
                 if registration is not None:
+                    # effective_command, not normalized_command: this is
+                    # the signal _handle_event (primary) and
+                    # _handle_secondary_event (secondary) both subscribe
+                    # to - see _resolve_secondary_command's own docstring
+                    # for why a secondary frame's own command byte isn't
+                    # always safe to forward as-is. Identical to
+                    # normalized_command for every primary frame and for
+                    # a secondary frame whose command byte already
+                    # decodes cleanly, so neither is affected.
                     async_dispatcher_send(
                         self.hass,
                         f"{SIGNAL_DEVICE_EVENT}_{normalized_device_id}_"
                         f"{normalized_device_enum}",
-                        normalized_command,
+                        effective_command,
                     )
                 # Also broadcast on the capture-wide signal while a status-
                 # frame capture window is open, independent of
