@@ -486,6 +486,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # reported a close command and nothing else is yet tracking a move
         # for this blind. None whenever no such timer is pending.
         self._secondary_close_timer_task: asyncio.Task[None] | None = None
+        # Same idea, mirrored for the opposite direction: set only while a
+        # secondary status identity has reported an open command and
+        # nothing else is yet tracking a move. None whenever no such timer
+        # is pending.
+        self._secondary_open_timer_task: asyncio.Task[None] | None = None
         self._target_position: int | None = None
         self._position_update_source = "not recorded"
         self._position_source_kind = "startup default"
@@ -754,6 +759,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         previous_position = self._attr_current_cover_position
         self._stop_position_tracking()
         self._cancel_secondary_close_timer("manual position sync")
+        self._cancel_secondary_open_timer("manual position sync")
         self._attr_current_cover_position = normalized_position
         self._attr_is_closed = normalized_position == 0
         self._attr_is_opening = False
@@ -800,6 +806,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             return
 
         self._cancel_secondary_close_timer("calibration completed")
+        self._cancel_secondary_open_timer("calibration completed")
         previous_position = self._attr_current_cover_position
         self._travel_time_open = open_time
         self._travel_time_close = close_time
@@ -836,12 +843,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
     async def _async_shutdown_position_tracking(self, reason: str) -> None:
         """Take a final position snapshot and cancel background tracking."""
-        # Unconditional, and first: a pending secondary-close timer can be
-        # the *only* background task this blind has running (exactly the
-        # no-primary-identity case the feature targets), so it must not be
+        # Unconditional, and first: a pending secondary-close/open timer can
+        # be the *only* background task this blind has running (exactly the
+        # no-primary-identity case the feature targets), so neither must be
         # skipped by the early return just below, which only looks at
         # _position_update_task.
         self._cancel_secondary_close_timer(reason)
+        self._cancel_secondary_open_timer(reason)
         task = self._position_update_task
         if task is None:
             return
@@ -912,9 +920,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # self._status_device_id/self._status_enum), so any call here is
         # fresh, authoritative information straight from the motor itself -
         # it must always supersede a merely-speculative secondary-identity
-        # "assume closed" timer (see _handle_secondary_event), whatever
-        # event this turns out to be.
+        # "assume closed"/"assume open" timer (see _handle_secondary_event),
+        # whatever event this turns out to be.
         self._cancel_secondary_close_timer(f"primary status command {event}")
+        self._cancel_secondary_open_timer(f"primary status command {event}")
         _LOGGER.info(
             "Device %s (%s) received activity event: %s",
             self._device_name,
@@ -1200,6 +1209,150 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
         self.async_write_ha_state()
 
+    def _cancel_secondary_open_timer(self, reason: str = "superseded") -> None:
+        """Request cancellation of a pending secondary-open timer, if any.
+
+        Mirrors _cancel_secondary_close_timer() exactly, for the opposite
+        direction - see that method's own docstring for why this is a
+        fire-and-forget cancellation (request cancellation, clear the slot,
+        don't await it) rather than an awaited one.
+        """
+        task = self._secondary_open_timer_task
+        if task is not None and not task.done():
+            task.cancel(reason)
+        if self._secondary_open_timer_task is task:
+            self._secondary_open_timer_task = None
+
+    def _start_secondary_open_timer(
+        self, secondary_device_id: str, secondary_enum: str, command: str
+    ) -> None:
+        """(Re)start the timer that assumes "open" after an open press.
+
+        Mirrors _start_secondary_close_timer() exactly, for the opposite
+        direction: always cancels/replaces any open timer already pending
+        first, so a second open press via the same or another paired
+        secondary transmitter (a remote or a wall switch) re-bases the wait
+        on the travel time remaining from *this* press, rather than risking
+        the entity being marked open early against an earlier press's
+        clock. command is the raw frame value that made
+        _handle_secondary_event treat this as an open (EVENT_STARTED_
+        MOVING_UP normally, but EVENT_STARTED_MOVING_DOWN when
+        invert_direction flips which physical button is the logical open)
+        - kept only so the diagnostic text below names the command that was
+        actually received, not an assumed one.
+        """
+        self._cancel_secondary_open_timer("restarted by a new secondary open command")
+        task_name = f"{DOMAIN} secondary open timer {self._blind_id}"
+        coro = self._async_secondary_open_timer(
+            secondary_device_id, secondary_enum, command
+        )
+        config_entry = (
+            self.hass.config_entries.async_get_entry(self._config_entry_id)
+            if self._config_entry_id is not None
+            else None
+        )
+        if config_entry is not None:
+            task = config_entry.async_create_background_task(self.hass, coro, task_name)
+        else:
+            task = self.hass.async_create_background_task(coro, task_name)
+        self._secondary_open_timer_task = task
+
+    async def _async_secondary_open_timer(
+        self, secondary_device_id: str, secondary_enum: str, command: str
+    ) -> None:
+        """Wait out the open travel time, then assume the blind is fully open.
+
+        Mirrors _async_secondary_close_timer() exactly, for the opposite
+        direction: only ever started for an open command seen via a
+        *secondary* status identity while nothing else was yet tracking a
+        move (see _handle_secondary_event) - the same gap this feature
+        exists to cover, now for a blind driven fully open from a paired
+        remote or wall switch with no working primary status identity,
+        which would otherwise leave Home Assistant's dashboard showing
+        whatever position it last had, forever.
+
+        Cancelled well before completion by _cancel_secondary_open_timer()
+        whenever anything more authoritative supersedes it - another
+        secondary-identity command (close, stop, or a repeated open
+        restarting the wait), any primary-status event, a manual position
+        sync, a fresh calibration result, or the entity/hub shutting down.
+        """
+        # Mirrors _async_secondary_close_timer()'s own try/except/finally
+        # shape for the same reason: the finally clears this task's slot
+        # from inside itself on every exit (cancelled or not), the same
+        # safety net that method relies on instead of leaving that solely
+        # to whichever caller cancelled it.
+        timer_task = asyncio.current_task()
+        still_current = False
+        try:
+            await asyncio.sleep(self._travel_time_open)
+        except asyncio.CancelledError:
+            _LOGGER.debug(
+                "Secondary open timer cancelled for device %s", self._device_name
+            )
+            raise
+        finally:
+            still_current = self._secondary_open_timer_task is timer_task
+            if still_current:
+                self._secondary_open_timer_task = None
+
+        if not still_current:
+            # Replaced (a newer open press re-based the wait) between the
+            # sleep finishing and this task actually resuming; let that
+            # newer timer own the outcome instead of double-applying one.
+            _LOGGER.debug(
+                "Device %s secondary open timer superseded before it "
+                "could apply; not forcing open",
+                self._device_name,
+            )
+            return
+
+        if self._attr_is_opening or self._attr_is_closing:
+            # Something else - almost always the same move, since seen via
+            # the primary status identity too - started tracking in the
+            # meantime without going through a path that cancels this
+            # timer. Deferring to it rather than overwriting it follows the
+            # same reasoning as _has_live_tracking_in_direction()'s own
+            # docstring.
+            _LOGGER.debug(
+                "Device %s secondary open timer elapsed but a move is now "
+                "tracked some other way; not forcing open",
+                self._device_name,
+            )
+            return
+
+        previous_position = self._attr_current_cover_position
+        self._attr_current_cover_position = 100
+        self._attr_is_closed = False
+        self._attr_is_opening = False
+        self._attr_is_closing = False
+        self._move_start_time = None
+        self._move_start_position = None
+        self._target_position = None
+        self._position_source_kind = "secondary status"
+        self._position_confirmed_since_restart = True
+        self._full_travel_resync_direction = None
+        self._position_update_source = (
+            f"secondary status {secondary_device_id}/{secondary_enum} command {command}"
+        )
+        self._record_position_update(
+            source=self._position_update_source,
+            direction="opening",
+            previous_position=previous_position,
+            new_position=100,
+            status="assumed from secondary status + elapsed open time",
+        )
+        _LOGGER.info(
+            "Device %s assumed fully open: open command via a paired "
+            "secondary transmitter (status %s/%s), %.1fs open travel "
+            "time elapsed with no contradicting signal",
+            self._device_name,
+            secondary_device_id,
+            secondary_enum,
+            self._travel_time_open,
+        )
+        self.async_write_ha_state()
+
     @callback
     def _handle_secondary_event(
         self, secondary_device_id: str, secondary_enum: str, command: str
@@ -1222,12 +1375,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         by _handle_event and already the only source position_tracking is
         ever computed from - see api.py's _handle_message()), a secondary
         identity's frames never drive position tracking directly. This
-        adds exactly one narrow behaviour on top: a close press, seen only
-        via a paired remote or wall switch, while nothing is already
-        tracking a move, starts a timer that - unless something else
-        intervenes first - assumes after the known close travel time that
-        the blind ran all the way down, since otherwise nothing will ever
-        tell Home Assistant that it did.
+        adds exactly two narrow, symmetric behaviours on top: a close (or
+        open) press, seen only via a paired remote or wall switch, while
+        nothing is already tracking a move, starts a timer that - unless
+        something else intervenes first - assumes after the known close
+        (or open) travel time that the blind ran all the way down (or up),
+        since otherwise nothing will ever tell Home Assistant that it did.
+        A stop cancels whichever of the two, if either, is still pending,
+        without starting anything new - a mid-travel position reached via
+        a secondary identity's stop is exactly as unknowable as one reached
+        via the primary identity (see _handle_event and this project's own
+        CHANGELOG for why that's true there too), so this deliberately
+        never guesses one.
         """
         if command in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
             # Same physical-to-logical mapping _handle_event() itself uses,
@@ -1235,47 +1394,72 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # *physical* "up" button is this blind's logical close, not
             # its "down" button.
             physical_up = command == EVENT_STARTED_MOVING_UP
-            logical_opening = physical_up != self._invert_direction
-            logical_closing = not logical_opening
+            logical_opening: bool | None = physical_up != self._invert_direction
         elif command == EVENT_STOPPED:
-            logical_closing = False
+            logical_opening = None
         else:
             # Unrecognized command byte. Not acted on, and not treated as
             # a reason to cancel an already-pending timer either - an
-            # undecodable frame shouldn't be able to discard a close press
-            # that was itself perfectly valid.
+            # undecodable frame shouldn't be able to discard a close/open
+            # press that was itself perfectly valid.
             return
 
-        if not logical_closing:
-            # Stop, a logical open, or (after invert_direction) a press
-            # that isn't actually a close in this blind's own frame of
-            # reference: whatever was pending no longer reflects what this
-            # transmitter is telling us right now.
-            self._cancel_secondary_close_timer(
-                f"secondary status {secondary_device_id}/{secondary_enum} "
-                f"command {command}"
-            )
+        reason = (
+            f"secondary status {secondary_device_id}/{secondary_enum} command {command}"
+        )
+
+        if logical_opening is None:
+            # Stop: neither direction's assumption is still warranted: a
+            # stop halfway through either a close or an open means the
+            # blind did not, after all, reach the end it was timing toward.
+            self._cancel_secondary_close_timer(reason)
+            self._cancel_secondary_open_timer(reason)
             return
+
+        # Whichever direction this press is NOT going is the one that can
+        # no longer still be in progress - supersede its timer the same
+        # way a stop would, before possibly starting the matching one for
+        # the direction this press IS going.
+        if logical_opening:
+            self._cancel_secondary_close_timer(reason)
+        else:
+            self._cancel_secondary_open_timer(reason)
 
         if self._attr_is_opening or self._attr_is_closing:
             _LOGGER.debug(
-                "Device %s secondary status %s/%s close command ignored: "
+                "Device %s secondary status %s/%s %s command ignored: "
                 "a move is already being tracked",
                 self._device_name,
                 secondary_device_id,
                 secondary_enum,
+                "open" if logical_opening else "close",
             )
             return
 
-        _LOGGER.info(
-            "Device %s secondary status %s/%s close command: starting a "
-            "%.1fs assume-closed timer (no move currently tracked)",
-            self._device_name,
-            secondary_device_id,
-            secondary_enum,
-            self._travel_time_close,
-        )
-        self._start_secondary_close_timer(secondary_device_id, secondary_enum, command)
+        if logical_opening:
+            _LOGGER.info(
+                "Device %s secondary status %s/%s open command: starting a "
+                "%.1fs assume-open timer (no move currently tracked)",
+                self._device_name,
+                secondary_device_id,
+                secondary_enum,
+                self._travel_time_open,
+            )
+            self._start_secondary_open_timer(
+                secondary_device_id, secondary_enum, command
+            )
+        else:
+            _LOGGER.info(
+                "Device %s secondary status %s/%s close command: starting a "
+                "%.1fs assume-closed timer (no move currently tracked)",
+                self._device_name,
+                secondary_device_id,
+                secondary_enum,
+                self._travel_time_close,
+            )
+            self._start_secondary_close_timer(
+                secondary_device_id, secondary_enum, command
+            )
 
     def _has_live_tracking_in_direction(self, *, opening: bool) -> bool:
         """Return whether a move already in progress is tracked in this direction.

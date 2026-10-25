@@ -2685,13 +2685,22 @@ async def test_handle_secondary_event_close_ignored_while_opening_is_tracked(
 async def test_handle_secondary_event_open_cancels_a_pending_close_timer(
     hass: HomeAssistant,
 ) -> None:
+    """An open command now also starts its own open timer (see
+    test_handle_secondary_event_open_starts_timer_when_nothing_tracked for
+    that in isolation) - mocked here too so this test stays focused on the
+    cancellation side without leaking a real background task.
+    """
     api = MagicMock()
     cover = _build_cover(hass, api)
     cover._cancel_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
 
     cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_UP)
 
     cover._cancel_secondary_close_timer.assert_called_once()
+    cover._start_secondary_open_timer.assert_called_once_with(
+        "112233", "05", EVENT_STARTED_MOVING_UP
+    )
 
 
 async def test_handle_secondary_event_stop_cancels_a_pending_close_timer(
@@ -2727,15 +2736,23 @@ async def test_handle_secondary_event_respects_invert_direction(
 async def test_handle_secondary_event_inverted_physical_down_is_a_logical_open(
     hass: HomeAssistant,
 ) -> None:
+    """With invert_direction set, the physical "down" button is this
+    blind's logical open - now also starts the open timer (mocked here so
+    this stays focused rather than leaking a real background task).
+    """
     api = MagicMock()
     cover = _build_cover(hass, api, invert_direction=True)
     cover._start_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
     cover._cancel_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
 
     cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_DOWN)
 
     cover._start_secondary_close_timer.assert_not_called()
     cover._cancel_secondary_close_timer.assert_called_once()
+    cover._start_secondary_open_timer.assert_called_once_with(
+        "112233", "05", EVENT_STARTED_MOVING_DOWN
+    )
 
 
 async def test_handle_secondary_event_ignores_an_unrecognized_command(
@@ -2743,18 +2760,22 @@ async def test_handle_secondary_event_ignores_an_unrecognized_command(
 ) -> None:
     """An undecodable frame must be a true no-op: not acted on, and not
     treated as a reason to cancel an already-pending timer either, since an
-    unrecognized byte shouldn't be able to discard a close press that was
-    itself perfectly valid.
+    unrecognized byte shouldn't be able to discard a close/open press that
+    was itself perfectly valid. Checked symmetrically for both directions.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)
     cover._start_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
     cover._cancel_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
 
     cover._handle_secondary_event("112233", "05", "FF")
 
     cover._start_secondary_close_timer.assert_not_called()
     cover._cancel_secondary_close_timer.assert_not_called()
+    cover._start_secondary_open_timer.assert_not_called()
+    cover._cancel_secondary_open_timer.assert_not_called()
 
 
 async def test_start_secondary_close_timer_cancels_any_existing_one_first(
@@ -2985,4 +3006,304 @@ async def test_shutdown_position_tracking_cancels_a_pending_secondary_close_time
     # is expected either - this is the "nothing to shut down on the
     # primary side" early-return path, now also reached after the new
     # cancellation above.
+    cover.async_write_ha_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# The symmetric mirror of the section above: assuming a blind is fully OPEN
+# after an open command via a secondary status identity, once the known
+# open travel time has elapsed with nothing else intervening. Same
+# mechanism, same reasoning, same gap being covered - see
+# _handle_secondary_event's own (now-combined) docstring and
+# _async_secondary_open_timer's docstring for this direction specifically.
+# The dispatcher-wiring tests above (test_added_to_hass_wires_up_*,
+# test_added_to_hass_ignores_an_unregistered_devices_signal) already cover
+# the subscription mechanism itself, which is identical for either
+# direction, so they are not repeated here.
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_secondary_event_open_starts_timer_when_nothing_tracked(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors test_handle_secondary_event_close_starts_timer_when_nothing_tracked."""
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_UP)
+
+    cover._start_secondary_open_timer.assert_called_once_with(
+        "112233", "05", EVENT_STARTED_MOVING_UP
+    )
+
+
+async def test_handle_secondary_event_open_ignored_while_closing_is_tracked(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+
+    cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_UP)
+
+    cover._start_secondary_open_timer.assert_not_called()
+
+
+async def test_handle_secondary_event_open_ignored_while_opening_is_tracked(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+
+    cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_UP)
+
+    cover._start_secondary_open_timer.assert_not_called()
+
+
+async def test_handle_secondary_event_close_cancels_a_pending_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors test_handle_secondary_event_open_cancels_a_pending_close_timer.
+    _start_secondary_close_timer is mocked too, so this stays focused on the
+    cancellation side without leaking a real background task.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+    cover._start_secondary_close_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_secondary_event("112233", "05", EVENT_STARTED_MOVING_DOWN)
+
+    cover._cancel_secondary_open_timer.assert_called_once()
+    cover._start_secondary_close_timer.assert_called_once_with(
+        "112233", "05", EVENT_STARTED_MOVING_DOWN
+    )
+
+
+async def test_handle_secondary_event_stop_cancels_a_pending_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_secondary_event("112233", "05", EVENT_STOPPED)
+
+    cover._cancel_secondary_open_timer.assert_called_once()
+
+
+async def test_start_secondary_open_timer_cancels_any_existing_one_first(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 100.0})
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._start_secondary_open_timer("112233", "05", EVENT_STARTED_MOVING_UP)
+
+    cover._cancel_secondary_open_timer.assert_called_once()
+    assert cover._secondary_open_timer_task is not None
+    assert not cover._secondary_open_timer_task.done()
+    task = cover._secondary_open_timer_task
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_cancel_secondary_open_timer_actually_cancels_the_running_task(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    task = asyncio.ensure_future(asyncio.sleep(100))
+    cover._secondary_open_timer_task = task
+
+    cover._cancel_secondary_open_timer("test reason")
+    await asyncio.sleep(0)  # let the cancellation actually land
+
+    assert task.cancelled()
+    assert cover._secondary_open_timer_task is None
+
+
+async def test_cancel_secondary_open_timer_is_a_no_op_with_nothing_pending(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+
+    cover._cancel_secondary_open_timer("test reason")  # must not raise
+
+    assert cover._secondary_open_timer_task is None
+
+
+async def test_async_secondary_open_timer_assumes_open_after_elapsed_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def instant_sleep(seconds: float, *_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 18.0})
+    cover._attr_current_cover_position = 45
+    cover._attr_is_closed = True
+
+    task = asyncio.ensure_future(
+        cover._async_secondary_open_timer("112233", "05", EVENT_STARTED_MOVING_UP)
+    )
+    cover._secondary_open_timer_task = task
+    await task
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._attr_is_closed is False
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._position_confirmed_since_restart is True
+    assert cover._secondary_open_timer_task is None
+    cover.async_write_ha_state.assert_called_once()
+
+
+async def test_async_secondary_open_timer_does_nothing_if_superseded(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_async_secondary_close_timer_does_nothing_if_superseded."""
+
+    async def instant_sleep(seconds: float, *_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 45
+    task = asyncio.ensure_future(
+        cover._async_secondary_open_timer("112233", "05", EVENT_STARTED_MOVING_UP)
+    )
+    # Simulate a newer timer already having taken the slot before this
+    # one's sleep resolves.
+    cover._secondary_open_timer_task = None
+    await task
+
+    assert cover._attr_current_cover_position == 45
+    cover.async_write_ha_state.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_async_secondary_open_timer_defers_to_an_already_tracked_move(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If something else is already tracking by the time this timer's wait
+    elapses, it must not overwrite that with an assumed position. Mirrors
+    test_async_secondary_close_timer_defers_to_an_already_tracked_move.
+    """
+
+    async def instant_sleep(seconds: float, *_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 45
+    cover._attr_is_opening = True
+    task = asyncio.ensure_future(
+        cover._async_secondary_open_timer("112233", "05", EVENT_STARTED_MOVING_UP)
+    )
+    cover._secondary_open_timer_task = task
+    await task
+
+    assert cover._attr_current_cover_position == 45
+    cover.async_write_ha_state.assert_not_called()  # type: ignore[attr-defined]
+
+
+async def test_async_secondary_open_timer_cancellation_clears_its_own_slot(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors test_async_secondary_close_timer_cancellation_clears_its_own_slot."""
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 100.0})
+    task = asyncio.ensure_future(
+        cover._async_secondary_open_timer("112233", "05", EVENT_STARTED_MOVING_UP)
+    )
+    await asyncio.sleep(0)  # let it reach its own sleep
+    cover._secondary_open_timer_task = task
+
+    task.cancel("test reason")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cover._secondary_open_timer_task is None
+    cover.async_write_ha_state.assert_not_called()
+
+
+async def test_handle_event_cancels_a_pending_secondary_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors test_handle_event_cancels_a_pending_secondary_close_timer."""
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_event(EVENT_STARTED_MOVING_DOWN)
+
+    cover._cancel_secondary_open_timer.assert_called_once()
+
+
+async def test_handle_manual_position_sync_cancels_a_pending_secondary_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_manual_position_sync(50)
+
+    cover._cancel_secondary_open_timer.assert_called_once_with("manual position sync")
+
+
+async def test_handle_calibration_completed_cancels_a_pending_secondary_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_id="ABCDEF")
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_calibration_completed("ABCDEF", 18.5, 16.5, 0)
+
+    cover._cancel_secondary_open_timer.assert_called_once_with("calibration completed")
+
+
+async def test_handle_calibration_completed_another_device_does_not_cancel_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors test_handle_calibration_completed_for_another_device_does_not_cancel,
+    for the open timer.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_id="ABCDEF")
+    cover._cancel_secondary_open_timer = MagicMock()  # type: ignore[method-assign]
+
+    cover._handle_calibration_completed("A_DIFFERENT_DEVICE", 12.0, 9.0, 0)
+
+    cover._cancel_secondary_open_timer.assert_not_called()
+
+
+async def test_shutdown_position_tracking_cancels_a_pending_secondary_open_timer(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors
+    test_shutdown_position_tracking_cancels_a_pending_secondary_close_timer.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    task = asyncio.ensure_future(asyncio.sleep(100))
+    cover._secondary_open_timer_task = task
+
+    await cover._async_shutdown_position_tracking("test reason")
+    await asyncio.sleep(0)  # let the requested cancellation actually land
+
+    assert task.cancelled()
+    assert cover._secondary_open_timer_task is None
     cover.async_write_ha_state.assert_not_called()
