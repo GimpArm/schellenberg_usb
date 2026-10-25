@@ -18,6 +18,7 @@ building the entity directly.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import MappingProxyType
 from typing import Any
@@ -44,11 +45,13 @@ from custom_components.schellenberg_usb.const import (
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     SIGNAL_DEVICE_EVENT,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.cover import (
@@ -192,6 +195,51 @@ async def test_async_close_cover_raises_when_control_blind_with_retry_fails(
 
     assert cover._attr_is_closing is False
     assert cover._move_start_time is None
+
+
+async def test_async_open_cover_clears_stale_target_when_a_preserved_leg_fails(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard for audit finding 2.
+
+    A failed set_cover_position() leg (_preserve_target=True) used to leave
+    _target_position stale, since only a plain, non-preserving open/close
+    cleared it on failure. A later, completely unrelated move - typically
+    the blind's own physical remote control, picked up via _handle_event() -
+    never touches _target_position either, so it could inherit that stale
+    value and get auto-stopped by _async_position_update_loop() at a long-
+    invalid position that has nothing to do with it.
+    """
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=False)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 40  # stale target a set_cover_position() leg set
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._attr_is_opening is False
+    assert cover._target_position is None
+
+
+async def test_async_close_cover_clears_stale_target_when_a_preserved_leg_fails(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors the open-side regression guard above for close."""
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=False)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 40
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_close_cover(_preserve_target=True)
+
+    assert cover._attr_is_closing is False
+    assert cover._target_position is None
 
 
 async def test_async_open_cover_does_not_start_tracking_before_retry_succeeds(
@@ -866,6 +914,46 @@ async def test_position_loop_stops_at_a_partial_target(
     assert cover._attr_is_closing is False
 
 
+async def test_position_loop_retries_auto_stop_when_the_write_fails(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed auto-stop write must not be treated as a successful stop.
+
+    Regression guard for audit finding 1: control_blind_stop()'s return
+    value used to be discarded, so is_closing/is_opening/the target were
+    cleared unconditionally even when the write never reached the wire -
+    reporting the move as finished while the motor kept running toward its
+    real end stop, and discarding the loop's own ability to act on a later,
+    genuine stop. The fix retries on the next 0.2s tick instead of clearing
+    state, so it must call control_blind_stop() again rather than return.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(side_effect=[False, _LoopKeptRunning])
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 40),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    assert api.control_blind_stop.await_count == 2
+    # Must still be a live, untouched move so the retry (or the motor's own
+    # eventual end-stop) can still be acted on - not silently discarded.
+    assert cover._target_position == 40
+    assert cover._attr_is_closing is True
+
+
 async def test_position_loop_stops_early_to_compensate_stop_latency(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -986,6 +1074,58 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
     api.control_blind_stop.assert_not_awaited()
     api.cancel_pending_move.assert_not_called()
     assert cover._target_position == 20
+
+
+async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The latency-compensation lead must not swallow the whole travel range.
+
+    Regression guard for audit finding 18. stop_lead_percent's own divisor
+    (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
+    - but unlike that calculation, whose final position *is* clamped to
+    [0, 100], stop_lead_percent itself used to carry no matching ceiling.
+    A 1s close time - clearly outside anything a real shutter reports, but
+    exactly the kind of corrupt/legacy config value that floor exists for
+    - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100) = 120
+    points: more than the entire 0-100 range. Uncapped, target(30) + 120 =
+    150 is satisfied by any position at all, so the loop used to fire its
+    stop the instant it was entered, however far from 30 the blind actually
+    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane 80:
+    a position of 85 - the blind has barely started closing from 100 -
+    must not satisfy "85 <= 80" and must not stop yet.
+    """
+
+    sleep_calls = 0
+
+    async def counting_sleep(*_args: object, **_kwargs: object) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            # See _LoopKeptRunning's own docstring above for why this is
+            # how this suite ends a loop proven not to stop, rather than a
+            # real cancellation.
+            raise _LoopKeptRunning
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 1.0})
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 85),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._target_position = 30
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    api.control_blind_stop.assert_not_awaited()
+    api.cancel_pending_move.assert_not_called()
+    assert cover._target_position == 30
 
 
 async def test_position_loop_endstop_target_skips_the_transmitter_wait_too(
@@ -1417,6 +1557,51 @@ async def test_handle_event_stopped_freezes_the_estimated_position(
     # remote), so the commanded target was never actually reached.
     assert cover._target_position is None
     cover._stop_position_tracking.assert_called_once_with()
+
+
+async def test_handle_event_stopped_logs_the_recalculated_position(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for audit finding 17.
+
+    The "Device %s STOPPED (position: %d%%)" info log used to be emitted
+    *before* _update_position() recalculated self._attr_current_cover_
+    position for the elapsed time, so it always printed the position as
+    of the last 0.2s polling tick (here, the move's unchanged starting
+    position of 20%) instead of where _handle_event's own recalculation -
+    the same one test_handle_event_stopped_freezes_the_estimated_position
+    already proves lands on 45% - says the blind actually stopped. Purely
+    a logging-field staleness: self._attr_current_cover_position itself,
+    and the diagnostics history record_position_update() writes right
+    after this log call, were never affected.
+    """
+    caplog.set_level(
+        logging.INFO, logger="custom_components.schellenberg_usb.cover"
+    )
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20
+
+    clock.advance(5.0)  # a quarter of the 20s open travel time: +25
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 45
+    stopped_records = [
+        record for record in caplog.records if "STOPPED" in record.message
+    ]
+    assert len(stopped_records) == 1
+    # Before the fix this asserted "(position: 20%)" - the stale,
+    # pre-recalculation value - and failed.
+    assert "(position: 45%)" in stopped_records[0].message
+    assert "(position: 20%)" not in stopped_records[0].message
 
 
 @pytest.mark.parametrize(
@@ -1943,6 +2128,55 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
     )
 
 
+async def test_async_setup_entry_nulls_a_stale_status_identity_when_source_is_unknown(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard for audit finding 8.
+
+    identities.py's resolve_blind_identities() - the canonical logic for
+    this exact resolution, shared by config_flow.py's developer-tools
+    diagnostics step and diagnostics.py's own dump - treats
+    CONF_STATUS_IDENTITY_SOURCE == STATUS_IDENTITY_SOURCE_UNKNOWN as "no
+    confirmed primary status identity", regardless of whatever
+    CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM values are still sitting in the
+    subentry's data from before it became unconfirmed. async_setup_entry()
+    used to read those stale fields back out instead, so api.
+    register_entity() below would have briefly (re-)registered this
+    blind's old, no-longer-trusted status identity on every reload - not
+    reachable through the current UI (every write path already clears
+    these fields together), only with hand-edited or legacy config data,
+    which is exactly what this test constructs.
+    """
+    api = MagicMock()
+    entry = _build_hub_entry(hass, api)
+    _add_blind_subentry(
+        hass,
+        entry,
+        unique_id="blind-uuid-1",
+        data={
+            CONF_DEVICE_ID: "ABCDEF",
+            CONF_DEVICE_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "FEDCBA",
+            CONF_STATUS_ENUM: "20",
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_UNKNOWN,
+            CONF_OPEN_TIME: 20.0,
+            CONF_CLOSE_TIME: 18.0,
+        },
+    )
+    async_add_entities = Mock()
+
+    await async_setup_entry(hass, entry, async_add_entities)
+
+    api.register_entity.assert_called_once_with(
+        None,
+        None,
+        "Living Room Blind",
+        command_device_id="ABCDEF",
+        command_enum="10",
+        secondary_status_identities=(),
+    )
+
+
 async def test_async_setup_entry_resyncs_device_registry_name_and_model_on_edit(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2282,3 +2516,35 @@ async def test_will_remove_from_hass_shuts_down_tracking_then_calls_super(
     cover._async_shutdown_position_tracking.assert_awaited_once_with(
         "entity removal or entry unload"
     )
+
+
+async def test_will_remove_from_hass_cancels_this_devices_in_flight_move(
+    hass: HomeAssistant,
+) -> None:
+    """Regression for audit finding 16: removing a blind's own subentry/
+    device used to leave any in-flight control_blind_with_retry() loop for
+    it running untouched - still able to transmit a real RF command, or
+    process a stray ack, for a blind Home Assistant no longer has an
+    entity for - until the *subsequent* full hub reload's unload phase
+    eventually reached disconnect(), hub-wide. cancel_pending_move() is
+    the same per-device mechanism async_stop_cover() already uses (see its
+    own docstring in api.py); this proves async_will_remove_from_hass()
+    now also calls it, for this entity's own _command_device_id, and
+    before shutting down position tracking.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    call_order: list[str] = []
+    api.cancel_pending_move.side_effect = lambda _device_id: call_order.append(
+        "cancel_pending_move"
+    )
+    cover._async_shutdown_position_tracking = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda _reason: call_order.append(
+            "_async_shutdown_position_tracking"
+        )
+    )
+
+    await cover.async_will_remove_from_hass()
+
+    api.cancel_pending_move.assert_called_once_with("ABCDEF")
+    assert call_order == ["cancel_pending_move", "_async_shutdown_position_tracking"]

@@ -153,6 +153,22 @@ TEST_COMMAND_DELAY = 0.75
 # needs to change one number.
 STOP_COMMAND_LATENCY_SECONDS = 1.2
 
+# Sanity ceiling on the latency-compensation lead that STOP_COMMAND_
+# LATENCY_SECONDS above feeds into (stop_lead_percent, in
+# _async_position_update_loop() in cover.py), expressed in the same
+# percentage points as that lead. Not a tuned value, like the travel-time
+# floor (0.1s) that same calculation's divisor already has - for any real
+# shutter, whose travel time is measured in seconds to tens of seconds,
+# the lead this produces is a small single-digit percentage, nowhere near
+# this cap. It only ever binds for a travel time so short or corrupted
+# that the uncapped lead would run into the hundreds of percent, pushing
+# the comparison it feeds so far past the valid 0-100 range that any
+# position at all would satisfy "already there" the instant a move
+# starts, regardless of how far from the real target it actually was
+# (audit finding 18 - unlike that divisor floor, this had no matching
+# ceiling at all before).
+MAX_STOP_LEAD_PERCENT = 50.0
+
 # Device verification
 VERIFY_TIMEOUT = 5  # seconds to wait for verification response
 # Expected response format: RFTU_V20 F:20180510_DFBD B:1
