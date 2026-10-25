@@ -2131,8 +2131,7 @@ class SchellenbergUsbApi:
                 )
             except TimeoutError:
                 _LOGGER.warning(
-                    "No t1/tE reply to test write within %.1fs source=%s "
-                    "device_id=%s",
+                    "No t1/tE reply to test write within %.1fs source=%s device_id=%s",
                     MOVE_ACK_TIMEOUT,
                     source,
                     device_id or "unknown",

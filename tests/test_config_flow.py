@@ -1091,7 +1091,11 @@ async def test_discover_status_finding_nothing_keeps_the_existing_identity(
     """
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
-    discovery_result = {
+    # Explicit annotation: unlike the otherwise-identical discovery_result
+    # above (which has a concrete device_id/enum pair for mypy to infer
+    # from), every value here is None or an empty list, giving mypy
+    # nothing concrete to infer the dict's value type from on its own.
+    discovery_result: dict[str, Any] = {
         "primary": None,
         "secondary": [],
         "unknown_commands": [],
@@ -1946,6 +1950,7 @@ async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"next_step_id": "copy_diagnostics"}
     )
+    assert result["data_schema"] is not None
 
     diagnostics_text = result["data_schema"]({})["diagnostics"]
 

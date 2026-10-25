@@ -458,7 +458,7 @@ async def test_capture_signal_from_a_different_blind_does_not_satisfy_the_wait(
     assert result["step_id"] == "calibration_close_instruction"
 
 
-async def test_calibration_capture_excludes_another_blinds_frames_from_the_identity_result(
+async def test_calibration_excludes_other_blinds_frames_from_identity_result(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -1119,7 +1119,7 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     assert result["step_id"] == "calibration_close_instruction"
 
 
-async def test_calibration_close_shows_busy_error_without_stealing_another_captures_buffer(
+async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
 ) -> None:
@@ -1158,7 +1158,7 @@ async def test_calibration_close_shows_busy_error_without_stealing_another_captu
     assert connected_api._status_discovery_phase == "discovery"
 
 
-async def test_open_instruction_retry_shows_busy_error_when_another_capture_took_the_buffer(
+async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,

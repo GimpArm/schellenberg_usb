@@ -1128,8 +1128,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         # entered, however far it actually was from
                         # target_position.
                         stop_lead_percent = min(
-                            (STOP_COMMAND_LATENCY_SECONDS / travel_time_for_lead)
-                            * 100,
+                            (STOP_COMMAND_LATENCY_SECONDS / travel_time_for_lead) * 100,
                             MAX_STOP_LEAD_PERCENT,
                         )
                     position_reached = (

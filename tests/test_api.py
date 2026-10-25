@@ -2331,9 +2331,7 @@ async def test_handle_message_caps_the_status_discovery_frame_list(
     connected_api.start_status_frame_capture(phase="opening")
 
     for _ in range(api_module.MAX_STATUS_DISCOVERY_FRAMES + 50):
-        connected_api._handle_message(
-            "ss" + "10" + "FEDCBA" + "0000" + CMD_UP + "0000"
-        )
+        connected_api._handle_message("ss" + "10" + "FEDCBA" + "0000" + CMD_UP + "0000")
 
     assert connected_api._status_discovery_frames is not None
     assert len(connected_api._status_discovery_frames) == (

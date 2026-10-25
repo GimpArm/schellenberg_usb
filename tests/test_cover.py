@@ -1577,9 +1577,7 @@ async def test_handle_event_stopped_logs_the_recalculated_position(
     and the diagnostics history record_position_update() writes right
     after this log call, were never affected.
     """
-    caplog.set_level(
-        logging.INFO, logger="custom_components.schellenberg_usb.cover"
-    )
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.cover")
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
     api = MagicMock()

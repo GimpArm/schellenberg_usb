@@ -204,10 +204,16 @@ async def test_developer_command_blocked_when_transmit_blocked(
 async def test_developer_command_failed_when_control_blind_returns_false(
     hass: HomeAssistant,
 ) -> None:
-    """control_blind() refusing the write must be reported, not silently dropped."""
+    """control_blind_exclusive() refusing the write must be reported, not
+    silently dropped - this step actually calls control_blind_exclusive()
+    (audit finding 7), not control_blind() directly; overriding the latter
+    here was dead as of that fix, since make_flow()'s own default
+    control_blind_exclusive (return_value=True) was what this step's write
+    still actually resolved against.
+    """
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
-    flow._api.control_blind = AsyncMock(return_value=False)
+    flow._api.control_blind_exclusive = AsyncMock(return_value=False)
 
     result = await flow.async_step_test_open()
 

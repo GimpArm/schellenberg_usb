@@ -53,8 +53,8 @@ from .const import (
 )
 from .identities import (
     format_status_identities,
-    normalize_status_identity,
     normalize_status_identities,
+    normalize_status_identity,
     parse_status_identities_text,
     resolve_blind_identities,
     serialize_status_identities,
@@ -1407,7 +1407,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                     data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
                 )
                 is not None
-                and data.get(CONF_STATUS_IDENTITY_SOURCE) != STATUS_IDENTITY_SOURCE_UNKNOWN
+                and data.get(CONF_STATUS_IDENTITY_SOURCE)
+                != STATUS_IDENTITY_SOURCE_UNKNOWN
             ):
                 # Discovery found nothing usable - wrong button, pressed
                 # too fast, RF interference - which is an inconclusive

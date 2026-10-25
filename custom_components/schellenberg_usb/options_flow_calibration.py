@@ -202,10 +202,9 @@ class CalibrationFlowHandler:
         # this blind's own and get chosen as its identity instead. Audit
         # finding 9: the wait was already scoped this way, the actual
         # identity decision below was not.
-        foreign_device_ids: frozenset[str] = (
-            (self._selected_device or {}).get("foreign_capture_device_ids")
-            or frozenset()
-        )
+        foreign_device_ids: frozenset[str] = (self._selected_device or {}).get(
+            "foreign_capture_device_ids"
+        ) or frozenset()
         self._calibration_discovery_result = api.finish_status_frame_capture(
             end_reason=end_reason, exclude_device_ids=foreign_device_ids
         )
