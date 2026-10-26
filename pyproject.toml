@@ -47,7 +47,7 @@ test = [
     "polyfactory~=3.1.0",
     "PyYAML~=6.0.2",
     # Need specific versions
-    "pytest-homeassistant-custom-component==0.13.371",
+    "pytest-homeassistant-custom-component==0.13.373",
     # Versions handled by pytest-homeassistant-custom-component
     "freezegun",
     "pytest",
