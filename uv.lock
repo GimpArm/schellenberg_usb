@@ -2171,15 +2171,15 @@ wheels = [
 
 [[package]]
 name = "polyfactory"
-version = "3.1.0"
+version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "faker" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/3a/db522ea17e0e8d38f3128889b5b600b3a1d5728ae0724f43a0ed5ed1f82e/polyfactory-3.1.0.tar.gz", hash = "sha256:9061c0a282e0594502576455230fce534f2915042be77715256c1e6bbbf24ac5", size = 344189, upload-time = "2025-11-25T08:10:16.555Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/65/19/cc8f17f7778d52a8b930622fc0bb8dd450c1d6d8ed4bdb5b2b7703c85dc4/polyfactory-3.5.0.tar.gz", hash = "sha256:78a1e4cf8f317be7da7c111d661f39db35080ec9c12b8df7c01dfbbc1c17250f", size = 381522, upload-time = "2026-10-21T07:13:31.664Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/7c/535646d75a1c510065169ea65693613c7a6bc64491bea13e7dad4f028ff3/polyfactory-3.1.0-py3-none-any.whl", hash = "sha256:78171232342c25906d542513c9f00ebf41eadec2c67b498490a577024dd7e867", size = 61836, upload-time = "2025-11-25T08:10:14.893Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/bb/8667413181bfac2fee81b6f80710356222bf438df1eff6b3c12ab39480a8/polyfactory-3.5.0-py3-none-any.whl", hash = "sha256:2051105650e82ea7046afbab9ad4a7bf579fb6fd80ef65a51a7feaef3396d278", size = 63644, upload-time = "2026-10-21T07:13:30.009Z" },
 ]
 
 [[package]]
@@ -3140,7 +3140,7 @@ dev = [
     { name = "freezegun" },
     { name = "mock-open", specifier = "~=1.4.0" },
     { name = "mypy", specifier = "~=2.4.0" },
-    { name = "polyfactory", specifier = "~=3.1.0" },
+    { name = "polyfactory", specifier = "~=3.5.0" },
     { name = "pre-commit", specifier = "~=4.7.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -3161,7 +3161,7 @@ test = [
     { name = "croniter", specifier = "~=6.0.0" },
     { name = "freezegun" },
     { name = "mock-open", specifier = "~=1.4.0" },
-    { name = "polyfactory", specifier = "~=3.1.0" },
+    { name = "polyfactory", specifier = "~=3.5.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
