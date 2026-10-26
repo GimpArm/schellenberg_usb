@@ -31,7 +31,7 @@ dependencies = [
     # tied to any specific serialx release otherwise - the OSError/
     # TimeoutError exception handling this version requires (see api.py) is
     # correct against any serialx release, old or new.
-    "serialx>=1.11.0",
+    "serialx>=1.15.0",
 ]
 
 [dependency-groups]
