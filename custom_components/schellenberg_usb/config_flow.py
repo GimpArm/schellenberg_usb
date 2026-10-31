@@ -411,7 +411,18 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         pairing_result = await api.pair_device_and_wait()
 
         if pairing_result is None:
-            # Pairing timeout
+            # Audit finding 15's own deferred secondary observation: a
+            # hub-wide reload triggered by a *different* blind's own
+            # subentry add/edit (or the hub unloading/Core stopping, or
+            # an explicit stick reset) while this step was still waiting
+            # for a device ID used to always surface as the exact same
+            # "No device responded within 2 minutes" message a genuine
+            # timeout gets - correct for a real timeout, misleading for
+            # everything else, since nothing about this attempt itself
+            # was actually wrong. Checked immediately, with no await in
+            # between, so this always reflects the call just above.
+            if api.pairing_interrupted_by_disconnect:
+                return self.async_abort(reason="pairing_interrupted_by_disconnect")
             return self.async_abort(reason="pairing_timeout")
 
         # Pairing successful! Store device_id and device_enum in context

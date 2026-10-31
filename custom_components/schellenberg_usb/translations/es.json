@@ -219,6 +219,7 @@
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
+        "pairing_interrupted_by_disconnect": "El emparejamiento se interrumpió porque la conexión con el stick USB se reinició o se recargó mientras se esperaba una respuesta (por ejemplo, al añadir o editar otra persiana, o al reiniciar Home Assistant). Por favor, inténtelo de nuevo.",
         "pairing_failed": "Error en el emparejamiento del dispositivo.",
         "reconfigure_successful": "La configuración del dispositivo se ha actualizado correctamente",
         "command_test_successful": "La prueba de comando del motor se ha realizado correctamente.",

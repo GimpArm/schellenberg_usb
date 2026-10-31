@@ -381,6 +381,39 @@ async def test_pair_device_timeout_aborts_with_pairing_timeout(
     assert result["reason"] == "pairing_timeout"
 
 
+async def test_pair_device_disconnect_during_wait_aborts_with_distinct_reason(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hub-wide reload (triggered by a *different* blind's own subentry
+    add/edit), the hub unloading, a Core stop/restart, or an explicit
+    stick reset cutting this wait short must not be reported as the same
+    generic "no device responded" message a genuine 2-minute timeout
+    gets - see pairing_interrupted_by_disconnect's own docstring in
+    api.py. pair_device_and_wait() is mocked here exactly like the
+    pairing_timeout test above (both return None); only the new property
+    it would have set for real differs, set directly since the mock
+    bypasses the method that would otherwise set it.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api, "pair_device_and_wait", AsyncMock(return_value=None)
+    )
+    connected_api._pairing_interrupted_by_disconnect = True
+    result = await _start_pairing_flow(hass, entry)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "pair_device"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "pairing_interrupted_by_disconnect"
+
+
 def _spy_on_dispatcher_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[], Awaitable[None]]:

@@ -219,6 +219,7 @@
       },
       "abort": {
         "pairing_timeout": "No device responded within 2 minutes. Please try again.",
+        "pairing_interrupted_by_disconnect": "Pairing was interrupted because the connection to the USB stick was reset or reloaded while waiting for a response (for example, by adding or editing a different shutter, or restarting Home Assistant). Please try again.",
         "pairing_failed": "Pairing of the device failed.",
         "reconfigure_successful": "Device configuration updated successfully",
         "command_test_successful": "The motor command test was successful.",

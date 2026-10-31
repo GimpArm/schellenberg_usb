@@ -219,6 +219,7 @@
       },
       "abort": {
         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
+        "pairing_interrupted_by_disconnect": "Die Kopplung wurde unterbrochen, weil die Verbindung zum USB-Stick während des Wartens auf eine Antwort zurückgesetzt oder neu geladen wurde (zum Beispiel durch das Hinzufügen oder Bearbeiten eines anderen Rollladens oder einen Neustart von Home Assistant). Bitte versuchen Sie es erneut.",
         "pairing_failed": "Kopplung des Geräts fehlgeschlagen.",
         "reconfigure_successful": "Die Gerätekonfiguration wurde erfolgreich aktualisiert",
         "command_test_successful": "Der Motorbefehlstest war erfolgreich.",

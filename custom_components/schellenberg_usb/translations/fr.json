@@ -219,6 +219,7 @@
       },
       "abort": {
         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",
+        "pairing_interrupted_by_disconnect": "L'appairage a été interrompu car la connexion à la clé USB a été réinitialisée ou rechargée en attendant une réponse (par exemple, par l'ajout ou la modification d'un autre volet, ou par un redémarrage de Home Assistant). Veuillez réessayer.",
         "pairing_failed": "Échec de l'appairage de l'appareil.",
         "reconfigure_successful": "La configuration de l'appareil a été mise à jour avec succès",
         "command_test_successful": "Le test de commande du moteur a réussi.",

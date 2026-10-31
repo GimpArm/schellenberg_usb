@@ -1989,6 +1989,54 @@ async def test_pair_device_and_wait_times_out_when_nothing_responds(
 
     assert result is None
     assert connected_api.pairing_active is False
+    assert connected_api.pairing_interrupted_by_disconnect is False
+
+
+async def test_pair_device_and_wait_flags_disconnect_during_wait(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A hub-wide reload (triggered by a *different* blind's own subentry
+    add/edit, not necessarily anything about this pairing attempt - or the
+    integration unloading, a Core stop/restart, or an explicit stick
+    reset) calls disconnect() while this is still waiting for a device ID.
+    disconnect() injects a ConnectionError into _pairing_future for
+    exactly this reason - config_flow.py needs to tell this apart from an
+    ordinary timeout (see pairing_interrupted_by_disconnect's own
+    docstring), since neither this attempt nor the device being paired
+    did anything wrong.
+    """
+    task = asyncio.ensure_future(connected_api.pair_device_and_wait())
+    await asyncio.sleep(0)  # real yield: let it send "sp" and park on the future
+
+    await connected_api.disconnect()
+    result = await task
+
+    assert result is None
+    assert connected_api.pairing_interrupted_by_disconnect is True
+
+
+async def test_pair_device_and_wait_does_not_flag_a_real_connection_loss(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A genuine, unexpected connection loss (handle_connection_lost(),
+    e.g. the stick being unplugged) injects the exact same ConnectionError
+    into _pairing_future that an intentional disconnect() does - but it's
+    a real, separate problem, not "something else reloaded/unloaded the
+    hub", so it must NOT set pairing_interrupted_by_disconnect: left
+    reporting the existing generic pairing_timeout message, same as
+    before this fix.
+    """
+    task = asyncio.ensure_future(connected_api.pair_device_and_wait())
+    await asyncio.sleep(0)  # real yield: let it send "sp" and park on the future
+
+    connected_api.handle_connection_lost(
+        connected_api._protocol,
+        Exception("gone"),
+    )
+    result = await task
+
+    assert result is None
+    assert connected_api.pairing_interrupted_by_disconnect is False
 
 
 async def test_stop_pairing_mode_restores_listening_from_the_write_alone(

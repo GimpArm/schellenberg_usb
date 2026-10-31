@@ -342,6 +342,10 @@ class SchellenbergUsbApi:
         self._connect_task: asyncio.Task[bool] | None = None
         self._pairing_future: asyncio.Future[str] | None = None
         self._pairing_active = False
+        # Set only by pair_device_and_wait() itself, each time it starts a
+        # fresh attempt (so a previous attempt's outcome never leaks into
+        # this one) - see that method's own comment on where this is set.
+        self._pairing_interrupted_by_disconnect = False
         self._stop_pairing_task: asyncio.Task[None] | None = (
             None  # Track task to stop pairing
         )
@@ -1266,6 +1270,10 @@ class SchellenbergUsbApi:
 
     async def pair_device_and_wait(self) -> tuple[str, str] | None:
         """Put the stick into pairing mode and wait for a device to pair."""
+        # Reset unconditionally, before any early return below, so this
+        # call's own outcome is never contaminated by a previous attempt's
+        # - see pairing_interrupted_by_disconnect's own docstring.
+        self._pairing_interrupted_by_disconnect = False
         if self._pairing_future and not self._pairing_future.done():
             _LOGGER.warning("Pairing already in progress")
             return None
@@ -1297,9 +1305,35 @@ class SchellenbergUsbApi:
             if not await self.send_command(CMD_GET_PARAM_P):
                 raise ConnectionError("could not enter pairing mode")
 
-            device_id = await asyncio.wait_for(
-                self._pairing_future, timeout=PAIRING_TIMEOUT
-            )
+            try:
+                device_id = await asyncio.wait_for(
+                    self._pairing_future, timeout=PAIRING_TIMEOUT
+                )
+            except ConnectionError:
+                # disconnect() injects exactly this exception into
+                # _pairing_future (see its own comment) for every reason
+                # it's called: a hub-wide reload - triggered by a
+                # *different* blind's own subentry add/edit, not
+                # necessarily anything about this pairing attempt - the
+                # integration unloading, a Core stop/restart, or
+                # reset_and_reconnect()'s explicit stick reset.
+                # _disconnect_requested is set only by that intentional
+                # path, never by handle_connection_lost()'s own, separate
+                # injection of the same exception type for a genuine,
+                # unexpected connection loss - so checking it here, at the
+                # exact moment this specific await was interrupted, is
+                # what lets config_flow.py tell "cut short by something
+                # else reloading/unloading the hub" apart from "the stick
+                # itself dropped the connection" (left reporting the
+                # existing generic pairing_timeout message, since that
+                # case is a real, separate problem this property isn't
+                # about) and from an ordinary 2-minute timeout, without
+                # changing this method's own return-None-on-failure
+                # contract at all - re-raised as-is for the except
+                # ConnectionError branch below to log and handle exactly
+                # as before.
+                self._pairing_interrupted_by_disconnect = self._disconnect_requested
+                raise
             _LOGGER.debug(
                 "Received device ID %s, sending pairing teach_payload=%s "
                 "then finish_payload=%s",
@@ -2533,6 +2567,27 @@ class SchellenbergUsbApi:
     def pairing_active(self) -> bool:
         """Return whether a pairing workflow currently owns the stick."""
         return self._pairing_active
+
+    @property
+    def pairing_interrupted_by_disconnect(self) -> bool:
+        """Return whether the last pair_device_and_wait() call was cut short.
+
+        True only when disconnect() injected its ConnectionError into
+        _pairing_future while still waiting for a device ID - covers an
+        intentional disconnect for any reason (a hub-wide reload
+        triggered by a *different* blind's own subentry add/edit, the
+        integration unloading, a Core stop/restart, or an explicit stick
+        reset), never a plain timeout, a refusal to start (already
+        pairing, not transmit-capable), or the stick genuinely dropping
+        its connection unexpectedly (handle_connection_lost() leaves
+        _disconnect_requested False, so that case is deliberately left
+        reporting the existing generic pairing_timeout message - a real
+        connection loss isn't the scenario this property exists for).
+        config_flow.py reads this immediately after pair_device_and_wait()
+        returns None, to show a message naming the real cause instead of
+        the generic "no device responded" one.
+        """
+        return self._pairing_interrupted_by_disconnect
 
     @property
     def busy_latched(self) -> bool:
