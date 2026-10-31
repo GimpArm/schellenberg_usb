@@ -2030,13 +2030,16 @@ async def test_pair_device_and_wait_does_not_flag_a_real_connection_loss(
     await asyncio.sleep(0)  # real yield: let it send "sp" and park on the future
 
     connected_api.handle_connection_lost(
-        connected_api._protocol,
+        connected_api._protocol,  # type: ignore[arg-type]
         Exception("gone"),
     )
     result = await task
 
     assert result is None
     assert connected_api.pairing_interrupted_by_disconnect is False
+    # A reconnect was scheduled as a result; don't leave it pending past
+    # the end of the test.
+    connected_api._cancel_scheduled_reconnect()
 
 
 async def test_stop_pairing_mode_restores_listening_from_the_write_alone(
