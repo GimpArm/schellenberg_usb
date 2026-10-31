@@ -1217,6 +1217,25 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
 
 
 # ---------------------------------------------------------------------------
+# move_lock_busy: the public, read-only reflection of _move_lock's own
+# locked() used by cover.py's contention-aware stop-lead compensation (see
+# that property's own comment for why it exists).
+# ---------------------------------------------------------------------------
+
+
+async def test_move_lock_busy_reflects_the_shared_locks_own_state(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    assert connected_api.move_lock_busy is False
+
+    await connected_api._move_lock.acquire()
+    assert connected_api.move_lock_busy is True
+
+    connected_api._move_lock.release()
+    assert connected_api.move_lock_busy is False
+
+
+# ---------------------------------------------------------------------------
 # control_blind_exclusive(): the lock-aware wrapper around control_blind()
 # for callers outside the regular cover-entity move/stop path (motor-
 # direction tests, developer-tools tests, the post-teach test, the

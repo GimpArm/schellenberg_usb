@@ -254,6 +254,14 @@ In practice:
   status from original remote** once per remote. A frame stream that doesn't
   match the primary identity is kept as a secondary identity (visible in
   [Diagnostics](#diagnostics)) instead of being mixed into position tracking.
+- Pressing a remote or wall switch that *is* saved as a secondary identity still
+  does not feed position tracking, but does cause one small, temporary effect on
+  the dashboard: the cover briefly shows as opening/closing - a guess toward
+  whichever end stop is farther from the current position, not a decoded
+  direction - until the primary identity's own echo of the same move confirms or
+  corrects it a moment later, or a few seconds pass with no such echo and the
+  guess is automatically withdrawn. The tracked position percentage itself is
+  never touched by this, only the opening/closing indicator.
 
 ## Manual position sync
 
@@ -480,7 +488,6 @@ interne_rollladenlogik_fuer_home_assistant:
     - condition: template
       value_template: "{{ ziel | int != states(helfer) | int }}"
     - variables:
-        start_ts: "{{ now().timestamp() }}"
         soll: "{{ ziel | float(0) }}"
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
@@ -507,6 +514,16 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.open_cover
               target:
                 entity_id: "{{ entity }}"
+            # start_ts is captured HERE, after the first open_cover call,
+            # not before the choose block above. open_cover only returns
+            # once the integration's control_blind_with_retry() has
+            # actually gotten the command onto the wire - and when several
+            # blinds are being driven together, that call can itself sit
+            # waiting its turn for the one shared RF transmitter. Capturing
+            # start_ts before this call would wrongly count that wait as
+            # travel time, making the later timed stop_cover fire early.
+            - variables:
+                start_ts: "{{ now().timestamp() }}"
             - if:
                 - condition: template
                   value_template: "{{ dauer >= min_fahrzeit_doppel }}"
@@ -526,6 +543,9 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.close_cover
               target:
                 entity_id: "{{ entity }}"
+            # See the comment in the open_cover branch above - same reason.
+            - variables:
+                start_ts: "{{ now().timestamp() }}"
             - if:
                 - condition: template
                   value_template: "{{ dauer >= min_fahrzeit_doppel }}"
@@ -592,7 +612,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
   max: 12
   sequence:
     - variables:
-        start_ts: "{{ now().timestamp() }}"
         soll: "{{ ziel | float(0) }}"
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
@@ -634,6 +653,10 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.open_cover
               target:
                 entity_id: "{{ entity }}"
+            # See the comment in interne_rollladenlogik_fuer_home_assistant
+            # (Script A) above - same reason.
+            - variables:
+                start_ts: "{{ now().timestamp() }}"
             - if:
                 - condition: template
                   value_template: "{{ dauer >= min_fahrzeit_doppel }}"
@@ -653,6 +676,10 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.close_cover
               target:
                 entity_id: "{{ entity }}"
+            # See the comment in interne_rollladenlogik_fuer_home_assistant
+            # (Script A) above - same reason.
+            - variables:
+                start_ts: "{{ now().timestamp() }}"
             - if:
                 - condition: template
                   value_template: "{{ dauer >= min_fahrzeit_doppel }}"

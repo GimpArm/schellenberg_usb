@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.cover import (
@@ -15,12 +16,13 @@ from homeassistant.components.cover import (
     CoverEntityFeature,
 )
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .api import SchellenbergUsbApi
@@ -46,6 +48,7 @@ from .const import (
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     MAX_STOP_LEAD_PERCENT,
+    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_MANUAL_POSITION_SYNC,
@@ -494,6 +497,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # leftover garbage to that check for as long as the leg's own write
         # is still queued behind another blind's transmission.
         self._command_in_flight = False
+        # Set only while an optimistic, direction-guessed dashboard state
+        # from a secondary identity's frame is pending its own withdrawal
+        # (see _handle_secondary_activity()/_clear_optimistic_secondary_
+        # move() below) - also doubles as the debounce that keeps repeated
+        # frames from the same held-down button from scheduling another.
+        self._optimistic_secondary_move_unsub: CALLBACK_TYPE | None = None
         self._position_update_source = "not recorded"
         self._position_source_kind = "startup default"
         self._position_confirmed_since_restart = False
@@ -671,6 +680,23 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     f"{SIGNAL_DEVICE_EVENT}_{self._status_device_id}_"
                     f"{self._status_enum}",
                     self._handle_event,
+                )
+            )
+
+        # One subscription per secondary identity (an additional physical
+        # remote/wall-switch paired directly to the same motor, distinct
+        # from whichever identity is trusted as primary) - each routed to
+        # _handle_secondary_activity(), never to _handle_event(). This
+        # broadcast was never removed when the close+open elapsed-timer
+        # feature built on top of it was (see #116's own revert commits) -
+        # only cover.py's subscriber side was, which is why nothing has
+        # been listening for it since.
+        for secondary_device_id, secondary_enum in self._secondary_status_identities:
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    f"{SIGNAL_DEVICE_EVENT}_{secondary_device_id}_{secondary_enum}",
+                    self._handle_secondary_activity,
                 )
             )
 
@@ -876,6 +902,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # most removals - safe to call unconditionally, exactly like every
         # other cancel_pending_move() call site already does.
         self._api.cancel_pending_move(self._command_device_id)
+        if self._optimistic_secondary_move_unsub is not None:
+            self._optimistic_secondary_move_unsub()
+            self._optimistic_secondary_move_unsub = None
         await self._async_shutdown_position_tracking("entity removal or entry unload")
         await super().async_will_remove_from_hass()
 
@@ -1058,6 +1087,105 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         self.async_write_ha_state()
 
+    @callback
+    def _handle_secondary_activity(self, _event: str) -> None:
+        """React to a secondary identity's frame with an optimistic guess.
+
+        Deliberately never inspects _event (the decoded command, if any):
+        a secondary frame's own command byte has been tried twice as a way
+        to learn its real direction/stop meaning, on real Gurtwickler-
+        remote hardware, and failed both times in sustained real-world use
+        after initially looking promising in a smaller sample (commits
+        e911236 and 1db9e69) - so that byte is no longer trusted for
+        anything here. All this reacts to is the fact that *something*
+        arrived at all, which needs no decoding and is never wrong.
+
+        With nothing decoded, the direction shown is a guess: toward the
+        farther end stop from the current known position, on the
+        assumption that a remote press most often means "finish the job"
+        (already mostly open -> guess closing; already mostly closed ->
+        guess opening) rather than a fine intermediate adjustment. This is
+        wrong often enough that it must never be allowed to stand
+        unconfirmed - which is exactly why it only ever touches
+        is_opening/is_closing, never _move_start_time/_move_start_position/
+        _target_position or the tracking task itself: _has_live_position_
+        tracking() and _command_in_flight therefore both still read exactly
+        as if nothing had happened, so when the primary identity's own
+        echo of this same physical move arrives - reliably decoded, as
+        always - _handle_event()'s STARTED_MOVING branch takes it over
+        with zero changes of its own, overwriting this guess with the
+        real direction and starting real tracking. If that echo never
+        arrives at all (the same real-world RF loss this project's own
+        debug logs have shown happens occasionally), _clear_optimistic_
+        secondary_move() below withdraws the guess on its own after
+        OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS instead of leaving it
+        standing forever.
+        """
+        if self._has_live_position_tracking() or self._command_in_flight:
+            # A real move (HA-issued or already picked up from the
+            # primary identity's own echo) already owns is_opening/
+            # is_closing - never guess over it.
+            return
+        if self._optimistic_secondary_move_unsub is not None:
+            # Already showing a guess for this same burst (a remote
+            # commonly repeats its frame every ~400ms while held) -
+            # the existing guess and its timeout stand as they are.
+            return
+        if self._attr_current_cover_position is None:
+            # No position baseline yet to guess a direction from.
+            return
+        guessed_opening = self._attr_current_cover_position < 50
+        self._attr_is_opening = guessed_opening
+        self._attr_is_closing = not guessed_opening
+        _LOGGER.info(
+            "Device %s secondary identity activity: optimistic guess "
+            "%s (position %d%%, to be confirmed or corrected by the "
+            "primary identity's own echo, or withdrawn after %.0fs if "
+            "none arrives)",
+            self._device_name,
+            "opening" if guessed_opening else "closing",
+            self._attr_current_cover_position,
+            OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+        )
+        self._optimistic_secondary_move_unsub = async_call_later(
+            self.hass,
+            OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+            self._clear_optimistic_secondary_move,
+        )
+        self.async_write_ha_state()
+
+    @callback
+    def _clear_optimistic_secondary_move(self, _now: datetime) -> None:
+        """Withdraw an optimistic guess that nothing ever confirmed."""
+        self._optimistic_secondary_move_unsub = None
+        if self._has_live_position_tracking() or self._command_in_flight:
+            # Either the primary identity's own echo already landed and
+            # _handle_event() replaced this guess with the real, decoded
+            # direction and started real tracking, or a genuine Home
+            # Assistant open/close for this same entity is itself still in
+            # flight and has already set its own optimistic is_opening/
+            # is_closing before this timeout fired. The second half
+            # matters just as much as the first, and for exactly the same
+            # reason _handle_event() itself checks both: async_open_
+            # cover()/async_close_cover() set that state synchronously,
+            # but their own tracking task only starts once control_blind_
+            # with_retry() actually succeeds (self._command_in_flight's
+            # own comment in __init__), so _has_live_position_tracking()
+            # alone can read False for a real stretch - hub-wide lock
+            # contention, the busy-retry wait - while that command's own
+            # optimistic state is still the genuinely current one.
+            # _handle_secondary_activity() already guards its own, initial
+            # guess against exactly this same window; checking only
+            # tracking liveness here, on the withdrawal side, would let
+            # this timeout fire mid-window and wrongly pull a real,
+            # in-flight command's state back down to idle a few seconds
+            # into it. Nothing of this guess's own is left to withdraw
+            # either way, so leave the real state alone and return.
+            return
+        self._attr_is_opening = False
+        self._attr_is_closing = False
+        self.async_write_ha_state()
+
     def _has_live_position_tracking(self) -> bool:
         """Return whether the position-tracking task is already live.
 
@@ -1225,6 +1353,28 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             else self._travel_time_close,
                             0.1,
                         )
+                        # STOP_COMMAND_LATENCY_SECONDS alone assumes this
+                        # blind's own stop reaches the wire after one
+                        # ordinary, uncontended transmit cycle. When the
+                        # shared lock is held by some *other* blind's own
+                        # move or stop right now, this blind's own stop -
+                        # though served ahead of anyone merely *waiting*
+                        # for the lock (see move_lock_busy's own comment
+                        # in api.py) - still has to wait out whatever that
+                        # other cycle has left, which can itself take up
+                        # to about one more full cycle. Real log evidence
+                        # (2026-10-31): an uncontended stop reached the
+                        # wire in 0.39s; a contended one, queued behind
+                        # another blind's own stop, took 1.37s - almost
+                        # exactly one extra STOP_COMMAND_LATENCY_SECONDS -
+                        # and that second blind overshot its target by
+                        # close to the matching percentage. Checked fresh
+                        # on every tick, so this only widens the lead for
+                        # ticks where contention is actually observed,
+                        # not unconditionally for every stop.
+                        stop_latency_seconds = STOP_COMMAND_LATENCY_SECONDS
+                        if self._api.move_lock_busy:
+                            stop_latency_seconds += STOP_COMMAND_LATENCY_SECONDS
                         # travel_time_for_lead's own floor just above only
                         # keeps this division from raising or exploding -
                         # on its own it leaves the result with no matching
@@ -1238,7 +1388,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         # entered, however far it actually was from
                         # target_position.
                         stop_lead_percent = min(
-                            (STOP_COMMAND_LATENCY_SECONDS / travel_time_for_lead) * 100,
+                            (stop_latency_seconds / travel_time_for_lead) * 100,
                             MAX_STOP_LEAD_PERCENT,
                         )
                     position_reached = (
@@ -1260,6 +1410,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._target_position,
                         )
                         if needs_stop_command:
+                            # Snapshot the target this stop is actually
+                            # for, taken before the await below - see the
+                            # re-check just after that same await for why.
+                            target_when_stop_was_sent = self._target_position
                             # This is functionally a stop, same as
                             # async_stop_cover()'s own manual one - see its
                             # docstring for why cancel_pending_move() comes
@@ -1312,6 +1466,40 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                     self._device_name,
                                     self._target_position,
                                 )
+                                continue
+                            if self._target_position != target_when_stop_was_sent:
+                                # A same-direction retarget (a fresh
+                                # set_cover_position() call in the same
+                                # direction, typically via
+                                # async_open_cover()/async_close_cover()'s
+                                # own is_redundant_resend piggyback path)
+                                # landed while the await above was in
+                                # flight, and already pointed
+                                # self._target_position at its own new
+                                # value - is_redundant_resend there means
+                                # that call deliberately left this same
+                                # loop/task running rather than starting
+                                # its own, on the assumption that this
+                                # task would keep tracking it. Falling
+                                # through to the unconditional clear below
+                                # would wipe that still-live target/
+                                # is_opening/is_closing/_move_start_* right
+                                # out from under it and then end this task
+                                # via the return below - leaving the new
+                                # leg's own move physically continuing
+                                # with nothing left tracking or auto-
+                                # stopping it at all. The stop just sent
+                                # above was for the old target and is
+                                # harmless regardless of which target is
+                                # now current - the motor only ever sees
+                                # a bare stop pulse, never a position - so
+                                # simply continue instead: _move_start_time/
+                                # _move_start_position are still exactly
+                                # right for the same direction, and the
+                                # next tick re-evaluates position_reached
+                                # against whatever self._target_position
+                                # has become, including None for a plain
+                                # open()/close() that superseded this leg.
                                 continue
                         else:
                             # A plain open_cover()/close_cover() reaching 0/100
@@ -1407,7 +1595,16 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if self._move_start_time is None or self._move_start_position is None:
             return
 
-        elapsed_time = time.monotonic() - self._move_start_time
+        # Never negative: async_open_cover()/async_close_cover() push
+        # self._move_start_time this far into the future to model the same
+        # transmit-to-motor-action dead time STOP_COMMAND_LATENCY_SECONDS
+        # already measures (see their own call sites' comments) - for as
+        # long as time.monotonic() has not yet reached that pushed-forward
+        # point, the real motor has not started moving yet either, so the
+        # clamp below holds the estimate at _move_start_position exactly,
+        # rather than letting a negative elapsed_time run total_position_
+        # change backwards past it.
+        elapsed_time = max(0.0, time.monotonic() - self._move_start_time)
 
         # Guard against a zero/negative travel time (corrupt or hand-edited
         # config data): dividing by it would raise ZeroDivisionError inside
@@ -1638,7 +1835,35 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_opening = True
             self._attr_is_closing = False
             self._move_start_position = self._attr_current_cover_position
-            self._move_start_time = time.monotonic()
+            # Pushed STOP_COMMAND_LATENCY_SECONDS into the future, not set
+            # to plain time.monotonic(): the stick accepting this write is
+            # not the same instant the motor physically starts moving -
+            # the same ~1.1-1.2s transmit-to-action latency STOP_COMMAND_
+            # LATENCY_SECONDS already measures applies here too, per its
+            # own comment in const.py ("one open/close/stop frame", not
+            # just a stop frame). Previously uncompensated on this side
+            # only: _update_position()'s elapsed-time estimate ran ahead
+            # of the real motor for this whole gap, for the rest of the
+            # move - invisible for a plain 0/100 open/close (the real end-
+            # stop echo corrects everything regardless), but it made the
+            # auto-stop-at-target branch below fire measurably early for
+            # an intermediate target. Real log evidence (2026-10-31): two
+            # blinds targeting an intermediate position stopped at ~82%
+            # after only ~2.2-2.6s, consistent with this gap (measured via
+            # each blind's own STARTED_MOVING echo arriving ~1.66s after
+            # this same write) never being subtracted anywhere. The
+            # STARTED_MOVING branch in _handle_event() deliberately still
+            # sets this to plain time.monotonic() when a real echo
+            # confirms the move - that instant genuinely has zero dead
+            # time left (the motor is confirmed moving right then), and
+            # re-basing from the current, already-correctly-estimated
+            # position there is a no-op for this linear model, not a
+            # second deduction - so only this optimistic, not-yet-
+            # confirmed assignment needs the push. _update_position()'s
+            # own clamp (max(0.0, ...)) is what turns this future
+            # timestamp into an actual hold-at-start-position delay
+            # instead of a backwards jump.
+            self._move_start_time = time.monotonic() + STOP_COMMAND_LATENCY_SECONDS
             self._start_position_tracking()
         self.async_write_ha_state()
 
@@ -1786,7 +2011,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_opening = False
             self._attr_is_closing = True
             self._move_start_position = self._attr_current_cover_position
-            self._move_start_time = time.monotonic()
+            # Pushed into the future, not plain time.monotonic() - see
+            # async_open_cover()'s own mirror of this exact point for why.
+            self._move_start_time = time.monotonic() + STOP_COMMAND_LATENCY_SECONDS
             self._start_position_tracking()
         self.async_write_ha_state()
 

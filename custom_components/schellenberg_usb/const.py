@@ -141,16 +141,39 @@ TEST_COMMAND_DELAY = 0.75
 # Measured on real hardware (t1-to-t0 across the stick's own transmit cycle -
 # see the pairing-test fix's own comments in config_flow.py for the same
 # figure): one open/close/stop frame consistently takes roughly 1.1-1.2s to
-# transmit end to end. cover.py's set_cover_position tracking loop fires its
-# follow-up stop in software once the elapsed-time estimate reaches the
-# target, but the blind keeps moving under the already-issued open/close
-# command for about this long before that stop is actually transmitted and
-# acted on - uncompensated, that made any target within roughly this
-# fraction of a blind's own travel time of either end stop unreachable: the
-# earliest a stop could physically land was already past it. Kept as one
-# named constant, rather than inline in cover.py, so both call sites stay in
-# sync and a real-hardware test on a different stick/motor combination only
-# needs to change one number.
+# transmit end to end. Used on two, symmetric sides of the same elapsed-time
+# position estimate in cover.py:
+#
+# - The stop side: set_cover_position's tracking loop fires its follow-up
+#   stop in software once the elapsed-time estimate reaches the target, but
+#   the blind keeps moving under the already-issued open/close command for
+#   about this long before that stop is actually transmitted and acted on -
+#   uncompensated, that made any target within roughly this fraction of a
+#   blind's own travel time of either end stop unreachable: the earliest a
+#   stop could physically land was already past it.
+# - The start side: async_open_cover()/async_close_cover() push their own
+#   optimistic _move_start_time this far into the future rather than
+#   leaving it at plain time.monotonic(), for the mirror-image reason - the
+#   stick accepting an open/close write is not the same instant the motor
+#   physically starts moving, and that gap used to run the position
+#   estimate ahead of the real motor for the rest of the move, invisible
+#   for a plain 0/100 open/close (the real end-stop echo corrects
+#   everything regardless) but making an intermediate target's auto-stop
+#   fire measurably early. See both call sites' own comments.
+#
+# Both compensations are deliberately the same figure, not two separately-
+# tuned constants, because the underlying hardware latency measured above
+# is already described as applying to "one open/close/stop frame"
+# generically - a real difference between the two sides has never been
+# measured, so splitting them would just be two names for one number.
+# _async_position_update_loop() widens the stop-side use further still,
+# only when api.py's move_lock_busy reports contention, for the time this
+# blind's own stop can additionally spend queued behind another blind's
+# move/stop sharing the same transmit lock - see that call site's own
+# comment for the real-log numbers behind it. Kept as one named constant,
+# rather than inline in cover.py, so every call site stays in sync and a
+# real-hardware test on a different stick/motor combination only needs to
+# change one number.
 STOP_COMMAND_LATENCY_SECONDS = 1.2
 
 # Sanity ceiling on the latency-compensation lead that STOP_COMMAND_
@@ -168,6 +191,25 @@ STOP_COMMAND_LATENCY_SECONDS = 1.2
 # (audit finding 18 - unlike that divisor floor, this had no matching
 # ceiling at all before).
 MAX_STOP_LEAD_PERCENT = 50.0
+
+# How long cover.py's own optimistic guess from a secondary identity's
+# frame (_handle_secondary_activity) is allowed to stand before it is
+# withdrawn if nothing ever confirms it. This exists because decoding a
+# secondary frame's own command byte to learn its real direction has been
+# tried twice on real Gurtwickler-remote hardware and failed both times
+# (see commits e911236 and 1db9e69) - so that byte is deliberately never
+# inspected at all any more. Instead, the guess is corrected for free the
+# moment the primary status identity's own echo of the same physical move
+# arrives - _handle_event()'s STARTED_MOVING branch overwrites is_opening/
+# is_closing with the real, reliably decoded direction and starts real
+# tracking, exactly as it already does for any other externally-triggered
+# move. This timeout only covers the case that echo never arrives at all
+# (the same real-world RF loss this project's own debug logs have shown
+# happens occasionally) - long enough that a genuinely-landing-late echo
+# is not pre-empted, short enough that a wrong guess with nothing left to
+# correct it does not stand for long. Tune here only; cover.py has no
+# literal of its own.
+OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS = 5.0
 
 # Device verification
 VERIFY_TIMEOUT = 5  # seconds to wait for verification response

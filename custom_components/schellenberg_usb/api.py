@@ -2556,6 +2556,29 @@ class SchellenbergUsbApi:
         return self._transmitter_active
 
     @property
+    def move_lock_busy(self) -> bool:
+        """Return whether some move or stop currently holds the shared lock.
+
+        cover.py's own auto-stop-at-target check
+        (_async_position_update_loop()) widens its latency compensation
+        when this is True - see that call site's own comment. Real log
+        evidence (2026-10-31): two blinds closing together, one stopping
+        right after the other - the first blind's stop reached the wire
+        0.39s after the software decided to stop it; the second blind's
+        own stop, queued behind the first's whole wait-for-idle-then-
+        write-then-ack-wait cycle on this same lock, took 1.37s - about
+        one more full STOP_COMMAND_LATENCY_SECONDS-sized cycle than the
+        uncontended case, matching the second blind's own measured
+        overshoot almost exactly. control_blind_stop() already requests
+        priority=True (see _PriorityLock above), so a stop like the
+        second blind's never queues behind some *other*, unrelated
+        blind's move merely *waiting* for this lock - only ever behind
+        whoever currently *holds* it, which is exactly what this
+        property reflects.
+        """
+        return self._move_lock.locked()
+
+    @property
     def transmit_block_reason(self) -> str | None:
         """Return why a new diagnostic command cannot be sent, as a stable code.
 
