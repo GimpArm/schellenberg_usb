@@ -2392,6 +2392,59 @@ async def test_clear_optimistic_secondary_move_leaves_a_pending_command_alone(
     assert cover._optimistic_secondary_move_unsub is None
 
 
+async def test_secondary_activity_from_a_stale_post_restart_frame_self_corrects(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closes out the open "shows closed right after restart" regression note.
+
+    That regression (see CHANGELOG.md / commit d21735d) was caused by a
+    mechanism that no longer exists at all: the old close+open elapsed-
+    timer detection feature (reverted) plus a command-byte decode
+    fallback (also reverted) together let a stale, pre-restart secondary
+    frame - delivered as a burst the instant the integration starts
+    reading the serial port again - commit a blind straight to a wrong,
+    permanent state, since that old timer had no withdrawal of its own
+    to correct a guess nothing ever confirmed.
+
+    _handle_secondary_activity()/_clear_optimistic_secondary_move() is
+    the mechanism that replaced it, and until now each had only ever
+    been tested in isolation - never against this exact scenario end to
+    end. Simulates it directly: a position already restored from before
+    the restart (restore_state's own job, unrelated to either mechanism
+    and not re-tested here), one stale secondary frame with nothing ever
+    confirming it, then the withdrawal timeout firing with no primary
+    echo and no command of this entity's own having started either.
+    Confirms the worst case under the current design is a several-
+    second transient guess that clears itself - never a wrong state
+    left standing indefinitely, the way the old, withdrawn mechanism
+    did. No production code changed for this: the redesign that
+    replaced the old mechanism already closes this gap as a side
+    effect of never trusting an unconfirmed guess for longer than
+    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS; this test only makes
+    that confirmed rather than assumed.
+    """
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later",
+        MagicMock(return_value=MagicMock()),
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 70  # restored: mostly open
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_closing is True  # transient guess only
+    assert cover._attr_is_opening is False
+
+    # The primary identity's own echo never arrives for this stale frame
+    # - nothing physically moved - so only the withdrawal timeout fires.
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
+
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._optimistic_secondary_move_unsub is None
+
+
 # ---------------------------------------------------------------------------
 # async_set_cover_position(): the position slider in the UI. Chains into
 # async_open_cover()/async_close_cover() with _preserve_target=True so the
