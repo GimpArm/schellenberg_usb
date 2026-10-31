@@ -206,7 +206,7 @@ MAX_STOP_LEAD_PERCENT = 50.0
 # move. This timeout only covers the case that echo never arrives at all
 # (the same real-world RF loss this project's own debug logs have shown
 # happens occasionally) - long enough that a genuinely-landing-late echo
-# is not pre-empted, short enough that a wrong guess with nothing left to
+# is not preempted, short enough that a wrong guess with nothing left to
 # correct it does not stand for long. Tune here only; cover.py has no
 # literal of its own.
 OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS = 5.0

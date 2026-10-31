@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -2328,7 +2329,7 @@ async def test_clear_optimistic_secondary_move_withdraws_unconfirmed_guess(
     cover._optimistic_secondary_move_unsub = MagicMock()
     cover._position_update_task = None  # no real echo ever took over
 
-    cover._clear_optimistic_secondary_move(None)
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
 
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
@@ -2349,7 +2350,7 @@ async def test_clear_optimistic_secondary_move_leaves_real_tracking_alone(
     fake_task.cancelling.return_value = False
     cover._position_update_task = fake_task  # _handle_event() already took over
 
-    cover._clear_optimistic_secondary_move(None)
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
 
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
@@ -2384,7 +2385,7 @@ async def test_clear_optimistic_secondary_move_leaves_a_pending_command_alone(
     cover._optimistic_secondary_move_unsub = MagicMock()
     cover._position_update_task = None  # tracking hasn't started yet
 
-    cover._clear_optimistic_secondary_move(None)
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
 
     assert cover._attr_is_opening is True
     assert cover._attr_is_closing is False
