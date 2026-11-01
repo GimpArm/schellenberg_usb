@@ -192,6 +192,183 @@ STOP_COMMAND_LATENCY_SECONDS = 1.2
 # ceiling at all before).
 MAX_STOP_LEAD_PERCENT = 50.0
 
+# How many *additional* stop frames control_blind_stop() fires, as plain,
+# best-effort control_blind() writes with no lock and no ack-wait of their
+# own, once the primary, fully-serialized-and-acked stop above has already
+# been accepted by the stick. Exists because "accepted by the stick" is as
+# far as this integration can ever see: every transmit, stop included, is
+# logged with motor_result=unknown, since the stick only confirms it put
+# the frame on the air, never that the motor's receiver actually caught
+# it - this protocol has no end-to-end delivery confirmation at all, only
+# ever the one-hop stick ack already handled above. In most RF environments
+# that single frame is enough, which is why this integration has run on
+# exactly one stop frame since control_blind_stop() first existed. It is
+# not enough in a strong-RF-interference environment: a real six-blind
+# "close to an intermediate target" batch, run back to back through the
+# shared transmitter under exactly that kind of interference, left two of
+# the six still closing with no visible stop at all - not merely late,
+# which the contention-aware lead above already compensates for, but
+# missing outright, each riding on past its target all the way to its
+# physical end stop while every other blind in the same batch landed
+# close to target. A second stop frame is harmless if the first one
+# already landed - this blind is either already stopped, in which case
+# another stop is a no-op exactly like a second press of a physical
+# remote's own stop button, or a brand new move for the very same blind
+# has started in the meantime, in which case that move's own retry loop
+# (control_blind_with_retry()) is already serialized against this same
+# _move_lock and simply queues behind these extra writes for the ~1-2
+# transmit cycles they take, rather than racing them. Kept to one extra
+# frame, not several: each additional write still costs one more shared-
+# transmitter slot that every other blind in the same batch is queued
+# behind, so this is deliberately the smallest change that gives the
+# motor a second chance without meaningfully compounding the very
+# contention this exists alongside.
+STOP_COMMAND_EXTRA_RESENDS = 1
+
+# How long control_blind_stop() waits after its primary, acked stop before
+# firing each of the extra resends above, so they do not immediately
+# follow the first frame into what may be the same brief interference
+# window that cost it. Not tied to STOP_COMMAND_LATENCY_SECONDS - that
+# figure models a *delay already on the wire* (contention, transmit time),
+# this is a deliberately-introduced gap on an otherwise-idle transmitter,
+# a different thing being measured for a different reason. Short enough
+# that the blind has travelled only a negligible, sub-percent distance
+# past where the primary stop already landed it by the time the resend
+# goes out.
+STOP_COMMAND_RESEND_DELAY_SECONDS = 0.3
+
+# Mirrors STOP_COMMAND_EXTRA_RESENDS, for the same reason, for a move
+# (open/close) command instead of a stop: control_blind_with_retry() only
+# ever retries while the *stick* reports busy/no-reply, so once the stick
+# has accepted the write there was, before this, still exactly one frame
+# standing between "accepted" and the motor actually receiving it -  the
+# same zero-end-to-end-confirmation gap STOP_COMMAND_EXTRA_RESENDS exists
+# for, just on the move side rather than the stop side. Requested directly
+# (2026-10-31) once that asymmetry was pointed out: a user-maintained pair
+# of external scripts had been covering exactly this gap for move commands
+# (re-sending open/close ~0.3s later for RF reliability - see
+# _has_live_tracking_in_direction()'s own docstring in cover.py, written
+# for exactly that pattern) since before this integration had any answer
+# of its own for it.
+#
+# Not quite as unconditionally safe as the stop side's resend, and worth
+# being explicit about rather than silently assuming otherwise: a second
+# "stop" is always a no-op if the first already landed, but a second,
+# identical "open"/"close" landing after a *different*, genuine command
+# has since reached the motor - most plausibly a fast-following stop -
+# would restart it briefly in the original direction, undoing that stop
+# rather than merely repeating a no-op.
+#
+# Raised directly (2026-10-31) over exactly this, worried that a short
+# set_cover_position() leg (a target only a few percent away) would have
+# its own auto-stop-at-target fire inside this resend's own delay window
+# below and get undone by it, making positions in roughly that range
+# unreachable. Traced in full and confirmed that specific case cannot
+# happen: control_blind_with_retry() does not return to its caller - and
+# async_open_cover()/async_close_cover() do not set self._move_start_time
+# or start the tracking loop that could ever observe "target reached" -
+# until *after* this whole resend loop below has already finished (it is
+# awaited inline, before this function's own `return True`). A move's own
+# resend therefore always completes before that same move's own auto-stop
+# could possibly fire; there is nothing yet running to race.
+#
+# What this resend *can* still race is a stop for the same device_id
+# coming from a second, concurrent source: a brand new async_stop_cover()
+# call (UI, automation, Alexa's own "stop"), or the auto-stop-at-target
+# branch of an *earlier*, still-live move this call's own write was only
+# ever a redundant piggyback onto (is_redundant_resend - typically the
+# user's own external scripts' intentional double-send). Both already
+# call cancel_pending_move() for this exact device_id before anything
+# else - control_blind_with_retry() itself checks that signal before each
+# retry attempt, and (as of this same date) its post-accept resend loop
+# now checks it too, immediately before each write, skipping the resend
+# rather than letting it undo a stop requested in the meantime. See that
+# check's own comment at its call site for why the stop side's resend
+# does not need the same check.
+#
+# What that check cannot see is a stop that never goes through this
+# integration's own command path at all - a physical remote or a
+# Gurtwickler winder's own local buttons, observed here only as a passive
+# wire-level echo with no corresponding cancel_pending_move() call. That
+# case has no timing floor to bound it by (unlike a stop issued through
+# control_blind_stop(), which needs to acquire the lock, wait for the
+# transmitter to go idle, write, and get acked - comfortably more than
+# one full transmit cycle, ~1.1-1.2s per real logs) and is not closed by
+# anything in this module today. The residual window is the same kind of
+# accepted, documented trade-off STOP_COMMAND_EXTRA_RESENDS's own resend
+# already carries (there, colliding with a different blind's write; here,
+# racing an externally-originated stop for this same blind) - not a
+# defect introduced by adding this, just the same category of real-world
+# RF/timing uncertainty this whole module already has to live with.
+MOVE_COMMAND_EXTRA_RESENDS = 1
+
+# How long control_blind_with_retry() waits after its primary, acked move
+# write before firing each of the extra resends above - see
+# STOP_COMMAND_RESEND_DELAY_SECONDS's own comment for why this is not
+# tied to STOP_COMMAND_LATENCY_SECONDS, which applies here unchanged.
+# Kept equal to STOP_COMMAND_RESEND_DELAY_SECONDS deliberately: both
+# model the same kind of deliberately-introduced gap on an otherwise-idle
+# transmitter. Also still worth keeping short for the one case
+# MOVE_COMMAND_EXTRA_RESENDS's own comment above says this module cannot
+# actually close - an externally-originated (physical remote/Gurtwickler)
+# stop racing this resend has no floor to stay safely under, so the best
+# this delay can do for that case is simply not stay open any longer than
+# it has to; lengthening it would only widen that window for no offsetting
+# benefit, since the failure this resend targets (a single lost frame)
+# does not get any likelier to have happened the longer this waits.
+MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.3
+
+# How close cover.py's own elapsed-time position estimate must already be
+# to the edge it was heading toward (0 for closing, 100 for opening), AND
+# how close that same move's own *starting* position must have been to
+# the opposite edge, for a real STOPPED echo on an untargeted move
+# (_handle_event()'s EVENT_STOPPED branch, self._target_position already
+# None) to be treated as that move reaching its own physical end stop and
+# snapped the rest of the way to the exact value, rather than left at the
+# estimate as-is.
+#
+# An untargeted move - always a paired remote, a wall switch, or a
+# Gurtwickler winder's own local buttons, never this integration's own
+# async_open_cover()/async_close_cover(), which always set a 0/100
+# _target_position of their own first - has no intermediate target by
+# definition, so it can only end one of two ways: the motor runs to its
+# own mechanical limit, or something stops it part-way (most plausibly a
+# deliberate press of the remote's own stop button). Nothing in the
+# STOPPED echo itself says which one happened; this is the only signal
+# available to tell them apart. Real-world reports (2026-10-31): closing
+# this way consistently lands the estimate at 2%, opening at 98%, never
+# the exact 0/100 the motor physically reached - calibration's own
+# travel_time is necessarily an approximation of a real motor's, and the
+# two rarely agree to the second, so the *true* end stop almost never
+# lines up with elapsed time crossing exactly 0/100.
+#
+# Position alone is NOT enough to tell a genuine end stop apart from a
+# deliberate mid-travel stop, though: a first version of this check
+# assumed a deliberate stop would never land within a few percent of
+# either edge "by coincidence", which a direct user report immediately
+# disproved - nudging a blind open to a deliberately chosen 98% (open,
+# but intentionally not quite all the way) via the remote is exactly the
+# kind of real, intentional near-edge stop that assumption missed, and a
+# position-only check would snap it straight to 100% regardless, silently
+# overriding the position the stop button was actually pressed to reach.
+# Requiring the move to have also *started* within this same tolerance of
+# the opposite edge (_move_start_position - see its own clearing a few
+# lines below the check that reads it) closes that gap for exactly the
+# cases these real-world reports described: a deliberate nudge from some
+# other, non-edge position never satisfies it, while a genuine full-range
+# traversal (closed-to-open or open-to-closed) always does. It still
+# cannot tell a deliberate stop chosen a few percent short of full travel
+# *when that move also genuinely started from the opposite edge* (closing
+# all the way, then choosing to reopen to exactly 98%, say) apart from a
+# real end stop with the same drift - no further signal distinguishes
+# those two at the position/timing level available here - but it narrows
+# the false-positive window from "any near-edge stop" down to that one
+# specific, much rarer case. Kept comfortably above the reported 2% gap,
+# with headroom for other blinds' own calibration drift, while staying
+# far below any realistic deliberate stop position reached from a
+# non-edge start.
+NEAR_END_STOP_SNAP_TOLERANCE_PERCENT = 5
+
 # How long cover.py's own optimistic guess from a secondary identity's
 # frame (_handle_secondary_activity) is allowed to stand before it is
 # withdrawn if nothing ever confirms it. This exists because decoding a

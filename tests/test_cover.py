@@ -1786,6 +1786,31 @@ async def test_handle_event_started_moving_down_sets_closing_and_starts_tracking
     cover._start_position_tracking.assert_called_once_with()
 
 
+async def test_handle_event_started_moving_from_unknown_position_anchors_to_zero(
+    hass: HomeAssistant,
+) -> None:
+    """A move-start echo arriving while position is still None (e.g. right
+    after a restart with nothing restored - see async_added_to_hass()'s own
+    comment on why that can now happen) must not leave _move_start_position
+    None too: _update_position() refuses to track from a None baseline (its
+    own first guard), which would silently freeze tracking at "unknown"
+    forever, even once the blind is plainly moving. Mirrors async_open_
+    cover()'s/async_close_cover()'s identical guard for the same unknown
+    starting state on a Home Assistant-issued command.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_current_cover_position = None
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._move_start_position == 0
+    assert cover._attr_is_opening is True
+    cover._start_position_tracking.assert_called_once_with()
+
+
 async def test_handle_event_respects_invert_direction_for_the_physical_signal(
     hass: HomeAssistant,
 ) -> None:
@@ -1833,6 +1858,160 @@ async def test_handle_event_stopped_freezes_the_estimated_position(
     # remote), so the commanded target was never actually reached.
     assert cover._target_position is None
     cover._stop_position_tracking.assert_called_once_with()
+
+
+async def test_handle_event_stopped_cancels_any_pending_move_for_this_device(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every STOPPED echo cancels a pending move/resend for this device_id,
+    not only one this entity's own async_stop_cover() or the auto-stop-
+    at-target loop issued.
+
+    Closes the one source control_blind_with_retry()'s own cancellation
+    check (see MOVE_COMMAND_EXTRA_RESENDS's own comment in const.py)
+    cannot see on its own: a stop pressed directly on the physical remote
+    or a Gurtwickler winder's own local buttons, which never calls
+    cancel_pending_move() itself since it never goes through this
+    integration's own command path. cancel_pending_move() is a no-op
+    without a move actually in progress for this device_id (see its own
+    docstring) - this only proves _handle_event() calls it unconditionally,
+    the same way async_stop_cover()'s own identical first line does.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20
+
+    cover._handle_event(EVENT_STOPPED)
+
+    api.cancel_pending_move.assert_called_once_with(cover._command_device_id)
+
+
+async def test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_zero(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEAR_END_STOP_SNAP_TOLERANCE_PERCENT: calibration drift vs a real stop.
+
+    Real-world report (2026-10-31): closing a blind all the way via its
+    remote consistently left the estimate at 2% instead of 0%, every
+    time, regardless of how directly/quickly it was driven down - the
+    motor's own physical end stop does not line up exactly with elapsed
+    time crossing 0% once calibration's own travel_time is an
+    approximation of the real motor's, which it necessarily always is.
+    An untargeted move (_target_position already None, as every remote/
+    wall-switch/Gurtwickler-driven move always is - see EVENT_STARTED_
+    MOVING_DOWN's own handling) landing this close to the edge it was
+    already heading toward is this drift, not a deliberate mid-travel
+    stop - contrast test_handle_event_stopped_freezes_the_estimated_
+    position above, which proves a genuine mid-travel stop (far from
+    either edge, with a target still set) is correctly left exactly at
+    the raw estimate, un-snapped.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._move_start_time = clock()
+    cover._move_start_position = 100
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(19.6)  # 98% of the 20s close travel time: estimate lands
+    # at ~2% (1% once _update_position()'s int() truncates the
+    # binary-float result of 19.6/20.0*100 - either way, within tolerance)
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._attr_is_closed is True
+
+
+async def test_handle_event_stopped_snaps_a_near_full_targetless_open_to_100(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_
+    zero above, for the opening/98% side of the same real-world report.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 0
+    cover._move_start_time = clock()
+    cover._move_start_position = 0
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(19.6)  # 98% of the 20s open travel time: estimate lands at 98%
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._attr_is_closed is False
+
+
+async def test_handle_event_stopped_does_not_snap_a_near_full_open_started_mid_travel(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEAR_END_STOP_SNAP_TOLERANCE_PERCENT also requires the move to have
+    *started* near the opposite edge - see its own comment in const.py for
+    the direct user report that caught a first, position-only version of
+    this check. Starting at 20% (nowhere near the opposite edge, 0%) and
+    landing at a deliberately chosen 98% must be left exactly there, not
+    forced to 100% the way test_handle_event_stopped_snaps_a_near_full_
+    targetless_open_to_100 above - which starts at 0% - correctly is.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20  # not near the opposite edge (0%)
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(15.6)  # (98 - 20) / 100 * 20s: estimate lands at 98%
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 98
+    assert cover._attr_is_closed is False
+
+
+async def test_handle_event_stopped_does_not_snap_a_near_zero_close_started_mid_travel(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_handle_event_stopped_does_not_snap_a_near_full_open_
+    started_mid_travel above for the closing/near-zero side. Starting at
+    80% (nowhere near the opposite edge, 100%) and landing at a
+    deliberately chosen ~2% must be left there, not forced to 0%.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 80
+    cover._move_start_time = clock()
+    cover._move_start_position = 80  # not near the opposite edge (100%)
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(15.6)  # (80 - 2) / 100 * 20s: estimate lands at ~2%
+    # (1%, not 2%, once int() truncates the actual binary-float result -
+    # see the sibling snap-to-zero test's own comment above; either way,
+    # within tolerance, and the point here is that it stays un-snapped)
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 1
+    assert cover._attr_is_closed is False
 
 
 async def test_handle_event_stopped_logs_the_recalculated_position(
@@ -2650,7 +2829,7 @@ async def test_added_to_hass_restores_position_from_a_plain_closed_state(
     assert cover._attr_is_closed is True
 
 
-async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
+async def test_added_to_hass_leaves_position_unknown_when_nothing_was_restored(
     hass: HomeAssistant,
 ) -> None:
     """A brand-new entity with no prior Home Assistant state at all, and no
@@ -2658,6 +2837,14 @@ async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
     before that key existed, or via the hybrid add_shutter_from_remote
     workflow, which never calibrates) - see the sibling test right below
     for the case where that key *is* present.
+
+    Used to default to 0%/closed here - see this branch's own comment in
+    cover.py for the real-world report that traced "every blind on a hub
+    shows closed right after a Home Assistant restart, even ones that
+    were not actually closed" to exactly this fallback. Position/
+    is_closed are both already None from __init__, so leaving them
+    untouched is what actually reports "unknown" rather than a specific,
+    wrong answer.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)
@@ -2667,8 +2854,8 @@ async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
 
     await cover.async_added_to_hass()
 
-    assert cover._attr_current_cover_position == 0
-    assert cover._attr_is_closed is True
+    assert cover._attr_current_cover_position is None
+    assert cover._attr_is_closed is None
 
 
 async def test_added_to_hass_uses_calibration_ending_position_when_nothing_was_restored(

@@ -29,6 +29,8 @@ from .const import (
     CMD_TRANSMIT,
     CMD_UP,
     CMD_VERIFY,
+    MOVE_COMMAND_EXTRA_RESENDS,
+    MOVE_COMMAND_RESEND_DELAY_SECONDS,
     PAIRING_DEVICE_ENUM_START,
     PAIRING_TIMEOUT,
     SIGNAL_DEVICE_EVENT,
@@ -36,6 +38,8 @@ from .const import (
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
     STATUS_DISCOVERY_TIMEOUT,
+    STOP_COMMAND_EXTRA_RESENDS,
+    STOP_COMMAND_RESEND_DELAY_SECONDS,
     VERIFY_TIMEOUT,
 )
 from .identities import (
@@ -440,12 +444,63 @@ class SchellenbergUsbApi:
         # id used to let whichever blind's call ran its own first line most
         # recently silently overwrite an earlier, still-in-flight blind's
         # own claim to it.
-        self._moves_in_progress: set[str] = set()
-        # Device ids cancel_pending_move() has requested an end to; added
-        # only for a device_id already present in _moves_in_progress.
-        # control_blind_with_retry() checks this at each retry boundary and
-        # gives up (returns False) rather than writing again.
-        self._move_cancel_requested: set[str] = set()
+        #
+        # Each value is the set of this device_id's own currently in-flight
+        # calls' own identity tokens (a fresh object() per
+        # control_blind_with_retry() call, minted below) - not a plain
+        # membership set of device_ids, and not just a count either, for
+        # two compounding reasons. First, two genuinely concurrent
+        # control_blind_with_retry() calls for the *same* device_id (not
+        # two different blinds, already covered above - a very fast
+        # accidental double press of the same dashboard button, say,
+        # landing before the first call has returned) used to let whichever
+        # one finished first discard the device_id entirely in its own
+        # `finally`, even while the other was still genuinely in flight -
+        # so a cancel_pending_move() landing in that gap found nothing to
+        # cancel and silently no-opped for the call that was still running.
+        # A count fixed that (increment on entry, decrement in `finally`,
+        # only actually clearing the device_id once it reaches zero) - but
+        # a count can only say *how many* calls are in flight, never
+        # *which* ones, and cancel_pending_move() below needs exactly that
+        # to snapshot "cancel these specific calls" rather than "cancel
+        # whatever this device_id's count happens to cover" - see
+        # _move_cancel_requested's own comment below for the second,
+        # narrower bug that distinction was needed to close. Each call adds
+        # its own token here on entry and discards (only) that same token
+        # in its own `finally`, popping the device_id entirely once its set
+        # empties, so this dict never holds a stale, empty entry for a
+        # device with nothing genuinely in flight.
+        self._moves_in_progress: dict[str, set[object]] = {}
+        # Per device_id, the subset of that device's own _moves_in_progress
+        # tokens (above) that cancel_pending_move() had already snapshotted
+        # as "cancel these" at the moment it was called - never a token
+        # added to _moves_in_progress afterwards. This used to be a flat
+        # set[str] of device_ids, checked with plain membership: while at
+        # most one call could ever be in flight per device, "cancelled for
+        # this device" and "cancelled for whichever call that is" were the
+        # same thing. Once _moves_in_progress above gained a count to stop
+        # one of two concurrent same-device calls from discarding the
+        # device_id out from under the other, that single device-wide flag
+        # stayed pending until the *last* of the two actually exited - which
+        # an independent review then caught also reaching a brand new,
+        # unrelated third call for that same device_id that happened to
+        # start in the window after the first of the two had already
+        # exited but before the second had: that third call's own first
+        # check saw the still-pending flag and gave up before ever writing,
+        # even though cancel_pending_move() was never asked to cancel it.
+        # Fixed by snapshotting the specific tokens active at cancellation
+        # time instead of the device_id as a whole: a call registering its
+        # own token only afterwards is simply not in that snapshot, however
+        # long an earlier, genuinely-targeted sibling takes to actually
+        # exit. Checked by each call against its own token (peeked, not
+        # discarded - a cancellation is conceptually for the device, not
+        # for one arbitrarily-chosen call among the several it was
+        # snapshotted against), and cleared the same way as
+        # _moves_in_progress above: each call discards only its own token
+        # from its own device_id's entry in its own `finally`, popping the
+        # device_id entirely once nothing remains for it in either
+        # collection.
+        self._move_cancel_requested: dict[str, set[object]] = {}
         # True only between a move's write and learning its outcome;
         # _handle_message's t1/tE branches only touch _move_ack_result/
         # _move_ack_event while this is True, so they never fire for a t1/
@@ -1781,9 +1836,21 @@ class SchellenbergUsbApi:
         single shared "the one in-progress device", also means a second
         blind's own concurrent call can never make this check see the
         wrong device - see _moves_in_progress's own comment in __init__.
+
+        Snapshots this device_id's own currently in-flight call tokens
+        (there may be more than one - see _moves_in_progress's own comment
+        in __init__) into _move_cancel_requested at this exact moment,
+        rather than marking the device_id itself as cancelled: a call for
+        this same device_id that only starts *after* this method returns
+        gets its own, brand new token, which is simply never added here,
+        so it is unaffected no matter how long one of the calls actually
+        snapshotted here takes to notice and exit - see
+        _move_cancel_requested's own comment in __init__ for the bug this
+        closes.
         """
-        if device_id in self._moves_in_progress:
-            self._move_cancel_requested.add(device_id)
+        active = self._moves_in_progress.get(device_id)
+        if active:
+            self._move_cancel_requested.setdefault(device_id, set()).update(active)
 
     async def control_blind_with_retry(
         self,
@@ -1852,7 +1919,16 @@ class SchellenbergUsbApi:
         not preempted mid-wait, only picked up afterwards - in practice
         that wait almost always resolves within about 1.2s (one transmit
         cycle), not its full 5s budget, so the realistic worst case is
-        short.
+        short. Checked a second time, after this same loop has already
+        succeeded, right before each of MOVE_COMMAND_EXTRA_RESENDS' own
+        best-effort resends below - see that constant's own comment in
+        const.py for why a resend fired on its fixed schedule regardless
+        would otherwise be able to silently undo a stop requested for
+        this device in the meantime. Scoped to whichever calls for this
+        device_id are genuinely in flight at the moment
+        cancel_pending_move() is called, never to one that starts only
+        afterwards - see _move_cancel_requested's own comment in __init__
+        for the narrow bug that distinction closes.
         """
         if action not in (CMD_UP, CMD_DOWN):
             # CMD_STOP, or anything else, must never reach here - see the
@@ -1883,17 +1959,28 @@ class SchellenbergUsbApi:
         # actually held - cancel_pending_move() can then end this call even
         # while it is still only waiting for idle, before ever reaching the
         # lock, which is strictly more responsive than waiting for that.
-        # Added to the per-device set rather than assigned to a shared
-        # scalar, so a second blind's own concurrent call (driving several
-        # blinds together is this integration's whole point) can never
-        # clobber this one's own membership here - see this attribute's
-        # own comment in __init__.
-        self._moves_in_progress.add(device_id)
+        # A fresh token, not a shared scalar or a plain add() to a
+        # membership set, so cancel_pending_move() can tell this call apart
+        # from both a second blind's own concurrent call (driving several
+        # blinds together is this integration's whole point) and a second
+        # *same-device* concurrent call (see this attribute's own comment
+        # in __init__ for when that happens) - see _move_cancel_requested's
+        # own comment in __init__ for why identity, not just membership or
+        # a count, is what cancellation actually needs here.
+        move_call_token = object()
+        self._moves_in_progress.setdefault(device_id, set()).add(move_call_token)
         retry_deadline = time.monotonic() + MOVE_RETRY_OVERALL_TIMEOUT
         try:
             while True:
-                if device_id in self._move_cancel_requested:
-                    self._move_cancel_requested.discard(device_id)
+                if move_call_token in self._move_cancel_requested.get(device_id, ()):
+                    # Peeked, not discarded - see _move_cancel_requested's
+                    # own comment in __init__ for why: a second, concurrent
+                    # call for this same device_id may still be retrying
+                    # and must see its own cancellation too, not have it
+                    # consumed out from under it by whichever call happens
+                    # to check first. Cleared centrally in this method's
+                    # own `finally` below instead, once this specific call
+                    # actually exits.
                     return False
                 if time.monotonic() >= retry_deadline:
                     _LOGGER.warning(
@@ -1963,13 +2050,70 @@ class SchellenbergUsbApi:
                 finally:
                     self._move_lock.release()
                 if self._move_ack_result is True:
+                    # Mirrors control_blind_stop()'s own extra resend
+                    # after its primary stop is accepted - see
+                    # MOVE_COMMAND_EXTRA_RESENDS's own comment in
+                    # const.py for why this exists.
+                    #
+                    # Unlike the stop side's own version of this loop,
+                    # this one cannot rely on its caller awaiting the
+                    # whole call before anything else touches this same
+                    # device_id: async_open_cover()/async_close_cover()
+                    # do, but a *different* task for the very same device
+                    # - the background auto-stop-at-target loop, or a
+                    # brand new async_stop_cover() from the UI/Alexa -
+                    # can run concurrently and legitimately end this move
+                    # while this loop is still only sleeping between
+                    # writes (see control_blind_stop()'s own comment at
+                    # its mirror of this point for why that concern does
+                    # not apply symmetrically on its side). Both of those
+                    # already call cancel_pending_move() for exactly this
+                    # device_id before doing anything else - previously
+                    # only ever consulted at the top of the retry loop
+                    # above, never here, so a resend already past that
+                    # point had no way to learn a stop had just been
+                    # requested for the same device and would fire anyway,
+                    # silently undoing it a moment later. Checked fresh
+                    # before each write below, peeked rather than
+                    # discarded - same reasoning, and the same change, as
+                    # the retry loop's own check above.
+                    for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
+                        await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
+                        if move_call_token in self._move_cancel_requested.get(
+                            device_id, ()
+                        ):
+                            break
+                        await self.control_blind(
+                            device_enum, action, device_id=device_id, source=source
+                        )
                     return True
                 # False (busy) or None (no reply at all, treated the
                 # same way - see the docstring) - retry, after the same
                 # brief pause send_command()'s own retry uses.
                 await asyncio.sleep(0.1)
         finally:
-            self._moves_in_progress.discard(device_id)
+            # Discard only this call's own token, not every token this
+            # device_id has - see _moves_in_progress's own comment in
+            # __init__ for why identity, not just a count, is what this
+            # needs. Popping the device_id entirely once its set is empty
+            # keeps this dict from accumulating stale, empty entries for
+            # devices with nothing genuinely in flight any more; the same
+            # discard-then-pop-if-empty applies to this call's own token in
+            # _move_cancel_requested, so a sibling call still genuinely in
+            # flight for this same device_id keeps seeing its own
+            # cancellation for as long as it is itself still live, with no
+            # regard for whether this call's own token happened to be
+            # cancelled too.
+            still_in_progress = self._moves_in_progress.get(device_id)
+            if still_in_progress is not None:
+                still_in_progress.discard(move_call_token)
+                if not still_in_progress:
+                    self._moves_in_progress.pop(device_id, None)
+            still_cancelled = self._move_cancel_requested.get(device_id)
+            if still_cancelled is not None:
+                still_cancelled.discard(move_call_token)
+                if not still_cancelled:
+                    self._move_cancel_requested.pop(device_id, None)
 
     async def control_blind_stop(
         self,
@@ -2091,6 +2235,32 @@ class SchellenbergUsbApi:
             finally:
                 self._move_lock.release()
             if self._move_ack_result is True:
+                # The stick has accepted this stop - as far as this
+                # integration can ever observe, it is done (motor_result
+                # stays unknown either way; see STOP_COMMAND_EXTRA_
+                # RESENDS's own comment in const.py for why that one-hop
+                # ack is not the same as knowing the motor caught it).
+                # Fire the configured number of extra, best-effort frames
+                # before returning - each a plain control_blind() write
+                # with no lock and no ack-wait of its own, exactly the
+                # unlocked write the give-up fallback below already uses,
+                # just taken proactively here instead of only once giving
+                # up. Done synchronously, inside this same call, so there
+                # is no window for a new move on this same device_id to
+                # start in between and race a resend fired later from the
+                # background - the caller (async_stop_cover(), or the
+                # auto-stop-at-target branch) awaits this whole method
+                # before touching this device_id again. Position tracking
+                # is unaffected: it is read only after this method
+                # returns (see async_stop_cover()'s own docstring), so the
+                # small, fixed delay below is folded into the estimate
+                # exactly like any other stop latency already is, not
+                # left unaccounted for.
+                for _ in range(STOP_COMMAND_EXTRA_RESENDS):
+                    await asyncio.sleep(STOP_COMMAND_RESEND_DELAY_SECONDS)
+                    await self.control_blind(
+                        device_enum, CMD_STOP, device_id=device_id, source=source
+                    )
                 return True
             await asyncio.sleep(0.1)
         _LOGGER.warning(

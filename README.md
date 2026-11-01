@@ -432,6 +432,43 @@ an update.
 > entities this integration already creates. Names, entity IDs, and travel
 > times below are examples — replace them with your own.
 
+> [!IMPORTANT]
+> As of the version adding `MOVE_COMMAND_EXTRA_RESENDS`/`STOP_COMMAND_EXTRA_RESENDS`
+> (see `CHANGELOG.md`), the integration itself already re-sends a lost
+> open/close command once, re-sends a lost stop command once, and already
+> widens its own stop-call timing when it detects another blind's command
+> using the radio at that moment — the same reliability problems the two
+> scripts below were written to work around. The scripts below have
+> therefore had their own, now-redundant copies of the first two removed:
+> - The double-send behind `min_fahrzeit_doppel` (open/close sent twice,
+>   0.3s apart, for a long enough move) is gone — the integration now does
+>   this for you on every open/close call.
+> - The conditional stop retry (wait up to 3s for the entity to actually
+>   report stopped, resend `stop_cover` once if it didn't by then) is gone
+>   too — the integration now resends a lost stop command on its own.
+>
+> If you're still running an older copy of either script with these still
+> in place, replace it with the version below, or remove the pieces
+> yourself: the `if: dauer >= min_fahrzeit_doppel` block (and the
+> then-unused `min_fahrzeit_doppel` variable) in each open/close branch,
+> and the `wait_template`/conditional retry right after the first
+> `stop_cover` call. Until you do, running both the old script-side safety
+> net and the integration's own new one at once is harmless, not just
+> wasteful — `cover.py`'s own `_has_live_tracking_in_direction()` already
+> tolerates a redundant open/close resend without disturbing position
+> tracking, by design, from before this integration-side fix existed, and
+> a redundant stop is harmless the same way a manual double-press of a
+> physical stop button would be.
+>
+> `stop_latenz`'s fixed margin and the integration's own widening are a
+> different pair, solving the same queueing problem differently rather
+> than one superseding the other, so this one is unchanged below: the
+> integration only adds its own margin when contention is actually
+> detected at that moment, so it is normally more precise than a fixed
+> margin applied every time. Try lowering `stop_latenz` (or setting it to
+> `0`) after upgrading, and raise it again only if you still see overshoot
+> when commanding several blinds together.
+
 This setup gives you two extra things on top of the integration's own cover
 entities:
 
@@ -472,7 +509,6 @@ switch it to YAML mode, and paste in everything from `alias:` down.
 | `helfer` | The number helper for this blind, from step 1 |
 | `auf` | Measured seconds for a full **opening** run |
 | `ab` | Measured seconds for a full **closing** run |
-| `min_fahrzeit_doppel` | Optional, in seconds (default `3`): below this travel duration, the redundant second `open_cover`/`close_cover` send is skipped entirely — see the note below |
 | `stop_latenz` | Optional, in seconds (default `1.3`): for an intermediate (not 0/100) target, how much earlier than the calculated time `stop_cover` is called, to absorb it sitting queued behind other blinds' own commands before it actually transmits — see the note below |
 | `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
 
@@ -492,7 +528,6 @@ interne_rollladenlogik_fuer_home_assistant:
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
         f_ab: "{{ ab | float(25) }}"
-        min_fahrzeit_doppel: "{{ min_fahrzeit_doppel | default(3) | float(3) }}"
         stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
         richtung_runter: "{{ soll > ist }}"
         dauer: >
@@ -514,28 +549,16 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.open_cover
               target:
                 entity_id: "{{ entity }}"
-            # start_ts is captured HERE, after the first open_cover call,
-            # not before the choose block above. open_cover only returns
-            # once the integration's control_blind_with_retry() has
-            # actually gotten the command onto the wire - and when several
-            # blinds are being driven together, that call can itself sit
-            # waiting its turn for the one shared RF transmitter. Capturing
+            # start_ts is captured HERE, after the open_cover call, not
+            # before the choose block above. open_cover only returns once
+            # the integration's control_blind_with_retry() has actually
+            # gotten the command onto the wire - and when several blinds
+            # are being driven together, that call can itself sit waiting
+            # its turn for the one shared RF transmitter. Capturing
             # start_ts before this call would wrongly count that wait as
             # travel time, making the later timed stop_cover fire early.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
-            - if:
-                - condition: template
-                  value_template: "{{ dauer >= min_fahrzeit_doppel }}"
-              then:
-                - delay:
-                    hours: 0
-                    minutes: 0
-                    seconds: 0.3
-                    milliseconds: 0
-                - action: cover.open_cover
-                  target:
-                    entity_id: "{{ entity }}"
         - conditions:
             - condition: template
               value_template: "{{ richtung_runter }}"
@@ -546,18 +569,6 @@ interne_rollladenlogik_fuer_home_assistant:
             # See the comment in the open_cover branch above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
-            - if:
-                - condition: template
-                  value_template: "{{ dauer >= min_fahrzeit_doppel }}"
-              then:
-                - delay:
-                    hours: 0
-                    minutes: 0
-                    seconds: 0.3
-                    milliseconds: 0
-                - action: cover.close_cover
-                  target:
-                    entity_id: "{{ entity }}"
     - variables:
         rest_dauer: |
           {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
@@ -575,17 +586,6 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-            - wait_template: "{{ not is_state(entity, 'closing') and not is_state(entity, 'opening') }}"
-              timeout:
-                seconds: 3
-              continue_on_timeout: true
-            - if:
-                - condition: template
-                  value_template: "{{ wait.completed == false }}"
-              then:
-                - action: cover.stop_cover
-                  target:
-                    entity_id: "{{ entity }}"
         - conditions:
             - condition: template
               value_template: "{{ soll | int == 0 or soll | int == 100 }}"
@@ -616,7 +616,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
         f_ab: "{{ ab | float(25) }}"
-        min_fahrzeit_doppel: "{{ min_fahrzeit_doppel | default(3) | float(3) }}"
         stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
         reset_richtung_runter: "{{ soll >= 50 }}"
         richtung_runter: |
@@ -657,18 +656,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             # (Script A) above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
-            - if:
-                - condition: template
-                  value_template: "{{ dauer >= min_fahrzeit_doppel }}"
-              then:
-                - delay:
-                    hours: 0
-                    minutes: 0
-                    seconds: 0.3
-                    milliseconds: 0
-                - action: cover.open_cover
-                  target:
-                    entity_id: "{{ entity }}"
         - conditions:
             - condition: template
               value_template: "{{ richtung_runter }}"
@@ -680,18 +667,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             # (Script A) above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
-            - if:
-                - condition: template
-                  value_template: "{{ dauer >= min_fahrzeit_doppel }}"
-              then:
-                - delay:
-                    hours: 0
-                    minutes: 0
-                    seconds: 0.3
-                    milliseconds: 0
-                - action: cover.close_cover
-                  target:
-                    entity_id: "{{ entity }}"
     - variables:
         rest_dauer: |
           {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
@@ -710,17 +685,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-            - wait_template: "{{ not is_state(entity, 'closing') and not is_state(entity, 'opening') }}"
-              timeout:
-                seconds: 3
-              continue_on_timeout: true
-            - if:
-                - condition: template
-                  value_template: "{{ wait.completed == false }}"
-              then:
-                - action: cover.stop_cover
-                  target:
-                    entity_id: "{{ entity }}"
         - conditions:
             - condition: template
               value_template: "{{ (soll | int == 0 or soll | int == 100) or (soll == ist) }}"
@@ -840,23 +804,14 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
 - The 0–100 scale used above is this helper's own convention (0 = open, 100
   = closed) and is independent of the position this integration tracks
   internally on the real `cover.*` entity — the two don't need to match.
-- Both scripts send `open_cover`/`close_cover` twice, 0.3 seconds apart, as
-  a small safety margin in case a single RF command is missed — but only
-  when the calculated move takes at least `min_fahrzeit_doppel` seconds
-  (default 3; override it per call if a blind needs a different cutoff).
-  `open_cover`/`close_cover` on this integration's own `cover.*` entity wait
-  for the stick's reply before returning, and retry for as long as it
-  answers busy, so neither send is always instant. For a short move, that
-  pair of sends plus the gap between them can alone take longer than the
-  whole intended travel time — the blind would already be past its target
-  before the script even starts counting down the rest of the wait.
-  Skipping the second send below the threshold keeps short moves precise;
-  moves at or above it keep the extra safety margin.
 - `start_ts` and the second `rest_dauer` (recomputed right after the
   open/close `choose:` block, replacing the first, rougher estimate) measure
-  how much time the sends above actually took, rather than assuming a fixed
-  value — this corrects for whatever the stick's reply/retry time turned out
-  to be, on top of the threshold logic above.
+  how much time the open/close call above actually took, rather than
+  assuming a fixed value — this corrects for whatever the stick's
+  reply/retry time turned out to be: `open_cover`/`close_cover` on this
+  integration's own `cover.*` entity wait for the stick's reply before
+  returning, and retry for as long as it answers busy, so neither call is
+  always instant.
 - `stop_latenz` (default `1.3`, in seconds) shortens that same `rest_dauer`
   further, but only for an intermediate target — one that still needs an
   explicit `stop_cover` below, rather than driving into an end stop. A
@@ -866,9 +821,9 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   using the radio at the same time — during which the blind keeps moving
   under its already-issued open/close command. Calling `stop_cover`
   `stop_latenz` seconds earlier leaves that much headroom to absorb a
-  delayed send before it would otherwise overshoot the target. Like the
-  double-send threshold above, this is a fixed, worst-case-ish margin, not
-  a measurement of the delay actually happening on any given run: raise it
+  delayed send before it would otherwise overshoot the target. This is a
+  fixed, worst-case-ish margin, not a measurement of the delay actually
+  happening on any given run: raise it
   if you regularly command several blinds at once and still see overshoot;
   lower it toward `0` if your blinds are almost always moved one at a time
   and you would rather have the extra precision than the margin. Either

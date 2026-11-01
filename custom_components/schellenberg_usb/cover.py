@@ -48,6 +48,7 @@ from .const import (
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     MAX_STOP_LEAD_PERCENT,
+    NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
@@ -632,6 +633,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_current_cover_position = (
                     self._initial_position_from_calibration
                 )
+                self._attr_is_closed = self._attr_current_cover_position == 0
                 _LOGGER.debug(
                     "No previous state for %s (%s); using the position "
                     "calibration actually ended at: %d%%",
@@ -640,14 +642,38 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     self._attr_current_cover_position,
                 )
             else:
-                self._attr_current_cover_position = 0
+                # Truly nothing to go on: no restored Home Assistant state,
+                # and this is not a freshly (re)calibrated blind either -
+                # used to default to 0% (closed) here, the same anchor
+                # async_open_cover()/async_close_cover() fall back to when
+                # a command starts moving a blind from this same unknown
+                # state (see their own, identical guard, and _handle_
+                # event()'s newly added mirror of it for the remote/
+                # Gurtwickler-driven path below). Unlike those, nothing is
+                # actually moving yet at this point - the blind is simply
+                # sitting idle - so asserting 0% asserted one specific,
+                # confident position (closed) that was not actually known
+                # to be true. Real-world report (2026-10-31): every blind
+                # on a hub showing closed immediately after a Home
+                # Assistant restart, for blinds that were not actually
+                # closed - traced to exactly this branch, on a restart
+                # where Home Assistant's own restored state was not
+                # available for any of them (self._attr_current_cover_
+                # position and self._attr_is_closed are both already None
+                # from __init__, so leaving them untouched here reports
+                # the entity's state as unknown, which it genuinely is,
+                # instead of a specific wrong answer). This is not a
+                # regression in tracking once the blind actually moves -
+                # the same 0% anchor is still used, just deferred to the
+                # moment a move actually starts and the elapsed-time math
+                # genuinely needs a numeric baseline to count from, by
+                # whichever path starts it first.
                 _LOGGER.debug(
-                    "No previous state for %s (%s); defaulting position to "
-                    "0%% (closed)",
+                    "No previous state for %s (%s); leaving position "
+                    "unknown until the next confirmed move",
                     self._device_name,
                     self._device_id,
                 )
-            self._attr_is_closed = self._attr_current_cover_position == 0
 
         if fresh_calibration:
             self._position_source_kind = "calibration"
@@ -971,7 +997,27 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 # applied at the one remaining path that reaches a fresh
                 # move without going through either of them.
                 self._target_position = None
-            previous_position = self._attr_current_cover_position
+            if self._attr_current_cover_position is None:
+                # Mirrors async_open_cover()'s/async_close_cover()'s own
+                # identical guard for a Home Assistant-issued command
+                # starting from this same unknown state (see their own
+                # comments) - needed here too now that async_added_to_
+                # hass() can leave position genuinely unknown instead of
+                # asserting 0% while idle (see its own comment). A move
+                # is actually starting now, and _update_position() needs
+                # a concrete numeric baseline to count elapsed time from;
+                # unlike while idle, there is no option here to simply
+                # report "unknown" and leave it there, since nothing else
+                # would ever set a real value afterwards either.
+                self._attr_current_cover_position = 0
+            # Explicitly int | None, matching the attribute's own
+            # declared type (see __init__) rather than letting mypy
+            # infer a narrower `int` from this branch alone just because
+            # the guard above happens to rule out None here - the EVENT_
+            # STOPPED branch below assigns this same local from the same
+            # attribute without any such guard, which a narrower
+            # inferred type here would then wrongly reject there.
+            previous_position: int | None = self._attr_current_cover_position
             physical_up = event == EVENT_STARTED_MOVING_UP
             logical_opening = physical_up != self._invert_direction
             _LOGGER.info(
@@ -1000,6 +1046,29 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             )
             self._start_position_tracking()
         elif event == EVENT_STOPPED:
+            # First, before any other statement - same reasoning as
+            # async_stop_cover()'s own identical first line. This status
+            # echo is this entity's own ground truth that the motor has
+            # genuinely stopped, from *whatever* source: a Home Assistant-
+            # issued stop, the auto-stop-at-target loop, or - the one case
+            # neither of those cover - a press directly on the physical
+            # remote or a Gurtwickler winder's own local buttons, which
+            # never goes through this integration's own command path at
+            # all and so never calls cancel_pending_move() on its own.
+            # Without this, a move's own best-effort resend (control_
+            # blind_with_retry(), see MOVE_COMMAND_EXTRA_RESENDS's own
+            # comment in const.py) had no way to learn that an externally-
+            # originated stop had just landed for this same device and
+            # would fire its resend anyway on its own fixed schedule,
+            # silently restarting the motor right after a legitimate stop.
+            # A no-op whenever no move/resend is actually in progress for
+            # this device_id (see cancel_pending_move()'s own docstring),
+            # which is the ordinary case for most STOPPED events - in
+            # particular, calibration's own status-frame capture never
+            # goes through control_blind_with_retry() at all (it uses
+            # control_blind_exclusive() instead), so this adds nothing to
+            # that flow beyond a guaranteed no-op check.
+            self._api.cancel_pending_move(self._command_device_id)
             previous_position = self._attr_current_cover_position
             self._position_source_kind = "primary status"
             self._position_confirmed_since_restart = True
@@ -1026,6 +1095,50 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_current_cover_position = max(
                     0, min(100, self._attr_current_cover_position)
                 )
+                if (
+                    self._target_position is None
+                    and self._move_start_position is not None
+                    and (
+                        (
+                            self._attr_is_closing
+                            and self._attr_current_cover_position
+                            <= NEAR_END_STOP_SNAP_TOLERANCE_PERCENT
+                            and self._move_start_position
+                            >= 100 - NEAR_END_STOP_SNAP_TOLERANCE_PERCENT
+                        )
+                        or (
+                            self._attr_is_opening
+                            and self._attr_current_cover_position
+                            >= 100 - NEAR_END_STOP_SNAP_TOLERANCE_PERCENT
+                            and self._move_start_position
+                            <= NEAR_END_STOP_SNAP_TOLERANCE_PERCENT
+                        )
+                    )
+                ):
+                    # An untargeted move (always a remote/wall-switch/
+                    # Gurtwickler-winder press - see NEAR_END_STOP_SNAP_
+                    # TOLERANCE_PERCENT's own comment in const.py) landing
+                    # this close to the edge it was already heading toward
+                    # is only treated as calibration drift against a real
+                    # physical end stop - and snapped the rest of the way -
+                    # when it *also* started this same move from near
+                    # enough the opposite edge to plausibly be a genuine
+                    # full-range traversal (self._move_start_position,
+                    # still set at this point - see its own clearing a few
+                    # lines below). A first version of this check used
+                    # position alone, which a direct user report (2026-
+                    # 10-31) caught also snapping a deliberately chosen
+                    # near-edge stop - e.g. nudging a blind open to a
+                    # chosen 98% from some other, non-edge position -
+                    # straight to 100%, silently overriding the exact
+                    # position the remote's own stop button was pressed
+                    # to reach. A move that did not start near the
+                    # opposite edge is left exactly at its raw elapsed-
+                    # time estimate instead, same as any other mid-travel
+                    # stop.
+                    self._attr_current_cover_position = (
+                        0 if self._attr_is_closing else 100
+                    )
                 self._attr_is_closed = self._attr_current_cover_position == 0
             self._attr_is_opening = False
             self._attr_is_closing = False
