@@ -549,14 +549,6 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.open_cover
               target:
                 entity_id: "{{ entity }}"
-            # start_ts is captured HERE, after the open_cover call, not
-            # before the choose block above. open_cover only returns once
-            # the integration's control_blind_with_retry() has actually
-            # gotten the command onto the wire - and when several blinds
-            # are being driven together, that call can itself sit waiting
-            # its turn for the one shared RF transmitter. Capturing
-            # start_ts before this call would wrongly count that wait as
-            # travel time, making the later timed stop_cover fire early.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
@@ -566,7 +558,6 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.close_cover
               target:
                 entity_id: "{{ entity }}"
-            # See the comment in the open_cover branch above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
@@ -652,8 +643,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.open_cover
               target:
                 entity_id: "{{ entity }}"
-            # See the comment in interne_rollladenlogik_fuer_home_assistant
-            # (Script A) above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
@@ -663,8 +652,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.close_cover
               target:
                 entity_id: "{{ entity }}"
-            # See the comment in interne_rollladenlogik_fuer_home_assistant
-            # (Script A) above - same reason.
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
