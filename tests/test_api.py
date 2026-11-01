@@ -994,7 +994,7 @@ async def test_control_blind_with_retry_returns_false_when_the_write_itself_fail
 
 
 async def test_control_blind_with_retry_serializes_two_blinds_instead_of_racing(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The actual bug fix: two blinds commanded together must queue, not race.
 
@@ -1010,7 +1010,16 @@ async def test_control_blind_with_retry_serializes_two_blinds_instead_of_racing(
     write: blind B's call below must not reach the wire at all until blind
     A's first attempt has learned its outcome ("t1"), not merely until A
     has finished writing.
+
+    MOVE_COMMAND_EXTRA_RESENDS disabled: this test is about lock ordering
+    between two different calls, not about the resend mechanism, which
+    fires its own extra write on a real, unpatched delay (see its own
+    comment in const.py) and would otherwise land unpredictably among the
+    exact write counts/payloads this test pins down below - either stalling
+    the test's own zero-delay event-loop pumping (the resend's real sleep
+    never resolves within it) or racing B's own write for the same slot.
     """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     task_a = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
     )
@@ -1084,7 +1093,7 @@ async def test_control_blind_with_retry_wakes_promptly_on_connection_lost(
 
 
 async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The stop-vs-stop collision fix: two blinds stopped together must queue.
 
@@ -1096,7 +1105,11 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
     control_blind_stop() closes this by sharing _move_lock (see its own
     docstring), so blind B's write must not reach the wire at all until
     blind A's first attempt has learned its outcome.
+
+    STOP_COMMAND_EXTRA_RESENDS disabled - see the mirrored move-side test's
+    own comment on why: this test pins down lock ordering, not the resend.
     """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
     task_a = asyncio.ensure_future(
         connected_api.control_blind_stop("10", device_id="AAAAAA")
     )
@@ -1294,7 +1307,7 @@ def _blind_payload(enum: str, action: str) -> bytes:
 
 
 async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression for the real log: a stop must not wait out another
     blind's own already-queued move.
@@ -1308,7 +1321,14 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     close's whole ~1.1-1.2s transmit cycle). Priority (see _PriorityLock)
     fixes this: once the wire actually clears, a waiting stop goes before
     a waiting move, regardless of which one asked for the lock earlier.
+
+    Both resend counts disabled - this test pins down the exact payload of
+    each of the two writes below (the stop's, then B's move), which either
+    resend would otherwise land an unplanned extra write among, on a real
+    delay this test's zero-delay pumping below cannot resolve.
     """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     # Some other transmission is already in flight - stands in for this
     # same blind's own just-fired move in the real log.
     connected_api._handle_message("t1")
@@ -1447,7 +1467,7 @@ async def test_control_blind_exclusive_returns_true_on_a_silent_ack_timeout(
 
 
 async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression guard for audit finding 7.
 
@@ -1465,7 +1485,17 @@ async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
     CHANGELOG.md's v1.3.0 entry), reproduced here with a real
     control_blind_with_retry() call standing in for blind A's own
     in-flight move.
+
+    MOVE_COMMAND_EXTRA_RESENDS disabled: without it, A's own resend (fired
+    on a real, unpatched delay once its "t1" below is handled) can land
+    its own extra write during the same real time the `wait_for(task_a,
+    ...)` below is already letting elapse, so by the time this test
+    checks for B's write, the count has jumped straight past the exact
+    value it polls for - B's write did happen, just not at the count this
+    test would otherwise observe it at. control_blind_exclusive() (B's own
+    call) has no resend of its own and is unaffected either way.
     """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     task_a = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
     )
