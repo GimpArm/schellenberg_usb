@@ -108,7 +108,8 @@
           "description": "Saisissez les durées complètes d'ouverture et de fermeture mesurées.",
           "data": {
             "open_time_seconds": "Durée d'ouverture",
-            "close_time_seconds": "Durée de fermeture"
+            "close_time_seconds": "Durée de fermeture",
+            "initial_state": "Quel est l'état actuel du volet ?"
           },
           "submit": "Enregistrer"
         },
@@ -214,10 +215,12 @@
         "invalid_status_identities": "Saisissez chaque identité de statut supplémentaire sous la forme ID_appareil/énumération, séparée par des virgules ou de nouvelles lignes (par exemple F2B8D5/23).",
         "status_identity_incomplete": "Saisissez les deux champs de statut principal ou laissez-les tous les deux vides.",
         "status_discovery_unavailable": "La clé USB n'est pas connectée. Reconnectez-la et réessayez.",
-        "status_discovery_busy": "Un autre enregistrement de trames est déjà en cours. Attendez qu'il soit terminé et réessayez."
+        "status_discovery_busy": "Un autre enregistrement de trames est déjà en cours. Attendez qu'il soit terminé et réessayez.",
+        "calibration_capture_busy": "Un autre volet utilise déjà l'enregistrement de trames partagé. Attendez qu'il soit terminé et réessayez."
       },
       "abort": {
         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",
+        "pairing_interrupted_by_disconnect": "L'appairage a été interrompu car la connexion à la clé USB a été réinitialisée ou rechargée en attendant une réponse (par exemple, par l'ajout ou la modification d'un autre volet, ou par un redémarrage de Home Assistant). Veuillez réessayer.",
         "pairing_failed": "Échec de l'appairage de l'appareil.",
         "reconfigure_successful": "La configuration de l'appareil a été mise à jour avec succès",
         "command_test_successful": "Le test de commande du moteur a réussi.",
@@ -228,7 +231,6 @@
   "options": {
     "step": {
       "init": {
-        "title": "Schellenberg USB",
         "description": "Modifiez le chemin du port série pour le hub USB Schellenberg.",
         "data": {
           "serial_port": "Port série"

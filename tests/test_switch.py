@@ -280,3 +280,48 @@ async def test_added_to_hass_wires_up_the_status_update_signal(
     assert switch._was_available is True
     switch.async_write_ha_state.assert_called()  # type: ignore[attr-defined]
     await hass.async_block_till_done()
+
+
+async def test_added_to_hass_does_not_race_the_restore_against_a_concurrent_reconnect(
+    hass: HomeAssistant,
+) -> None:
+    """Regression for audit finding 19: a brief, self-correcting LED flicker.
+
+    async_get_last_state() suspends this coroutine - if the stick's own
+    connect() finished while it was suspended, the status-update signal
+    it fires used to reach a dispatcher subscription that was already
+    registered *before* this await, so _handle_status_update() restored
+    the hardware state from self._is_on while that was still __init__'s
+    hardcoded False default - sending one wrong command (here, a
+    spurious led_off()) immediately before this method's own restore,
+    just below the suspension point, sent the correct one (led_on(), the
+    real stored preference). Simulates that exact interleaving: the
+    signal fires from inside async_get_last_state() itself, before it
+    returns the real "on" state.
+    """
+    api = MagicMock()
+    api.is_connected = True
+    api.led_on = AsyncMock(return_value=True)
+    api.led_off = AsyncMock(return_value=True)
+    switch = _build_switch(hass, api)
+
+    async def racing_get_last_state() -> State:
+        # The concurrent reconnect: fires the signal this entity will -
+        # pre-fix, already does - listen for, before returning the
+        # stored state, then lets any resulting background task run.
+        async_dispatcher_send(hass, SIGNAL_STICK_STATUS_UPDATED)
+        await hass.async_block_till_done()
+        return State(switch.entity_id, "on")
+
+    switch.async_get_last_state = racing_get_last_state  # type: ignore[method-assign]
+
+    await switch.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    assert switch.is_on is True
+    assert switch._was_available is True
+    # Before the fix, this was awaited once too, with self._is_on still
+    # False - immediately followed by the correct led_on() below once
+    # async_added_to_hass() resumed and restored the real preference.
+    api.led_off.assert_not_awaited()
+    api.led_on.assert_awaited_once_with()

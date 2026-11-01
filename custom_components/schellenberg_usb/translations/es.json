@@ -108,7 +108,8 @@
           "description": "Introduzca los tiempos completos de apertura y cierre medidos.",
           "data": {
             "open_time_seconds": "Tiempo de apertura",
-            "close_time_seconds": "Tiempo de cierre"
+            "close_time_seconds": "Tiempo de cierre",
+            "initial_state": "¿Cómo está la persiana actualmente?"
           },
           "submit": "Guardar"
         },
@@ -214,10 +215,12 @@
         "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_dispositivo/enum, separada por comas o líneas nuevas (por ejemplo F2B8D5/23).",
         "status_identity_incomplete": "Introduzca ambos campos de estado principal o déjelos ambos en blanco.",
         "status_discovery_unavailable": "La memoria USB no está conectada. Vuelva a conectarla e inténtelo de nuevo.",
-        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo."
+        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo.",
+        "calibration_capture_busy": "Otra persiana ya está utilizando la grabación de tramas compartida. Espere a que finalice e inténtelo de nuevo."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",
+        "pairing_interrupted_by_disconnect": "El emparejamiento se interrumpió porque la conexión con el stick USB se reinició o se recargó mientras se esperaba una respuesta (por ejemplo, al añadir o editar otra persiana, o al reiniciar Home Assistant). Por favor, inténtelo de nuevo.",
         "pairing_failed": "Error en el emparejamiento del dispositivo.",
         "reconfigure_successful": "La configuración del dispositivo se ha actualizado correctamente",
         "command_test_successful": "La prueba de comando del motor se ha realizado correctamente.",
@@ -228,7 +231,6 @@
   "options": {
     "step": {
       "init": {
-        "title": "Schellenberg USB",
         "description": "Edite la ruta del puerto serie para el hub USB Schellenberg.",
         "data": {
           "serial_port": "Puerto serie"

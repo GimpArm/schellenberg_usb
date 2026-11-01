@@ -208,7 +208,7 @@ _RUNTIME_TRANSLATION_TEXT: dict[str, dict[str, str]] = {
         "device_model_motor": (
             "USB-Stick-Motor (Befehl {command_device_id}/{command_enum}, "
             "primärer Status {primary_status_text}, "
-            "sekundäre Status {secondary_count})"
+            "sekundärer Status {secondary_count})"
         ),
         "command_not_sent": "der Befehl wurde nicht gesendet",
         "block_disconnected": "der USB-Stick ist nicht verbunden",
@@ -743,7 +743,6 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "completed": "abgeschlossen",
         "cancelled": "abgebrochen",
         "capture_timeout_complete": "Erfassungszeit abgelaufen",
-        "superseded_by_calibration": "durch Kalibrierung ersetzt",
         "opening_start_timeout": "Zeitüberschreitung beim Start des Öffnens",
         "opening_stop_timeout": "Zeitüberschreitung beim Stopp des Öffnens",
         "opening_cancelled": "Öffnen abgebrochen",
@@ -810,7 +809,6 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "completed": "completada",
         "cancelled": "cancelada",
         "capture_timeout_complete": "tiempo de captura agotado",
-        "superseded_by_calibration": "sustituida por una calibración",
         "opening_start_timeout": "tiempo de espera agotado al iniciar la apertura",
         "opening_stop_timeout": "tiempo de espera agotado al detener la apertura",
         "opening_cancelled": "apertura cancelada",
@@ -877,7 +875,6 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "completed": "terminé",
         "cancelled": "annulé",
         "capture_timeout_complete": "délai de capture écoulé",
-        "superseded_by_calibration": "remplacée par un calibrage",
         "opening_start_timeout": "délai dépassé au début de l'ouverture",
         "opening_stop_timeout": "délai dépassé à l'arrêt de l'ouverture",
         "opening_cancelled": "ouverture annulée",

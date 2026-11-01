@@ -37,6 +37,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_CLOSE_TIME,
     CONF_COMMAND_DEVICE_ID,
     CONF_COMMAND_ENUM,
+    CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_STATUS_DEVICE_ID,
@@ -90,6 +91,12 @@ def make_flow(hass: HomeAssistant) -> Any:
     flow.hass = hass
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
+    # control_blind_exclusive() is what the developer-tools test-open/
+    # close/stop steps and the post-teach open+stop test actually call
+    # (audit finding 7) - control_blind itself stays mocked too, since
+    # this same api spy backs tests of other flow steps that still call
+    # it directly.
+    api.control_blind_exclusive = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.manual_sync_position = MagicMock(return_value=True)
     api.teach_motor = AsyncMock(return_value=True)
@@ -131,7 +138,7 @@ async def test_developer_command_open_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_open()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_UP, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -144,7 +151,7 @@ async def test_developer_command_close_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_close()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_DOWN, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -157,7 +164,7 @@ async def test_developer_command_stop_success(hass: HomeAssistant) -> None:
 
     result = await flow.async_step_test_stop()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_STOP, device_id=DEVICE_ID, source="developer_tools"
     )
     assert result["type"] is FlowResultType.MENU
@@ -175,7 +182,7 @@ async def test_developer_command_respects_invert_direction(
 
     await flow.async_step_test_open()
 
-    flow._api.control_blind.assert_awaited_once_with(
+    flow._api.control_blind_exclusive.assert_awaited_once_with(
         DEVICE_ENUM, CMD_DOWN, device_id=DEVICE_ID, source="developer_tools"
     )
 
@@ -198,10 +205,16 @@ async def test_developer_command_blocked_when_transmit_blocked(
 async def test_developer_command_failed_when_control_blind_returns_false(
     hass: HomeAssistant,
 ) -> None:
-    """control_blind() refusing the write must be reported, not silently dropped."""
+    """control_blind_exclusive() refusing the write must be reported, not
+    silently dropped - this step actually calls control_blind_exclusive()
+    (audit finding 7), not control_blind() directly; overriding the latter
+    here was dead as of that fix, since make_flow()'s own default
+    control_blind_exclusive (return_value=True) was what this step's write
+    still actually resolved against.
+    """
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
-    flow._api.control_blind = AsyncMock(return_value=False)
+    flow._api.control_blind_exclusive = AsyncMock(return_value=False)
 
     result = await flow.async_step_test_open()
 
@@ -277,26 +290,55 @@ async def test_calibrate_proceeds_when_subentry_is_well_formed(
 # --- Manual position sync (set_position_open/closed/manual) ---------------
 
 
-async def test_set_position_open_confirms_position(hass: HomeAssistant) -> None:
+async def test_set_position_open_confirms_position(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
+    update_subentry = MagicMock()
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_update_subentry", update_subentry
+    )
 
     result = await flow.async_step_set_position_open()
 
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 100)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 100%" in flow._developer_notice
+    # Also persisted as the blind's durable startup fallback, not just
+    # applied to the live entity - see CONF_INITIAL_POSITION's own comment
+    # in cover.py and _async_manual_position_sync()'s in config_flow.py.
+    update_subentry.assert_called_once()
+    _, update_kwargs = update_subentry.call_args
+    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 100
+    # The persisted update is a full copy of the subentry's existing data
+    # (data = dict(subentry.data)) with just this one key added, not a
+    # partial dict - confirmed here by checking that an unrelated field
+    # make_subentry() already set (CONF_OPEN_TIME) actually survived, since
+    # nothing else in this test would otherwise catch a regression to a
+    # partial/merge-only dict that happened to still get CONF_INITIAL_
+    # POSITION right.
+    assert update_kwargs["data"][CONF_OPEN_TIME] == 20.0
 
 
-async def test_set_position_closed_confirms_position(hass: HomeAssistant) -> None:
+async def test_set_position_closed_confirms_position(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
+    update_subentry = MagicMock()
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_update_subentry", update_subentry
+    )
 
     result = await flow.async_step_set_position_closed()
 
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 0)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 0%" in flow._developer_notice
+    update_subentry.assert_called_once()
+    _, update_kwargs = update_subentry.call_args
+    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 0
 
 
 async def test_set_position_manual_shows_form_with_last_known_default(
@@ -313,28 +355,47 @@ async def test_set_position_manual_shows_form_with_last_known_default(
     assert result["description_placeholders"]["current_position"] == "42%"
 
 
-async def test_set_position_manual_applies_given_position(hass: HomeAssistant) -> None:
+async def test_set_position_manual_applies_given_position(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
+    update_subentry = MagicMock()
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_update_subentry", update_subentry
+    )
 
     result = await flow.async_step_set_position_manual(user_input={"position": 37})
 
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 37)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 37%" in flow._developer_notice
+    update_subentry.assert_called_once()
+    _, update_kwargs = update_subentry.call_args
+    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 37
 
 
 async def test_manual_position_sync_reports_unregistered_when_sync_fails(
-    hass: HomeAssistant,
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unregistered live cover entity must be reported, not silently dropped."""
+    """An unregistered live cover entity must be reported, not silently dropped.
+
+    Also proves the new subentry persistence added alongside this method
+    (see the two tests above) does not run on this failure path - nothing
+    was actually confirmed, so nothing should be written as if it had been.
+    """
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())
     flow._api.manual_sync_position = MagicMock(return_value=False)
+    update_subentry = MagicMock()
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_update_subentry", update_subentry
+    )
 
     await flow.async_step_set_position_open()
 
     assert "live cover entity is not registered" in flow._developer_notice
+    update_subentry.assert_not_called()
 
 
 # --- Teach motor / activate USB transmitter --------------------------------
@@ -378,7 +439,7 @@ async def test_teach_motor_success_sends_teach_open_stop(
     flow._api.teach_motor.assert_awaited_once_with(
         DEVICE_ENUM, device_id=DEVICE_ID, source="developer_tools"
     )
-    assert flow._api.control_blind.await_count == 2
+    assert flow._api.control_blind_exclusive.await_count == 2
     assert result["type"] is FlowResultType.MENU
     assert "please verify that the motor actually reacted" in flow._developer_notice
 
