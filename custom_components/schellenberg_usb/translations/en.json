@@ -108,7 +108,8 @@
           "description": "Enter the measured full opening and closing times.",
           "data": {
             "open_time_seconds": "Open time",
-            "close_time_seconds": "Close time"
+            "close_time_seconds": "Close time",
+            "initial_state": "What is the shutter's current state?"
           },
           "submit": "Save"
         },

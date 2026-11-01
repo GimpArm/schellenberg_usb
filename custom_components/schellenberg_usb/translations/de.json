@@ -108,7 +108,8 @@
           "description": "Geben Sie die gemessenen vollständigen Öffnungs- und Schließzeiten ein.",
           "data": {
             "open_time_seconds": "Öffnungszeit",
-            "close_time_seconds": "Schließzeit"
+            "close_time_seconds": "Schließzeit",
+            "initial_state": "Wie ist der aktuelle Zustand des Rollladens?"
           },
           "submit": "Speichern"
         },

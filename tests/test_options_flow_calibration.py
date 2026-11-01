@@ -85,6 +85,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_CLOSE_TIME,
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
+    CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_SECONDARY_STATUS_IDENTITIES,
@@ -713,6 +714,18 @@ async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
     # blind ended up closed - args are
     # (entity_id, open_time, close_time, ending_position).
     assert signals[0][3] == 0
+    # Recalibrating an already-paired blind now also refreshes
+    # CONF_INITIAL_POSITION, the durable startup fallback (see that
+    # constant's own comment in cover.py, and the comment on this same key
+    # in options_flow_calibration.py's data_updates dict). Before this fix,
+    # this path only ever corrected the blind's *live* position via the
+    # SIGNAL_CALIBRATION_COMPLETED hand-off just asserted on above (
+    # signals[0][3]), leaving this persisted fallback stuck at whatever an
+    # earlier pairing had left (or nothing at all) - exactly the gap a
+    # real-world report (2026-11-01) traced a mix of "Unbekannt"/correctly-
+    # restored blinds on one hub back to. Same ending_position as the live
+    # hand-off above, for the same reason.
+    assert updated.data[CONF_INITIAL_POSITION] == 0
 
 
 async def test_choosing_open_advances_to_the_close_instruction_form(
@@ -831,6 +844,12 @@ async def test_close_leg_first_then_open_leg_ends_at_open_position(
     assert len(signals) == 1
     assert signals[0][0] == DEVICE_ID
     assert signals[0][3] == 100
+    # Mirror of the CONF_INITIAL_POSITION assertion in test_recalibrating_
+    # persists_new_times_and_notifies_the_live_entity above, for this test's
+    # own close-leg-first/ends-open order - see that assertion's comment for
+    # why this persistence matters. Same ending_position as the live
+    # hand-off (signals[0][3]) just above.
+    assert updated.data[CONF_INITIAL_POSITION] == 100
 
 
 def _build_bare_handler(

@@ -108,7 +108,8 @@
           "description": "Introduzca los tiempos completos de apertura y cierre medidos.",
           "data": {
             "open_time_seconds": "Tiempo de apertura",
-            "close_time_seconds": "Tiempo de cierre"
+            "close_time_seconds": "Tiempo de cierre",
+            "initial_state": "¿Cómo está la persiana actualmente?"
           },
           "submit": "Guardar"
         },

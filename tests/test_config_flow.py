@@ -910,7 +910,11 @@ async def test_manual_times_leads_into_discover_status(
 
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"],
-        user_input={CONF_OPEN_TIME_SECONDS: 30.0, CONF_CLOSE_TIME_SECONDS: 28.0},
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "open",
+        },
     )
 
     assert result["type"] is FlowResultType.FORM
@@ -978,7 +982,11 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"],
-        user_input={CONF_OPEN_TIME_SECONDS: 30.0, CONF_CLOSE_TIME_SECONDS: 28.0},
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "closed",
+        },
     )
     assert result["step_id"] == "discover_status"
 
@@ -992,6 +1000,13 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The hybrid workflow's manual_times branch had no way at all to reach
+    # CONF_INITIAL_POSITION before this fix - unlike its calibration_close
+    # sibling (test_pair_device_calibration_choosing_closed_sets_initial_
+    # position_closed and its "open" counterpart), nothing here ever drove
+    # the blind through a real leg to confirm an end stop, so this is the
+    # person's own direct "closed" answer, not a measured one.
+    assert result["data"][CONF_INITIAL_POSITION] == 0
     assert result["title"] == "New Blind"
     assert result["data"][CONF_OPEN_TIME] == 30.0
     assert result["data"][CONF_CLOSE_TIME] == 28.0
@@ -1000,6 +1015,156 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     assert len(entry.subentries) == 1
     created = next(iter(entry.subentries.values()))
     assert created.unique_id == DEVICE_ID
+
+
+async def test_manual_times_to_discover_status_creates_entry_with_open_initial_position(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror of test_manual_times_to_discover_status_creates_entry_directly
+    above, which only ever drove the "closed" -> CONF_INITIAL_POSITION == 0
+    side of async_step_manual_times()'s initial_state mapping through to a
+    real CREATE_ENTRY. test_manual_times_leads_into_discover_status submits
+    "open" too, but only ever asserted the step transition, never the
+    resulting entry data - so a regression that mis-mapped only the "open"
+    branch (to anything other than 100, while leaving "closed" -> 0 intact)
+    would have passed every other manual_times test undetected. This test
+    closes that gap, mirroring test_pair_device_calibration_choosing_open_
+    sets_initial_position_open's equivalent coverage for the calibration_
+    close sibling.
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": DEVICE_ID,
+                    "enum": DEVICE_ENUM,
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _start_pairing_flow(hass, entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"test_direction": "open"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"motor_moved": True}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "open",
+        },
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INITIAL_POSITION] == 100
+
+
+async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror of options_flow_calibration.py's own test for calibration_close's
+    identical "unselected" placeholder guard
+    (test_submitting_without_a_real_choice_shows_an_error_and_stays_on_the_form
+    in test_options_flow_calibration.py) - manual_times's own initial_state
+    field reuses the same selector/translation_key and must reject the same
+    highlighted-but-unchosen submission the same way, since a silent
+    "closed" default here would be exactly the kind of unverified position
+    this whole fallback exists to avoid.
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _start_pairing_flow(hass, entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"test_direction": "open"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"motor_moved": True}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "unselected",
+        },
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "manual_times"
+    assert result["errors"] == {"base": "initial_state_required"}
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "closed",
+        },
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "discover_status"
 
 
 async def test_discover_status_unavailable_shows_an_error(
@@ -1767,6 +1932,12 @@ async def test_developer_tools_set_position_open_and_closed_sync_without_sending
         assert len(written(connected_api)) == before
         assert result["description_placeholders"] is not None
         assert str(expected_position) in result["description_placeholders"]["result"]
+        # Also persisted as this blind's durable startup fallback (not
+        # just applied to the live entity, which this test never even sets
+        # up) - re-read from entry.subentries rather than the original
+        # `blind` reference, which an update replaces rather than mutates.
+        updated_subentry = entry.subentries[blind.subentry_id]
+        assert updated_subentry.data[CONF_INITIAL_POSITION] == expected_position
 
 
 async def test_developer_tools_set_position_manual_accepts_an_exact_value(
@@ -1797,6 +1968,8 @@ async def test_developer_tools_set_position_manual_accepts_an_exact_value(
     assert result["step_id"] == "developer_tools"
     assert result["description_placeholders"] is not None
     assert "42" in result["description_placeholders"]["result"]
+    updated_subentry = entry.subentries[blind.subentry_id]
+    assert updated_subentry.data[CONF_INITIAL_POSITION] == 42
 
 
 async def test_developer_tools_teach_motor_success_sends_teach_open_and_stop(

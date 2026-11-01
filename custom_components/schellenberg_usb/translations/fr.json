@@ -108,7 +108,8 @@
           "description": "Saisissez les durées complètes d'ouverture et de fermeture mesurées.",
           "data": {
             "open_time_seconds": "Durée d'ouverture",
-            "close_time_seconds": "Durée de fermeture"
+            "close_time_seconds": "Durée de fermeture",
+            "initial_state": "Quel est l'état actuel du volet ?"
           },
           "submit": "Enregistrer"
         },

@@ -470,13 +470,18 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._travel_time_close: float = device_data_dict.get(
             CONF_CLOSE_TIME, DEFAULT_TRAVEL_TIME_SECONDS
         )
-        # Set only on a subentry created fresh from a pair_device calibration
-        # that measured which end stop the blind actually ended at (see
-        # options_flow_calibration.py's calibration_close step). None for
-        # every blind paired before this field existed and for the hybrid
-        # (add_shutter_from_remote) workflow, which never calibrates - the
-        # "nothing to restore" branch of async_added_to_hass() below falls
-        # back to 0 (closed) in both of those cases, as it always did.
+        # This blind's own persisted CONF_INITIAL_POSITION startup fallback -
+        # set whenever any setup or confirmation path has recorded a known
+        # position: a pair_device or hybrid "Add shutter from remote"
+        # calibration (options_flow_calibration.py's calibration_close
+        # step), that same hybrid workflow's manual_times sub-path (its own
+        # direct open/closed answer, not a measured one), recalibrating an
+        # already-paired blind, or confirming a position via Developer
+        # Tools' "Set position" sync (config_flow.py). None only for a
+        # blind paired before this field existed, or under an older code
+        # revision that predated one of the paths above gaining it - see
+        # the "nothing to restore" branch of async_added_to_hass() below
+        # for what happens in that case (not a 0%/closed default).
         self._initial_position_from_calibration: int | None = device_data_dict.get(
             CONF_INITIAL_POSITION
         )

@@ -603,6 +603,24 @@ class CalibrationFlowHandler:
             data_updates: dict[str, Any] = {
                 CONF_OPEN_TIME: round(self._open_time, 2),
                 CONF_CLOSE_TIME: round(self._close_time, 2),
+                # Recalibrating an already-paired blind used to correct
+                # only its *live* position (via the SIGNAL_CALIBRATION_
+                # COMPLETED/_handle_calibration_completed hand-off above -
+                # unchanged by this addition) without ever refreshing this
+                # persisted fallback, unlike a fresh pairing's own "create
+                # subentry" branch a few lines above, which always has.
+                # That meant a blind recalibrated today still had nothing
+                # but Home Assistant's own, separately-volatile restore
+                # state to fall back on at the next startup where that
+                # restore state happens to come up empty - the exact gap
+                # a real-world report (2026-11-01) traced a mix of
+                # "Unbekannt"/correctly-restored blinds on one hub back
+                # to: the "Unbekannt" ones had all been calibrated before
+                # CONF_INITIAL_POSITION existed at all, and recalibrating
+                # them under current code still would not have persisted
+                # anything for next time. Now it does, the same ending_
+                # position already computed above for the live hand-off.
+                CONF_INITIAL_POSITION: ending_position,
             }
             if calibration_record := self._calibration_record():
                 data_updates[CONF_LAST_CALIBRATION] = calibration_record

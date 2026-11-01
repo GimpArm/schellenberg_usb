@@ -32,6 +32,7 @@ from .const import (
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
+    CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
     CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
@@ -326,6 +327,15 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._status_discovery_updates_existing = False
         self._pending_open_time: float | None = None
         self._pending_close_time: float | None = None
+        # Only ever set by async_step_manual_times() - the one pairing
+        # route with no live calibration leg to derive a real ending
+        # position from (see that step's own comment), so this is the
+        # person's own direct statement of where the blind is sitting
+        # right now, not something Home Assistant just confirmed by
+        # driving it there. Read back as CONF_INITIAL_POSITION's startup
+        # fallback the same way a real calibration's ending position is -
+        # see that constant's own comment in cover.py.
+        self._pending_initial_position: int | None = None
         self._pending_invert_direction = False
         self._pairing_workflow = "legacy"
         # The direction chosen on the test_motor form (see
@@ -450,6 +460,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         assert self._pending_open_time is not None
         assert self._pending_close_time is not None
+        # The only route into this method is async_step_manual_times()'s
+        # success branch (via discover_status()/confirm_status_discovery()'s
+        # fresh-pairing branch - there is no other caller), which now
+        # requires an explicit initial_state answer before it ever lets a
+        # person past it, same as _pending_open_time/_pending_close_time
+        # just above.
+        assert self._pending_initial_position is not None
         data: dict[str, Any] = {
             CONF_BLIND_ID: self._pending_blind_id,
             # Legacy command keys stay populated for backward compatibility.
@@ -463,6 +480,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             ),
             CONF_OPEN_TIME: self._pending_open_time,
             CONF_CLOSE_TIME: self._pending_close_time,
+            CONF_INITIAL_POSITION: self._pending_initial_position,
             CONF_INVERT_DIRECTION: self._pending_invert_direction,
         }
         if (
@@ -696,11 +714,38 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def async_step_manual_times(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Collect travel times after a successful paired command test."""
+        """Collect travel times and current position after a successful motor test.
+
+        Unlike the calibration_close/open_instruction/close_instruction
+        route (options_flow_calibration.py), nothing here actually drives
+        the blind through a measured leg to a confirmed end stop - the
+        person is just typing in numbers they already know. So the
+        initial_state answer collected here cannot mean "whichever leg
+        ran second" the way it does for a live calibration; it is read
+        directly as the blind's current position instead, same two-option
+        required select (reusing that step's own translation_key so no
+        new strings are needed) and the same explicit-error-instead-of-a-
+        silent-default handling as that step, for the same reason: a
+        pairing with this field just silently defaulted to "closed" would
+        be exactly the kind of unverified, possibly-wrong position this
+        whole CONF_INITIAL_POSITION fallback exists to avoid.
+        """
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
-            self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
-            return await self.async_step_discover_status()
+            initial_state = user_input.get("initial_state")
+            if initial_state == "open":
+                pending_initial_position: int | None = 100
+            elif initial_state == "closed":
+                pending_initial_position = 0
+            else:
+                pending_initial_position = None
+                errors["base"] = "initial_state_required"
+
+            if not errors:
+                self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
+                self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
+                self._pending_initial_position = pending_initial_position
+                return await self.async_step_discover_status()
 
         return self.async_show_form(
             step_id="manual_times",
@@ -722,8 +767,16 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),
+                    vol.Required("initial_state"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=["unselected", "open", "closed"],
+                            mode=selector.SelectSelectorMode.LIST,
+                            translation_key="initial_state",
+                        )
+                    ),
                 }
             ),
+            errors=errors,
         )
 
     async def async_step_name_device(
@@ -1201,6 +1254,27 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         if synced:
             self._developer_notice = _runtime_translation_text(
                 self.hass, "notice_position_confirmed", position=position
+            )
+            # Also persist this confirmation as the blind's durable startup
+            # fallback - the same CONF_INITIAL_POSITION a calibration run
+            # leaves behind (see that constant's own comment in cover.py).
+            # api.manual_sync_position() above only ever reaches the
+            # already-loaded live entity (dispatcher signal -> cover.py's
+            # _handle_manual_position_sync()), which writes real Home
+            # Assistant state but nothing to this blind's own subentry
+            # data - so without this, a manual confirmation here was only
+            # ever as durable as Home Assistant's own, separately-volatile
+            # restore state, same gap this pass already closed for the
+            # Calibrate option. async_update_subentry() (not _and_abort -
+            # this step deliberately returns to the same developer_tools
+            # menu below rather than ending the flow) takes a full
+            # replacement dict, so it starts from the subentry's own
+            # current data rather than data_updates's merge-on-top.
+            subentry = self._get_reconfigure_subentry()
+            data = dict(subentry.data)
+            data[CONF_INITIAL_POSITION] = position
+            self.hass.config_entries.async_update_subentry(
+                self._get_entry(), subentry, data=data
             )
         else:
             self._developer_notice = _runtime_translation_text(
