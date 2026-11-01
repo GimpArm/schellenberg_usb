@@ -1969,7 +1969,8 @@ class SchellenbergUsbApi:
         # a count, is what cancellation actually needs here.
         move_call_token = object()
         self._moves_in_progress.setdefault(device_id, set()).add(move_call_token)
-        retry_deadline = time.monotonic() + MOVE_RETRY_OVERALL_TIMEOUT
+        requested_at = time.monotonic()
+        retry_deadline = requested_at + MOVE_RETRY_OVERALL_TIMEOUT
         try:
             while True:
                 if move_call_token in self._move_cancel_requested.get(device_id, ()):
@@ -2034,6 +2035,15 @@ class SchellenbergUsbApi:
                     if not sent:
                         self._move_awaiting_ack = False
                         return False
+                    # Snapshotted here, logged only below once this same
+                    # write is confirmed accepted - not every attempt that
+                    # merely transmitted and then got bounced "tE" (busy).
+                    # A busy-retry sequence can genuinely reach this line
+                    # more than once per call; only the figure for the
+                    # attempt that actually succeeds is reported, so this
+                    # always logs exactly once per call, for the real,
+                    # final wait - not once per attempt.
+                    transmit_wait = time.monotonic() - requested_at
                     try:
                         await asyncio.wait_for(
                             self._move_ack_event.wait(), timeout=MOVE_ACK_TIMEOUT
@@ -2050,6 +2060,15 @@ class SchellenbergUsbApi:
                 finally:
                     self._move_lock.release()
                 if self._move_ack_result is True:
+                    _LOGGER.info(
+                        "Move command transmitting after waiting %.3fs for "
+                        "the shared transmitter source=%s device_id=%s "
+                        "action=%s",
+                        transmit_wait,
+                        source,
+                        device_id or "unknown",
+                        action,
+                    )
                     # Mirrors control_blind_stop()'s own extra resend
                     # after its primary stop is accepted - see
                     # MOVE_COMMAND_EXTRA_RESENDS's own comment in
@@ -2177,7 +2196,8 @@ class SchellenbergUsbApi:
         because holding _move_lock guarantees no move can be in its own
         write-and-await-ack phase at the same time.
         """
-        deadline = time.monotonic() + STOP_RETRY_BUDGET
+        requested_at = time.monotonic()
+        deadline = requested_at + STOP_RETRY_BUDGET
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2205,6 +2225,15 @@ class SchellenbergUsbApi:
                 if not sent:
                     self._move_awaiting_ack = False
                     return False
+                # Snapshotted here, logged only below once this same write
+                # is confirmed accepted - not every attempt that merely
+                # transmitted and then got bounced "tE" (busy). A
+                # busy-retry sequence can genuinely reach this line more
+                # than once per call; only the figure for the attempt that
+                # actually succeeds is reported, so this always logs
+                # exactly once per call, for the real, final wait - not
+                # once per attempt.
+                transmit_wait = time.monotonic() - requested_at
                 # Bounded by whatever is left of STOP_RETRY_BUDGET, not
                 # unconditionally the full MOVE_ACK_TIMEOUT - lock
                 # contention from another near-simultaneous blind command
@@ -2235,6 +2264,13 @@ class SchellenbergUsbApi:
             finally:
                 self._move_lock.release()
             if self._move_ack_result is True:
+                _LOGGER.info(
+                    "Stop command transmitting after waiting %.3fs for the "
+                    "shared transmitter source=%s device_id=%s",
+                    transmit_wait,
+                    source,
+                    device_id or "unknown",
+                )
                 # The stick has accepted this stop - as far as this
                 # integration can ever observe, it is done (motor_result
                 # stays unknown either way; see STOP_COMMAND_EXTRA_

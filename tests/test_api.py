@@ -748,6 +748,114 @@ async def test_control_blind_with_retry_sends_an_extra_resend_after_being_accept
     assert len(written(connected_api)) == 2
 
 
+async def test_control_blind_with_retry_logs_the_transmitter_wait_before_writing(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The new log line must report a real, measured wait, not a fixed
+    ~0s regardless of what actually happened.
+
+    Added directly from a real log where a blind's own reported
+    overshoot past its target traced back to exactly this wait - time
+    spent queued behind another blind's own transmission before this
+    call's primary write could go out at all - previously only
+    reconstructable by hand-diffing two separate, unrelated log lines
+    rather than visible on its own. Mirrors test_control_blind_stop_
+    logs_the_transmitter_wait_before_writing below for the stop side.
+
+    Resend disabled - irrelevant to this log line, which fires once,
+    before the primary write, and disabling it keeps this test from
+    paying MOVE_COMMAND_RESEND_DELAY_SECONDS' own real delay for
+    nothing.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    connected_api._handle_message("t1")  # wire busy with another transmission
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert written(connected_api) == []
+
+    await asyncio.sleep(0.05)  # a real, measurable wait on the busy wire
+
+    connected_api._handle_message("t0")  # wire clears
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Move command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert wait_records[0].levelno == logging.INFO
+    assert "device_id=ABCDEF" in wait_records[0].message
+    assert "action=" in wait_records[0].message
+    logged_wait = float(wait_records[0].message.split("waiting ")[1].split("s for")[0])
+    assert logged_wait >= 0.04
+
+
+async def test_control_blind_with_retry_logs_exactly_once_despite_a_busy_bounce(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A "tE" busy bounce before eventual acceptance must produce exactly
+    one log line, not one per attempt.
+
+    Independent review of the sibling test above found that the log it
+    covers originally sat inside the retry loop itself - before the write
+    on every iteration that reached one, not only the one that ultimately
+    succeeded - so a busy bounce (exactly the real-world contention this
+    diagnostic exists to surface, see the six-blind log cited in
+    CHANGELOG.md) could log once per attempt, with a growing wait each
+    time, for what the CHANGELOG already described as a single logical
+    call. Fixed by snapshotting the wait into a local right after the
+    write that is confirmed accepted, and only emitting the log once
+    self._move_ack_result actually reads True for that same attempt. This
+    drives a genuine "tE"-then-accept sequence - not a mocked stand-in -
+    and confirms exactly one line comes out despite two real writes.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` would not actually yield to the event loop -
+        # see test_control_blind_with_retry_retries_on_busy_with_no_attempt_
+        # limit's own comment on this exact pitfall.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("tE")  # first attempt bounced busy
+    await _run_until(lambda: len(written(connected_api)) == 2)  # retried
+
+    connected_api._handle_message("t1")  # second attempt accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Move command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert "device_id=ABCDEF" in wait_records[0].message
+
+
 async def test_control_blind_with_retry_skips_the_resend_once_a_stop_is_requested(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1223,6 +1331,101 @@ async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
     # stop writes for the same device, since control_blind() itself never
     # waits for or reacts to a reply (see its own docstring).
     assert len(written(connected_api)) == 2
+
+
+async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The new log line must report a real, measured wait, not a fixed
+    ~0s regardless of what actually happened.
+
+    Added directly from a real log (2026-11-01): a kitchen blind's own
+    dashboard-reported "closed to ~25%" overshot by several percent, and
+    diffing two unrelated, pre-existing log lines by hand (the script's
+    own "Stopping cover" call versus this method's first real transmit)
+    showed up to ~1.1s spent queued behind other blinds' own
+    transmissions in a six-blind batch before this call's primary write
+    went out at all - a real, measured delay with no prior log line of
+    its own to show it directly.
+
+    Resend disabled - irrelevant to this log line, which fires once,
+    before the primary write, and disabling it keeps this test from
+    paying STOP_COMMAND_RESEND_DELAY_SECONDS' own real delay for
+    nothing.
+    """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    connected_api._handle_message("t1")  # wire busy with another transmission
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert written(connected_api) == []
+
+    await asyncio.sleep(0.05)  # a real, measurable wait on the busy wire
+
+    connected_api._handle_message("t0")  # wire clears
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary stop is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Stop command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert wait_records[0].levelno == logging.INFO
+    assert "device_id=AAAAAA" in wait_records[0].message
+    logged_wait = float(wait_records[0].message.split("waiting ")[1].split("s for")[0])
+    assert logged_wait >= 0.04
+
+
+async def test_control_blind_stop_logs_exactly_once_despite_a_busy_bounce(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirrors test_control_blind_with_retry_logs_exactly_once_despite_a_
+    busy_bounce above, for this method's own identical fix: a "tE" bounce
+    before eventual acceptance must produce exactly one log line, not one
+    per attempt. See that test's own docstring for the independent review
+    finding this guards against.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("tE")  # first attempt bounced busy
+    await _run_until(lambda: len(written(connected_api)) == 2)  # retried
+
+    connected_api._handle_message("t1")  # second attempt accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Stop command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert "device_id=AAAAAA" in wait_records[0].message
 
 
 async def test_control_blind_stop_falls_back_to_a_plain_write_when_the_lock_is_busy(

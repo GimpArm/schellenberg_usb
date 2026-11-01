@@ -523,6 +523,8 @@ interne_rollladenlogik_fuer_home_assistant:
   sequence:
     - condition: template
       value_template: "{{ ziel | int != states(helfer) | int }}"
+    - delay:
+        milliseconds: "{{ range(0, 300) | random }}"
     - variables:
         soll: "{{ ziel | float(0) }}"
         ist: "{{ states(helfer) | float(0) }}"
@@ -602,6 +604,8 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
   mode: parallel
   max: 12
   sequence:
+    - delay:
+        milliseconds: "{{ range(0, 300) | random }}"
     - variables:
         soll: "{{ ziel | float(0) }}"
         ist: "{{ states(helfer) | float(0) }}"
