@@ -29,6 +29,7 @@ from custom_components.schellenberg_usb.const import (
     DOMAIN,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
+    SUBENTRY_TYPE_HUB,
 )
 from custom_components.schellenberg_usb.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -247,6 +248,43 @@ async def test_device_diagnostics_matches_the_right_blind_among_several(
 
     assert result["name"] == "Kitchen"
     assert result["command_device_id"] == "BBBBBB"
+
+
+async def test_device_diagnostics_returns_the_hub_sticks_state(
+    hass: HomeAssistant, connected_api: SchellenbergUsbApi
+) -> None:
+    """Regression for audit finding 10: the hub (USB stick) is registered
+    as its own device, tied to its own SUBENTRY_TYPE_HUB subentry rather
+    than any blind's - see __init__.py's async_setup_entry(). Downloading
+    diagnostics from *that* device's own page used to always fall through
+    to the generic error below, since the lookup only ever checked
+    SUBENTRY_TYPE_BLIND subentries and skipped every other subentry type,
+    the hub included, outright.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    _add_blind_subentry(hass, entry)
+    hub_subentry = ConfigSubentry(
+        data=MappingProxyType({}),
+        subentry_type=SUBENTRY_TYPE_HUB,
+        title="Hub",
+        unique_id=None,
+    )
+    hass.config_entries.async_add_subentry(entry, hub_subentry)
+    device_registry = dr.async_get(hass)
+    device = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        config_subentry_id=hub_subentry.subentry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Schellenberg USB Stick",
+    )
+
+    result = await async_get_device_diagnostics(hass, entry, device)
+
+    assert result["is_connected"] is True
+    assert result["device_mode"] == "listening"
+    # The hub's own stick-state shape (_stick_diagnostics), not a blind's
+    # (_blind_diagnostics) - which would have a "name" key instead.
+    assert "name" not in result
 
 
 async def test_device_diagnostics_returns_an_error_for_an_unmatched_device(

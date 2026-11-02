@@ -243,8 +243,32 @@ def _remote_discovery_sequence_match_length(commands: list[str]) -> int:
 
 def summarize_status_discovery_frames(
     frames: Iterable[Mapping[str, Any]],
+    *,
+    exclude_device_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Group one bounded remote-capture window and choose its tracking stream.
+
+    exclude_device_ids: device ids positively confirmed to belong to some
+    *other*, already-paired blind on this hub (see config_flow.py's
+    _foreign_capture_device_ids() for how calibration computes this).
+    Frames from one of these never form their own group and can never
+    become "primary"/"secondary"/appear in "groups" or "unknown_commands" -
+    excluded from identity *selection* entirely, not merely deprioritized -
+    while still counting toward the capture's own total frame count (kept
+    by finish_status_frame_capture()'s caller, outside this function's own
+    return value) for diagnostic transparency. Without this, a capture
+    window open for one blind that happens to overlap with a different,
+    already-working blind's own ordinary movement (its own automation, its
+    own remote) could have that other blind's real frames outscore the
+    blind actually being worked on and get stored as its identity instead -
+    previously only guarded for the separate "movement detected" wait
+    (handle_capture_event in options_flow_calibration.py), never for this,
+    the actual identity decision - found during the lifecycle audit round.
+    Empty by default: the first blind on a fresh hub (nothing else to
+    exclude yet) and the manual "Discover status from original remote"
+    flow (which never passes this at all - overwriting an existing
+    identity is its whole deliberate purpose, so it is never scoped the
+    same way calibration is) are both unaffected.
 
     A calibration run's capture window is not a neutral listening post: for
     each leg, *we* already know which direction we just commanded (the phase
@@ -280,6 +304,8 @@ def summarize_status_discovery_frames(
             frame.get("device_id", ""), frame.get("enum", "")
         )
         if identity is None:
+            continue
+        if identity[0] in exclude_device_ids:
             continue
         command = str(frame.get("command", "")).strip().upper()
         if len(command) != 2 or any(

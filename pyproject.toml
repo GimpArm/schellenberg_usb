@@ -1,6 +1,6 @@
 [project]
 name = "schellenberg_usb"
-version = "v1.2.0"
+version = "v1.3.0"
 readme = "README.md"
 # Floor for the dev/CI toolchain below (uv, mypy, pytest-homeassistant-
 # custom-component) - unrelated to the *integration's* own minimum

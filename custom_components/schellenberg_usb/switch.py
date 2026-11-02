@@ -89,24 +89,41 @@ class SchellenbergLedSwitch(RestoreEntity, SwitchEntity):
         """Subscribe to status updates and restore state."""
         await super().async_added_to_hass()
 
+        # Restore the stored preference *before* subscribing to the signal
+        # below - async_get_last_state() suspends this coroutine, and the
+        # stick's own connect() completing while it is suspended used to
+        # let _handle_status_update() (once subscribed further down) read
+        # self._is_on while it was still __init__'s hardcoded False
+        # default, sending one wrong hardware command immediately before
+        # this method's own restore below sent the correct one - a race,
+        # not a hardware quirk, and exactly a "brief, self-correcting"
+        # flicker right at Home Assistant startup (audit finding 19).
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self._is_on = last_state.state == "on"
+            _LOGGER.debug("Restored LED switch state: %s", self._is_on)
+
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, SIGNAL_STICK_STATUS_UPDATED, self._handle_status_update
             )
         )
 
-        # Restore the last state
-        if (last_state := await self.async_get_last_state()) is not None:
-            self._is_on = last_state.state == "on"
-            _LOGGER.debug("Restored LED switch state: %s", self._is_on)
-
-            # If already connected, restore the hardware state now. Mark
-            # _was_available so _handle_status_update doesn't see a spurious
-            # "just became available" transition on the next status signal
-            # and restore the (already-restored) hardware state a second time.
-            if self.api.is_connected:
-                await self._restore_hardware_state()
-                self._was_available = True
+        # If there was a stored preference to restore and the stick is
+        # already connected, push it to the hardware now too (unchanged
+        # from before: nothing is pushed for a brand-new entity with no
+        # prior state at all - see test_added_to_hass_defaults_to_off_
+        # with_nothing_restored - the eventual reconnect signal handles
+        # that case the same way it handles a stick that connects later).
+        # _was_available is set first, before the await below rather than
+        # after it, so a status signal arriving while this restore is
+        # still in flight sees it already matching - not the same gap
+        # closed above, but the same race in miniature, between this
+        # restore and a concurrent, redundant one of its own rather than
+        # between this restore and the __init__ default.
+        if last_state is not None and self.api.is_connected:
+            self._was_available = True
+            await self._restore_hardware_state()
 
     @callback
     def _handle_status_update(self) -> None:

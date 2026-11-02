@@ -108,7 +108,8 @@
           "description": "Geben Sie die gemessenen vollständigen Öffnungs- und Schließzeiten ein.",
           "data": {
             "open_time_seconds": "Öffnungszeit",
-            "close_time_seconds": "Schließzeit"
+            "close_time_seconds": "Schließzeit",
+            "initial_state": "Wie ist der aktuelle Zustand des Rollladens?"
           },
           "submit": "Speichern"
         },
@@ -214,10 +215,12 @@
         "invalid_status_identities": "Geben Sie jede zusätzliche Statusidentität als Gerät_ID/Enum ein, getrennt durch Kommas oder neue Zeilen (zum Beispiel F2B8D5/23).",
         "status_identity_incomplete": "Geben Sie beide primären Statusfelder ein oder lassen Sie beide leer.",
         "status_discovery_unavailable": "Der USB-Stick ist nicht verbunden. Verbinden Sie ihn erneut und versuchen Sie es noch einmal.",
-        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
+        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut.",
+        "calibration_capture_busy": "Die gemeinsame Aufzeichnung wird bereits von der Telegrammaufzeichnung eines anderen Rollladens verwendet. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
       },
       "abort": {
         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
+        "pairing_interrupted_by_disconnect": "Die Kopplung wurde unterbrochen, weil die Verbindung zum USB-Stick während des Wartens auf eine Antwort zurückgesetzt oder neu geladen wurde (zum Beispiel durch das Hinzufügen oder Bearbeiten eines anderen Rollladens oder einen Neustart von Home Assistant). Bitte versuchen Sie es erneut.",
         "pairing_failed": "Kopplung des Geräts fehlgeschlagen.",
         "reconfigure_successful": "Die Gerätekonfiguration wurde erfolgreich aktualisiert",
         "command_test_successful": "Der Motorbefehlstest war erfolgreich.",
@@ -228,7 +231,6 @@
   "options": {
     "step": {
       "init": {
-        "title": "Schellenberg USB",
         "description": "Bearbeiten Sie den seriellen Anschlusspfad für den Schellenberg USB-Hub.",
         "data": {
           "serial_port": "Serieller Anschluss"

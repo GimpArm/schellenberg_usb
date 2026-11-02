@@ -15,12 +15,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+import custom_components.schellenberg_usb.api as api_module
 from custom_components.schellenberg_usb import (
     _async_backfill_blind_ids,
     async_setup,
@@ -86,9 +88,14 @@ async def test_service_rejects_an_entry_that_is_not_loaded(hass: HomeAssistant) 
 
 
 async def test_service_uses_the_single_loaded_entry_when_others_are_unloaded(
-    hass: HomeAssistant, connected_api_factory: Any
+    hass: HomeAssistant, connected_api_factory: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop must survive an unloaded entry and still find the loaded one."""
+    # No stick reply is ever fed, so without this, control_blind_exclusive()'s
+    # own ack-wait (added for audit finding 7) would block for the real
+    # MOVE_ACK_TIMEOUT - see test_config_flow.py's test_add_shutter_from_
+    # remote_runs_test_motor_before_calibration_choice for the same caveat.
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     not_loaded_entry = MockConfigEntry(domain=DOMAIN, data={})
     not_loaded_entry.add_to_hass(hass)
 
@@ -179,6 +186,39 @@ async def test_async_unload_entry_disconnects_the_api(
 
     assert result is True
     assert api.is_connected is False
+
+
+async def test_async_setup_entry_disconnects_the_api_on_hass_stop(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for audit finding 22: no HA-stop listener at the hub level.
+
+    async_unload_entry() above already disconnects the stick on an
+    ordinary reload/remove/disable, but Home Assistant does not call
+    that for every loaded entry on a full Core stop - only cover.py's
+    own per-entity EVENT_HOMEASSISTANT_STOP listener used to run then,
+    leaving this hub's shared serial connection for the process teardown
+    to close however it happened to, rather than the same clean,
+    intentional close() a reload already gets. This fires the real
+    event through the bus - not just calling a handler directly - so it
+    also proves async_setup_entry() actually registered the listener,
+    not only that disconnecting works once something calls it.
+    """
+    monkeypatch.setattr(SchellenbergUsbApi, "connect", AsyncMock())
+    monkeypatch.setattr(SchellenbergUsbApi, "disconnect", AsyncMock())
+    monkeypatch.setattr(
+        hass.config_entries, "async_forward_entry_setups", AsyncMock(return_value=True)
+    )
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERIAL_PORT: "/dev/fake"})
+    entry.add_to_hass(hass)
+
+    assert await async_setup_entry(hass, entry)
+    api = entry.runtime_data
+
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+
+    api.disconnect.assert_awaited_once_with()
 
 
 async def test_calibration_only_subentry_update_does_not_trigger_reload(

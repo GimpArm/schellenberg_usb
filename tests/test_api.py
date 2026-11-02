@@ -292,6 +292,26 @@ async def test_control_blind_sends_one_direct_unlocked_write(
     assert written(connected_api) == [expected]
 
 
+async def test_control_blind_updates_last_transmit_source(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Regression for audit finding 24: unlike send_command(), control_
+    blind() used to never update _last_transmit_source at all - it writes
+    straight to the transport instead of going through send_command() (see
+    this class's own docstring above for why). Diagnostic/log-attribution
+    only: a t1/t0 arriving after this write would log, and self-heal
+    _busy_latched under, whatever the *previous* caller's source was,
+    rather than this one's.
+    """
+    connected_api._last_transmit_source = "internal"
+
+    await connected_api.control_blind(
+        "10", CMD_UP, device_id="ABCDEF", source="developer_tools"
+    )
+
+    assert connected_api._last_transmit_source == "developer_tools"
+
+
 async def test_control_blind_does_not_enter_the_busy_retry_cycle(
     connected_api: SchellenbergUsbApi,
 ) -> None:
@@ -555,7 +575,7 @@ async def test_handle_connection_lost_also_unblocks_a_waiting_move_retry(
     which test_control_blind_with_retry_wakes_promptly_on_connection_lost
     below exercises end-to-end through a real task.
     """
-    connected_api._moves_in_progress.add("ABCDEF")
+    connected_api._moves_in_progress["ABCDEF"] = {object()}
     connected_api._move_awaiting_ack = True
     connected_api._move_ack_result = None
 
@@ -566,8 +586,8 @@ async def test_handle_connection_lost_also_unblocks_a_waiting_move_retry(
 
     assert connected_api._move_ack_event.is_set() is True
     assert connected_api._move_ack_result is False
-    assert connected_api._moves_in_progress == set()
-    assert connected_api._move_cancel_requested == set()
+    assert connected_api._moves_in_progress == {}
+    assert connected_api._move_cancel_requested == {}
     connected_api._cancel_scheduled_reconnect()
 
 
@@ -575,7 +595,7 @@ async def test_disconnect_also_unblocks_a_waiting_move_retry(
     connected_api: SchellenbergUsbApi,
 ) -> None:
     """disconnect()'s own copy of the same cleanup as the test above."""
-    connected_api._moves_in_progress.add("ABCDEF")
+    connected_api._moves_in_progress["ABCDEF"] = {object()}
     connected_api._move_awaiting_ack = True
     connected_api._move_ack_result = None
 
@@ -583,8 +603,40 @@ async def test_disconnect_also_unblocks_a_waiting_move_retry(
 
     assert connected_api._move_ack_event.is_set() is True
     assert connected_api._move_ack_result is False
-    assert connected_api._moves_in_progress == set()
-    assert connected_api._move_cancel_requested == set()
+    assert connected_api._moves_in_progress == {}
+    assert connected_api._move_cancel_requested == {}
+
+
+def test_handle_connection_lost_clears_the_last_received_message_cache(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Regression for audit finding 13: every other piece of per-connection
+    state has long been cleared here (see
+    test_handle_connection_lost_resets_retry_and_busy_state and
+    test_handle_connection_lost_also_unblocks_a_waiting_move_retry above) -
+    this cache of the latest frame per status identity previously was not,
+    so a stale pre-reconnect frame could linger in diagnostics forever.
+    """
+    connected_api._last_received_messages[("ABCDEF", "10")] = {"command": "01"}
+
+    connected_api.handle_connection_lost(
+        connected_api._protocol,  # type: ignore[arg-type]
+        Exception("gone"),
+    )
+
+    assert connected_api._last_received_messages == {}
+    connected_api._cancel_scheduled_reconnect()
+
+
+async def test_disconnect_clears_the_last_received_message_cache(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """disconnect()'s own copy of the same cleanup as the test above."""
+    connected_api._last_received_messages[("ABCDEF", "10")] = {"command": "01"}
+
+    await connected_api.disconnect()
+
+    assert connected_api._last_received_messages == {}
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +704,196 @@ async def test_control_blind_with_retry_succeeds_on_first_accept(
     connected_api._handle_message("t1")
 
     assert await asyncio.wait_for(task, timeout=1) is True
+
+
+async def test_control_blind_with_retry_sends_an_extra_resend_after_being_accepted(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MOVE_COMMAND_EXTRA_RESENDS: one extra best-effort move frame.
+
+    Mirrors test_control_blind_stop_sends_an_extra_resend_after_being_
+    accepted above for the move side - see MOVE_COMMAND_EXTRA_RESENDS's
+    own comment in const.py for why this exists (the same zero-end-to-end-
+    delivery-confirmation gap as the stop side, requested directly once a
+    user pointed out the stop-only fix left it open for open/close) and
+    the one way it is not quite as unconditionally safe as that side's
+    version.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` never actually yields to the event loop -
+        # see test_control_blind_with_retry_retries_on_busy_with_no_
+        # attempt_limit's own comment on this exact pitfall. The stop
+        # side's own version of this test originally made exactly this
+        # mistake and was caught by an independent review before it ever
+        # shipped (it would have errored out of _run_until below, never
+        # reaching this test's real assertions) - written correctly from
+        # the start here instead.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    # The primary move write plus one extra, best-effort resend - both
+    # plain CMD_UP writes for the same device, since control_blind()
+    # itself never waits for or reacts to a reply (see its own docstring).
+    assert len(written(connected_api)) == 2
+
+
+async def test_control_blind_with_retry_logs_the_transmitter_wait_before_writing(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The new log line must report a real, measured wait, not a fixed
+    ~0s regardless of what actually happened.
+
+    Added directly from a real log where a blind's own reported
+    overshoot past its target traced back to exactly this wait - time
+    spent queued behind another blind's own transmission before this
+    call's primary write could go out at all - previously only
+    reconstructable by hand-diffing two separate, unrelated log lines
+    rather than visible on its own. Mirrors test_control_blind_stop_
+    logs_the_transmitter_wait_before_writing below for the stop side.
+
+    Resend disabled - irrelevant to this log line, which fires once,
+    before the primary write, and disabling it keeps this test from
+    paying MOVE_COMMAND_RESEND_DELAY_SECONDS' own real delay for
+    nothing.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    connected_api._handle_message("t1")  # wire busy with another transmission
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert written(connected_api) == []
+
+    await asyncio.sleep(0.05)  # a real, measurable wait on the busy wire
+
+    connected_api._handle_message("t0")  # wire clears
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Move command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert wait_records[0].levelno == logging.INFO
+    assert "device_id=ABCDEF" in wait_records[0].message
+    assert "action=" in wait_records[0].message
+    logged_wait = float(wait_records[0].message.split("waiting ")[1].split("s for")[0])
+    assert logged_wait >= 0.04
+
+
+async def test_control_blind_with_retry_logs_exactly_once_despite_a_busy_bounce(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A "tE" busy bounce before eventual acceptance must produce exactly
+    one log line, not one per attempt.
+
+    Independent review of the sibling test above found that the log it
+    covers originally sat inside the retry loop itself - before the write
+    on every iteration that reached one, not only the one that ultimately
+    succeeded - so a busy bounce (exactly the real-world contention this
+    diagnostic exists to surface, see the six-blind log cited in
+    CHANGELOG.md) could log once per attempt, with a growing wait each
+    time, for what the CHANGELOG already described as a single logical
+    call. Fixed by snapshotting the wait into a local right after the
+    write that is confirmed accepted, and only emitting the log once
+    self._move_ack_result actually reads True for that same attempt. This
+    drives a genuine "tE"-then-accept sequence - not a mocked stand-in -
+    and confirms exactly one line comes out despite two real writes.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` would not actually yield to the event loop -
+        # see test_control_blind_with_retry_retries_on_busy_with_no_attempt_
+        # limit's own comment on this exact pitfall.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("tE")  # first attempt bounced busy
+    await _run_until(lambda: len(written(connected_api)) == 2)  # retried
+
+    connected_api._handle_message("t1")  # second attempt accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Move command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert "device_id=ABCDEF" in wait_records[0].message
+
+
+async def test_control_blind_with_retry_skips_the_resend_once_a_stop_is_requested(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop requested for this device_id during the resend's own delay
+    must suppress it, not fire it anyway a moment later and undo it.
+
+    See the cancellation check inside control_blind_with_retry()'s own
+    resend loop, and MOVE_COMMAND_EXTRA_RESENDS's own comment in const.py,
+    for the real case this protects: a brand new async_stop_cover() call
+    (UI/automation/Alexa), or the auto-stop-at-target branch of an
+    *earlier*, still-live move this call's own write was only ever a
+    redundant piggyback onto, both call cancel_pending_move() for this
+    exact device_id as their very first action - a resend that never
+    checked for that would fire anyway on its own fixed schedule and
+    silently restart the motor right after a legitimate stop landed.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    # Requested here, before this test coroutine yields control even once,
+    # so it is deterministically visible to the task by the time its own
+    # resend loop checks it below - not a real race against the task's own
+    # timing, which the other new test above already covers on its own.
+    connected_api.cancel_pending_move("ABCDEF")
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    # Only the primary write - the resend was skipped, not merely delayed.
+    assert len(written(connected_api)) == 1
 
 
 async def test_control_blind_with_retry_retries_on_busy_with_no_attempt_limit(
@@ -860,7 +1102,7 @@ async def test_control_blind_with_retry_returns_false_when_the_write_itself_fail
 
 
 async def test_control_blind_with_retry_serializes_two_blinds_instead_of_racing(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The actual bug fix: two blinds commanded together must queue, not race.
 
@@ -876,7 +1118,16 @@ async def test_control_blind_with_retry_serializes_two_blinds_instead_of_racing(
     write: blind B's call below must not reach the wire at all until blind
     A's first attempt has learned its outcome ("t1"), not merely until A
     has finished writing.
+
+    MOVE_COMMAND_EXTRA_RESENDS disabled: this test is about lock ordering
+    between two different calls, not about the resend mechanism, which
+    fires its own extra write on a real, unpatched delay (see its own
+    comment in const.py) and would otherwise land unpredictably among the
+    exact write counts/payloads this test pins down below - either stalling
+    the test's own zero-delay event-loop pumping (the resend's real sleep
+    never resolves within it) or racing B's own write for the same slot.
     """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     task_a = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
     )
@@ -950,7 +1201,7 @@ async def test_control_blind_with_retry_wakes_promptly_on_connection_lost(
 
 
 async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The stop-vs-stop collision fix: two blinds stopped together must queue.
 
@@ -962,7 +1213,11 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
     control_blind_stop() closes this by sharing _move_lock (see its own
     docstring), so blind B's write must not reach the wire at all until
     blind A's first attempt has learned its outcome.
+
+    STOP_COMMAND_EXTRA_RESENDS disabled - see the mirrored move-side test's
+    own comment on why: this test pins down lock ordering, not the resend.
     """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
     task_a = asyncio.ensure_future(
         connected_api.control_blind_stop("10", device_id="AAAAAA")
     )
@@ -1024,6 +1279,155 @@ async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmissio
     assert await asyncio.wait_for(task, timeout=1) is True
 
 
+async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STOP_COMMAND_EXTRA_RESENDS: one extra best-effort stop frame.
+
+    Real-world report (2026-10-31): in a six-blind "close to an
+    intermediate target" batch, run through a shared transmitter in the
+    reporter's own known high-RF-interference environment, two of the six
+    blinds ran all the way to their physical end stop with no visible
+    stop at all - confirmed by the reporter's own direct, physical check
+    of all six blinds right after (every dashboard-reported stop position
+    was closer to target than the blind's real position, the opposite of
+    what a software stop-calculation bug would produce). This protocol
+    gives no end-to-end delivery confirmation for any transmit, stop
+    included (motor_result stays unknown either way; see this constant's
+    own comment in const.py), so a single stop frame lost to interference
+    leaves the motor with nothing telling it to stop. control_blind_stop()
+    now fires one extra, best-effort control_blind() write - unlocked, no
+    ack-wait of its own, exactly like the give-up fallback already at the
+    bottom of this same method - after its own primary, acked stop is
+    accepted, rather than relying on that single frame alone.
+    """
+
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` never actually yields to the event loop
+        # (see test_control_blind_with_retry_retries_on_busy_with_no_
+        # attempt_limit's own comment on this exact pitfall), which is
+        # fatal here specifically: control_blind_stop() below runs as a
+        # genuinely separate asyncio.Task (via ensure_future), and
+        # _run_until()'s own polling loop yields through this same
+        # patched asyncio.sleep - with a bare `return None`, neither that
+        # loop nor the task it is waiting on ever actually gets a turn,
+        # so _run_until() would spin for its full 100 iterations and
+        # raise, never reaching this test's real assertions at all.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary stop is accepted
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    # The primary stop plus one extra, best-effort resend - both plain
+    # stop writes for the same device, since control_blind() itself never
+    # waits for or reacts to a reply (see its own docstring).
+    assert len(written(connected_api)) == 2
+
+
+async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The new log line must report a real, measured wait, not a fixed
+    ~0s regardless of what actually happened.
+
+    Added directly from a real log (2026-11-01): a kitchen blind's own
+    dashboard-reported "closed to ~25%" overshot by several percent, and
+    diffing two unrelated, pre-existing log lines by hand (the script's
+    own "Stopping cover" call versus this method's first real transmit)
+    showed up to ~1.1s spent queued behind other blinds' own
+    transmissions in a six-blind batch before this call's primary write
+    went out at all - a real, measured delay with no prior log line of
+    its own to show it directly.
+
+    Resend disabled - irrelevant to this log line, which fires once,
+    before the primary write, and disabling it keeps this test from
+    paying STOP_COMMAND_RESEND_DELAY_SECONDS' own real delay for
+    nothing.
+    """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    connected_api._handle_message("t1")  # wire busy with another transmission
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert written(connected_api) == []
+
+    await asyncio.sleep(0.05)  # a real, measurable wait on the busy wire
+
+    connected_api._handle_message("t0")  # wire clears
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary stop is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Stop command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert wait_records[0].levelno == logging.INFO
+    assert "device_id=AAAAAA" in wait_records[0].message
+    logged_wait = float(wait_records[0].message.split("waiting ")[1].split("s for")[0])
+    assert logged_wait >= 0.04
+
+
+async def test_control_blind_stop_logs_exactly_once_despite_a_busy_bounce(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirrors test_control_blind_with_retry_logs_exactly_once_despite_a_
+    busy_bounce above, for this method's own identical fix: a "tE" bounce
+    before eventual acceptance must produce exactly one log line, not one
+    per attempt. See that test's own docstring for the independent review
+    finding this guards against.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.api")
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("tE")  # first attempt bounced busy
+    await _run_until(lambda: len(written(connected_api)) == 2)  # retried
+
+    connected_api._handle_message("t1")  # second attempt accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+
+    wait_records = [
+        record
+        for record in caplog.records
+        if "Stop command transmitting after waiting" in record.message
+    ]
+    assert len(wait_records) == 1
+    assert "device_id=AAAAAA" in wait_records[0].message
+
+
 async def test_control_blind_stop_falls_back_to_a_plain_write_when_the_lock_is_busy(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1053,6 +1457,47 @@ async def test_control_blind_stop_falls_back_to_a_plain_write_when_the_lock_is_b
         connected_api._move_lock.release()
 
 
+async def test_control_blind_stop_bounds_the_ack_wait_to_the_remaining_budget(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for audit finding 5.
+
+    The ack-wait used to always wait the full MOVE_ACK_TIMEOUT (1.0s)
+    regardless of how much of STOP_RETRY_BUDGET lock contention and the
+    idle-wait had already spent, letting this method overrun its own
+    documented budget by up to that same margin. Here, waiting for the
+    transmitter to go idle is made to (realistically) eat most of a
+    shrunk budget; with no ack ever arriving, the whole call must still
+    finish close to STOP_RETRY_BUDGET, not budget-plus-the-full-1.0s.
+    """
+    caplog.set_level(logging.WARNING, logger="custom_components.schellenberg_usb.api")
+    monkeypatch.setattr(api_module, "STOP_RETRY_BUDGET", 0.3)
+
+    async def slow_idle_wait(*_args: object, **_kwargs: object) -> bool:
+        await asyncio.sleep(0.2)
+        return True
+
+    monkeypatch.setattr(connected_api, "_wait_for_transmitter_idle", slow_idle_wait)
+
+    start = time.monotonic()
+    result = await asyncio.wait_for(
+        connected_api.control_blind_stop("10", device_id="ABCDEF"), timeout=2
+    )
+    elapsed = time.monotonic() - start
+
+    # The write itself still goes out and is never acked - same fallback
+    # behavior as before this fix, see control_blind_stop()'s own
+    # docstring - so this still returns True.
+    assert result is True
+    # Before this fix: ~0.2s idle wait + an unconditional, unbounded 1.0s
+    # ack wait + the loop's own 0.1s backoff sleep = ~1.3s, well past the
+    # 0.3s budget. Generous margin for CI jitter, still nowhere near that.
+    assert elapsed < 0.6
+    assert not any("within 1.0s" in record.message for record in caplog.records)
+
+
 def _blind_payload(enum: str, action: str) -> bytes:
     """Build the exact bytes control_blind() writes for one command.
 
@@ -1065,7 +1510,7 @@ def _blind_payload(enum: str, action: str) -> bytes:
 
 
 async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression for the real log: a stop must not wait out another
     blind's own already-queued move.
@@ -1079,7 +1524,14 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     close's whole ~1.1-1.2s transmit cycle). Priority (see _PriorityLock)
     fixes this: once the wire actually clears, a waiting stop goes before
     a waiting move, regardless of which one asked for the lock earlier.
+
+    Both resend counts disabled - this test pins down the exact payload of
+    each of the two writes below (the stop's, then B's move), which either
+    resend would otherwise land an unplanned extra write among, on a real
+    delay this test's zero-delay pumping below cannot resolve.
     """
+    monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     # Some other transmission is already in flight - stands in for this
     # same blind's own just-fired move in the real log.
     connected_api._handle_message("t1")
@@ -1120,6 +1572,205 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     await _run_until(lambda: len(written(connected_api)) == 2)
     assert written(connected_api)[-1] == _blind_payload("20", CMD_DOWN)
     connected_api._handle_message("t1")
+    assert await asyncio.wait_for(task_b, timeout=1) is True
+
+
+# ---------------------------------------------------------------------------
+# move_lock_busy: the public, read-only reflection of _move_lock's own
+# locked() used by cover.py's contention-aware stop-lead compensation (see
+# that property's own comment for why it exists).
+# ---------------------------------------------------------------------------
+
+
+async def test_move_lock_busy_reflects_the_shared_locks_own_state(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    assert connected_api.move_lock_busy is False
+
+    await connected_api._move_lock.acquire()
+    assert connected_api.move_lock_busy is True
+
+    connected_api._move_lock.release()
+    assert connected_api.move_lock_busy is False
+
+
+# ---------------------------------------------------------------------------
+# control_blind_exclusive(): the lock-aware wrapper around control_blind()
+# for callers outside the regular cover-entity move/stop path (motor-
+# direction tests, developer-tools tests, the post-teach test, the
+# test_command service) that still need to share the hub-wide move-ack slot
+# safely - see audit finding 7.
+# ---------------------------------------------------------------------------
+
+
+async def test_control_blind_exclusive_sends_and_returns_true_on_accept(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    task = asyncio.ensure_future(
+        connected_api.control_blind_exclusive("10", CMD_STOP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+    assert written(connected_api) == [_blind_payload("10", CMD_STOP)]
+
+    connected_api._handle_message("t1")
+    assert await asyncio.wait_for(task, timeout=1) is True
+    assert connected_api._move_awaiting_ack is False
+    assert connected_api._move_lock.locked() is False
+
+
+async def test_control_blind_exclusive_returns_false_when_the_write_itself_fails(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A control_blind() write that fails outright (e.g. disconnected) must
+    end this immediately, same as control_blind_with_retry() - there is
+    nothing to wait for an ack on, and the lock must still be released.
+    """
+    connected_api._is_connected = False
+
+    assert (
+        await connected_api.control_blind_exclusive("10", CMD_UP, device_id="ABCDEF")
+        is False
+    )
+    assert written(connected_api) == []
+    assert connected_api._move_awaiting_ack is False
+    assert connected_api._move_lock.locked() is False
+
+
+async def test_control_blind_exclusive_returns_true_on_a_silent_ack_timeout(
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unlike control_blind_with_retry()/control_blind_stop(), a missing or
+    "busy" reply here is neither retried nor treated as failure -
+    control_blind() itself never gave any of these callers ack feedback to
+    begin with (see control_blind_exclusive()'s own docstring). The wait
+    only exists so that reply, whenever it does arrive, is consumed here
+    rather than leaking into whichever call acquires the lock next.
+    MOVE_ACK_TIMEOUT is patched down so this does not need a real 1s wait -
+    same caveat as test_control_blind_with_retry_treats_a_silent_ack_
+    timeout_like_busy above: asyncio.wait_for's own timeout path needs
+    genuinely elapsed time, independent of asyncio.sleep.
+    """
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
+    caplog.set_level(logging.WARNING, logger="custom_components.schellenberg_usb.api")
+
+    result = await asyncio.wait_for(
+        connected_api.control_blind_exclusive("10", CMD_STOP, device_id="ABCDEF"),
+        timeout=1,
+    )
+
+    assert result is True
+    assert written(connected_api) == [_blind_payload("10", CMD_STOP)]
+    assert connected_api._move_awaiting_ack is False
+    assert connected_api._move_lock.locked() is False
+    assert any(
+        "No t1/tE reply to test write" in record.message for record in caplog.records
+    )
+
+
+async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for audit finding 7.
+
+    Before this fix, every one of control_blind_exclusive()'s current
+    callers (the pairing wizard's motor-direction test, the reconfigure
+    wizard's developer-tools test, the post-teach open+stop test, and the
+    test_command service) called control_blind() directly - no lock at
+    all - even though the wire protocol carries no correlation id and
+    _handle_message() attributes any t1/t0/tE reply to whichever call
+    currently has _move_awaiting_ack set. Blind A's ordinary move, mid-
+    ack-wait, could have a totally unrelated test of blind B write right
+    over it: B's write going out while A's slot is still marked
+    outstanding means the stick's reply for B gets attributed to A
+    instead - exactly the concrete trace behind audit finding 7 (see
+    CHANGELOG.md's v1.3.0 entry), reproduced here with a real
+    control_blind_with_retry() call standing in for blind A's own
+    in-flight move.
+
+    MOVE_COMMAND_EXTRA_RESENDS disabled: without it, A's own resend (fired
+    on a real, unpatched delay once its "t1" below is handled) can land
+    its own extra write during the same real time the `wait_for(task_a,
+    ...)` below is already letting elapse, so by the time this test
+    checks for B's write, the count has jumped straight past the exact
+    value it polls for - B's write did happen, just not at the count this
+    test would otherwise observe it at. control_blind_exclusive() (B's own
+    call) has no resend of its own and is unaffected either way.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+    task_a = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+    # A has written and is now the sole owner of the hub-wide ack slot.
+    assert connected_api._move_awaiting_ack is True
+
+    task_b = asyncio.ensure_future(
+        connected_api.control_blind_exclusive("20", CMD_STOP, device_id="BBBBBB")
+    )
+    # However many event-loop iterations pass, B cannot steal the slot -
+    # _move_lock.acquire() only resolves once A actually releases it.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task_a.done()
+    assert not task_b.done()
+    assert len(written(connected_api)) == 1
+
+    connected_api._handle_message("t1")  # correctly attributed to A
+    assert await asyncio.wait_for(task_a, timeout=1) is True
+    # No assertion on _move_awaiting_ack here: B is already queued right
+    # behind A on the same _move_lock, so the instant A's "async with"
+    # releases it, B's own continuation is scheduled ahead of this test
+    # coroutine's own resumption (lock.release() wakes B before task_a's
+    # done-callback wakes this await) - B reliably re-claims the slot for
+    # itself, True, before control returns here. That is correct exclusive-
+    # lock behavior, not a steal: B still could not write, and could not
+    # observe A's reply, while A actually held the slot (already proven by
+    # the asserts above), and the full round-trip below proves B's own
+    # write and its own reply attribution are still correct once it is
+    # genuinely B's turn.
+
+    # Only now may B's write reach the wire.
+    await _run_until(lambda: len(written(connected_api)) == 2)
+    assert written(connected_api)[-1] == _blind_payload("20", CMD_STOP)
+    connected_api._handle_message("t1")  # correctly attributed to B
+    assert await asyncio.wait_for(task_b, timeout=1) is True
+
+
+async def test_control_blind_exclusive_serializes_two_calls_instead_of_racing(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Two concurrent test/service calls must also queue through the same
+    lock, not just a test call against a real move/stop (see the steal-
+    protection test above) - the hub-wide ack slot is exactly as unsafe to
+    double-book between two of these calls as between one of them and a
+    real move.
+    """
+    task_a = asyncio.ensure_future(
+        connected_api.control_blind_exclusive("10", CMD_UP, device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    task_b = asyncio.ensure_future(
+        connected_api.control_blind_exclusive("20", CMD_DOWN, device_id="BBBBBB")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task_a.done()
+    assert not task_b.done()
+    assert len(written(connected_api)) == 1
+
+    connected_api._handle_message("t1")  # A's write is accepted
+    assert await asyncio.wait_for(task_a, timeout=1) is True
+
+    # Unlike control_blind_with_retry()/control_blind_stop(), this does not
+    # wait for the transmitter to go idle before writing - control_blind()
+    # itself never did (see its own docstring) - so B's write goes out as
+    # soon as it holds the lock, with no "t0" needed first.
+    await _run_until(lambda: len(written(connected_api)) == 2)
+
+    connected_api._handle_message("t1")  # B's write is accepted
     assert await asyncio.wait_for(task_b, timeout=1) is True
 
 
@@ -1307,7 +1958,7 @@ async def test_cancel_pending_move_is_a_noop_without_a_move_in_progress(
     """
     connected_api.cancel_pending_move("ABCDEF")
 
-    assert connected_api._move_cancel_requested == set()
+    assert connected_api._move_cancel_requested == {}
 
 
 async def test_cancel_pending_move_ends_a_waiting_retry_loop_for_that_device(
@@ -1494,6 +2145,168 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
     )
     connected_api._handle_message("t1")  # B's own stop is accepted
     assert await asyncio.wait_for(stop_b, timeout=1) is True
+
+
+async def test_cancel_pending_move_reaches_a_still_running_call_after_a_sibling_exits(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sibling call's own exit must not erase a device_id still in use.
+
+    Found by an independent audit of this session's own first attempt at
+    fixing this: _moves_in_progress was, at that point, a plain set, so
+    two genuinely concurrent control_blind_with_retry() calls for the very
+    same device_id were indistinguishable from each other once either
+    call's own `finally` ran - whichever one happened to exit *first*
+    unconditionally discarded the device_id, even while the other call was
+    still genuinely in flight. A cancel_pending_move() landing after that
+    point found nothing there to cancel and silently no-opped, even though
+    a real call for that exact device was still retrying or about to
+    resend.
+
+    Driving two REAL concurrent tasks for the same device_id to prove this
+    would leave the moment either one "wins" the race to reach the wire
+    first up to asyncio's own scheduling order - exactly the raciness
+    test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move's
+    own docstring above already acknowledges and tolerates for its two-
+    *different*-device case ("B may already have raced ahead..."). That
+    looseness is fine there, where only the eventual outcome matters, but
+    it cannot pin down this specific bug: whether the device_id survives a
+    sibling's exit depends on getting the exit ordering exactly right, not
+    on which call eventually finishes first.
+
+    So instead of a second real task, this directly pre-sets
+    _moves_in_progress to stand in for a second, concurrent call's own
+    token for this same device_id - already under way and still in flight
+    when this call exits - deterministically, with no dependence on
+    scheduling order. One real call is then driven through a full
+    accept-plus-resend life cycle (MOVE_COMMAND_EXTRA_RESENDS's own write
+    needs no further ack - see control_blind()'s own docstring - so
+    nothing beyond the one "t1" below is needed to let it run to
+    completion), and the test asserts the stand-in's own token is still
+    there, on its own, once this call's own `finally` has run - proving
+    this call's own exit discarded only its own token rather than wiping
+    out a sibling's still-live claim (or the whole entry) with it.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    # Stands in for a second, concurrent control_blind_with_retry() call's
+    # own token for this exact same device_id, already under way before
+    # this one starts.
+    sibling_token = object()
+    connected_api._moves_in_progress["ABCDEF"] = {sibling_token}
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+    # Both this call's own, freshly minted token and the stand-in sibling's
+    # are now in the set - this call's own entry added to it rather than
+    # replacing or clobbering what was already there.
+    assert sibling_token in connected_api._moves_in_progress["ABCDEF"]
+    assert len(connected_api._moves_in_progress["ABCDEF"]) == 2
+
+    connected_api._handle_message("t1")  # accepted - triggers the resend too
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    assert connected_api._moves_in_progress == {"ABCDEF": {sibling_token}}
+    assert "ABCDEF" not in connected_api._move_cancel_requested
+
+    # The stand-in's own claim is still there, so this must still find
+    # something to cancel - exactly what the original plain-set
+    # implementation could no longer guarantee once this call's own
+    # finally had run.
+    connected_api.cancel_pending_move("ABCDEF")
+
+    assert connected_api._move_cancel_requested == {"ABCDEF": {sibling_token}}
+
+
+async def test_a_fresh_call_is_unaffected_by_a_stale_cancellation(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop aimed at earlier, still-draining siblings must not also catch
+    a brand new, unrelated call that only starts afterwards.
+
+    Found by the fourth independent review, of the reference-counting fix
+    directly above this test: once cancellation became a flag that stayed
+    pending for a whole device_id until the *last* of several concurrent
+    same-device calls actually exited (rather than being cleared the
+    instant any one of them first noticed it, the bug the fix above this
+    one closes), that flag could outlive the specific calls it was
+    actually meant for. Concrete scenario: two concurrent calls A and B
+    for device "X" are both in flight; a stop is requested while both are
+    live; A notices and exits, but B is still genuinely retrying or about
+    to resend, so the flag correctly has to stay set for X. If a brand new
+    call C for the exact same device starts in that window - nobody asked
+    to cancel C, it did not even exist yet when the stop was requested -
+    the device-wide flag this session's own first reference-counting
+    attempt used made C's very first check see "X has a pending
+    cancellation" and give up immediately, before ever writing anything,
+    even though that cancellation was never meant for it. Traced against
+    that exact, immediately-prior design (_moves_in_progress as a plain
+    per-device count, _move_cancel_requested as a flat set[str] of
+    device_ids - the code this session had before the fix directly above
+    this test): pre-seeding a count of 1 for "ABCDEF", calling
+    cancel_pending_move("ABCDEF"), then starting a fresh call for
+    "ABCDEF" made that fresh call's own very first loop check see
+    "ABCDEF" in the flat set and return False immediately - confirming
+    this scenario really did misfire under that design.
+
+    Fixed by snapshotting, at the moment cancel_pending_move() runs,
+    exactly which call *tokens* are active for that device right then (see
+    _move_cancel_requested's own comment in __init__) - a call that
+    registers its own token only afterwards is simply never in that
+    snapshot, however long an earlier, genuinely-targeted sibling takes to
+    actually exit.
+
+    Modelled the same way test_cancel_pending_move_reaches_a_still_
+    running_call_after_a_sibling_exits above does: a still-in-flight
+    sibling is stood in for directly, rather than orchestrated as a second
+    real concurrent task, to stay deterministic (same reasoning as that
+    test's own docstring). cancel_pending_move() is called while only that
+    stand-in is "in flight" - exactly what it snapshots - and only *then*
+    does the real call under test start, mirroring "C starts after the
+    stop was already requested for A/B". It must run to completion
+    unaffected: no immediate return, its command actually reaches the
+    wire, and it succeeds once accepted - and the stand-in's own
+    cancellation must still be exactly what it was, proving the fresh
+    call's success was not an accident of its own entry or exit disturbing
+    the sibling's unrelated bookkeeping.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    # Stands in for an earlier, still-in-flight sibling call for this exact
+    # device_id that a stop has already been requested for.
+    sibling_token = object()
+    connected_api._moves_in_progress["ABCDEF"] = {sibling_token}
+    connected_api.cancel_pending_move("ABCDEF")
+    assert connected_api._move_cancel_requested == {"ABCDEF": {sibling_token}}
+
+    # Only now does a brand new, unrelated call for the same device start -
+    # strictly after the cancellation above was already snapshotted.
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+    connected_api._handle_message("t1")  # accepted - triggers the resend too
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    assert len(written(connected_api)) == 2  # primary write + its one resend
+
+    # The sibling's own stale cancellation is untouched by any of this -
+    # proving the fresh call's own success was not caused by its own
+    # entry/exit accidentally clearing or disturbing the sibling's
+    # unrelated cancellation.
+    assert connected_api._move_cancel_requested == {"ABCDEF": {sibling_token}}
 
 
 # ---------------------------------------------------------------------------
@@ -1707,6 +2520,57 @@ async def test_pair_device_and_wait_times_out_when_nothing_responds(
 
     assert result is None
     assert connected_api.pairing_active is False
+    assert connected_api.pairing_interrupted_by_disconnect is False
+
+
+async def test_pair_device_and_wait_flags_disconnect_during_wait(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A hub-wide reload (triggered by a *different* blind's own subentry
+    add/edit, not necessarily anything about this pairing attempt - or the
+    integration unloading, a Core stop/restart, or an explicit stick
+    reset) calls disconnect() while this is still waiting for a device ID.
+    disconnect() injects a ConnectionError into _pairing_future for
+    exactly this reason - config_flow.py needs to tell this apart from an
+    ordinary timeout (see pairing_interrupted_by_disconnect's own
+    docstring), since neither this attempt nor the device being paired
+    did anything wrong.
+    """
+    task = asyncio.ensure_future(connected_api.pair_device_and_wait())
+    await asyncio.sleep(0)  # real yield: let it send "sp" and park on the future
+
+    await connected_api.disconnect()
+    result = await task
+
+    assert result is None
+    assert connected_api.pairing_interrupted_by_disconnect is True
+
+
+async def test_pair_device_and_wait_does_not_flag_a_real_connection_loss(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A genuine, unexpected connection loss (handle_connection_lost(),
+    e.g. the stick being unplugged) injects the exact same ConnectionError
+    into _pairing_future that an intentional disconnect() does - but it's
+    a real, separate problem, not "something else reloaded/unloaded the
+    hub", so it must NOT set pairing_interrupted_by_disconnect: left
+    reporting the existing generic pairing_timeout message, same as
+    before this fix.
+    """
+    task = asyncio.ensure_future(connected_api.pair_device_and_wait())
+    await asyncio.sleep(0)  # real yield: let it send "sp" and park on the future
+
+    connected_api.handle_connection_lost(
+        connected_api._protocol,  # type: ignore[arg-type]
+        Exception("gone"),
+    )
+    result = await task
+
+    assert result is None
+    assert connected_api.pairing_interrupted_by_disconnect is False
+    # A reconnect was scheduled as a result; don't leave it pending past
+    # the end of the test.
+    connected_api._cancel_scheduled_reconnect()
 
 
 async def test_stop_pairing_mode_restores_listening_from_the_write_alone(
@@ -2056,6 +2920,27 @@ async def test_handle_message_ss_frame_broadcasts_capture_signal_during_capture(
     assert received == [("FEDCBA", CMD_UP)]
 
 
+async def test_handle_message_caps_the_status_discovery_frame_list(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Regression for audit finding 14: before this fix, a status-frame
+    capture window (calibration, remote-status discovery, teach_motor) had
+    no limit on how many frames it would record while open, so sustained
+    RF interference for as long as the window stayed open (up to
+    CALIBRATION_TIMEOUT/STATUS_DISCOVERY_TIMEOUT - const.py) could grow it
+    without bound.
+    """
+    connected_api.start_status_frame_capture(phase="opening")
+
+    for _ in range(api_module.MAX_STATUS_DISCOVERY_FRAMES + 50):
+        connected_api._handle_message("ss" + "10" + "FEDCBA" + "0000" + CMD_UP + "0000")
+
+    assert connected_api._status_discovery_frames is not None
+    assert len(connected_api._status_discovery_frames) == (
+        api_module.MAX_STATUS_DISCOVERY_FRAMES
+    )
+
+
 async def test_handle_message_rftu_resolves_verify_future_and_records_mode(
     connected_api: SchellenbergUsbApi,
 ) -> None:
@@ -2093,6 +2978,80 @@ async def test_pop_fresh_calibration_position_without_a_prior_set_is_none(
 ) -> None:
     """A blind_id nothing was ever set for pops to None, not a KeyError."""
     assert connected_api.pop_fresh_calibration_position("NEVER_SET") is None
+
+
+# ---------------------------------------------------------------------------
+# _record_last_received_message() (via _handle_message()'s own "ss" branch):
+# validation and the cap on _last_received_messages - audit finding 13.
+# Previously this cache had neither: any raw, merely-uppercased device_id/
+# enum substring became a permanent key, regardless of whether it was ever
+# real hex.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_message_does_not_cache_an_ss_frame_with_a_non_hex_device_id(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A corrupted frame (RF noise, a brownout, ...) whose device_id
+    substring isn't real hex must never mint a cache entry - unlike the
+    raw, merely-uppercased identity _handle_message() itself still uses for
+    registration lookup and signal dispatch (both already no-op harmlessly
+    for a bogus key, since nothing real is ever registered under one).
+    """
+    connected_api._handle_message("ss10ZZZZZZ0000010000")
+
+    assert connected_api._last_received_messages == {}
+
+
+def test_handle_message_evicts_the_oldest_identity_once_the_cache_is_full(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Before this fix, _last_received_messages had no cap at all, so a
+    noisy RF environment producing many distinct, syntactically-valid
+    identities this hub will never register an entity for - not corrupted
+    garbage, which the test above covers - could still accumulate forever.
+    """
+    for index in range(api_module.MAX_LAST_RECEIVED_MESSAGES + 1):
+        device_id = f"{index:06X}"
+        connected_api._handle_message(f"ss10{device_id}0000010000")
+
+    assert len(connected_api._last_received_messages) == (
+        api_module.MAX_LAST_RECEIVED_MESSAGES
+    )
+    first_seen = ("000000", "10")
+    last_seen = (f"{api_module.MAX_LAST_RECEIVED_MESSAGES:06X}", "10")
+    assert first_seen not in connected_api._last_received_messages
+    assert last_seen in connected_api._last_received_messages
+
+
+def test_handle_message_moves_a_re_seen_identity_back_to_the_front_of_the_cache(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Eviction order is recency of last update, not first-ever-seen order:
+    re-seeing "000000" after it was already cached must protect it from
+    eviction exactly as if it were new, rather than leaving it stuck at the
+    front of the queue under its original, now-stale insertion position.
+    """
+    connected_api._handle_message(f"ss10{'000000'}0000010000")
+    for index in range(1, api_module.MAX_LAST_RECEIVED_MESSAGES):
+        device_id = f"{index:06X}"
+        connected_api._handle_message(f"ss10{device_id}0000010000")
+    # Cache is now exactly full (MAX_LAST_RECEIVED_MESSAGES entries: "000000"
+    # plus indices 1..MAX_LAST_RECEIVED_MESSAGES-1). Re-seeing "000000" here
+    # must not grow it further, and must mark "000000" as freshly used.
+    connected_api._handle_message(f"ss10{'000000'}0000010000")
+
+    # One more, brand-new identity now has to evict *something*.
+    overflow_device_id = f"{api_module.MAX_LAST_RECEIVED_MESSAGES:06X}"
+    connected_api._handle_message(f"ss10{overflow_device_id}0000010000")
+
+    assert len(connected_api._last_received_messages) == (
+        api_module.MAX_LAST_RECEIVED_MESSAGES
+    )
+    # "000000" survives (recently re-seen); "000001" - the next-oldest,
+    # never re-seen - is the one actually evicted instead.
+    assert ("000000", "10") in connected_api._last_received_messages
+    assert ("000001", "10") not in connected_api._last_received_messages
 
 
 # ---------------------------------------------------------------------------
@@ -2166,3 +3125,90 @@ def test_get_last_secondary_frame_delegates_to_get_last_received_for_identities(
     assert connected_api.get_last_secondary_frame(
         (("ABCDEF", "30"),)
     ) == connected_api.get_last_received_for_identities((("ABCDEF", "30"),))
+
+
+# ---------------------------------------------------------------------------
+# SchellenbergProtocol.data_received(): the raw serial receive buffer -
+# previously completely untested; every other test in this file exercises
+# message handling through SchellenbergUsbApi._handle_message() directly
+# (via FakeTransport, bypassing the asyncio.Protocol layer entirely), never
+# through the actual newline-splitting/buffering this class does on raw
+# bytes. Each test constructs SchellenbergProtocol directly - no hass or
+# connected_api fixture needed, since data_received() never touches
+# self.api, only connection_lost() does.
+# ---------------------------------------------------------------------------
+
+
+def test_data_received_parses_a_message_split_across_two_chunks() -> None:
+    received: list[str] = []
+    protocol = api_module.SchellenbergProtocol(received.append, api=Mock())
+
+    protocol.data_received(b"ss10ABCDE")
+    assert received == []  # no terminator yet - nothing dispatched
+    protocol.data_received(b"F0000010000\n")
+
+    assert received == ["ss10ABCDEF0000010000"]
+    assert protocol.buffer == ""
+
+
+def test_data_received_parses_multiple_messages_in_one_chunk() -> None:
+    received: list[str] = []
+    protocol = api_module.SchellenbergProtocol(received.append, api=Mock())
+
+    protocol.data_received(b"t1\nt0\n")
+
+    assert received == ["t1", "t0"]
+
+
+def test_data_received_keeps_buffering_a_partial_line_under_the_cap() -> None:
+    """An ordinary, merely-not-yet-terminated line must not be discarded
+    just for being the only thing data_received() has seen so far - only
+    genuinely runaway growth (tested below) should ever reset the buffer.
+    """
+    protocol = api_module.SchellenbergProtocol(Mock(), api=Mock())
+
+    protocol.data_received(b"ss10ABCDEF0000")
+
+    assert protocol.buffer == "ss10ABCDEF0000"
+
+
+def test_data_received_resets_the_buffer_once_it_exceeds_the_cap_without_a_terminator(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for audit finding 12: a flaky connection, a firmware
+    glitch, a brownout, or a misconfigured port that stops producing a
+    clean "\\n" terminator used to grow this buffer without limit for as
+    long as that lasted, re-copying the whole (ever-larger) string on every
+    single chunk along the way. MAX_SERIAL_BUFFER_LENGTH (api.py) is
+    nowhere near any real message - the longest one actually parsed is a
+    few dozen bytes - so this never fires during normal operation.
+    """
+    caplog.set_level(logging.WARNING, logger="custom_components.schellenberg_usb.api")
+    received: list[str] = []
+    protocol = api_module.SchellenbergProtocol(received.append, api=Mock())
+
+    garbage = "X" * (api_module.MAX_SERIAL_BUFFER_LENGTH + 1)
+    protocol.data_received(garbage.encode("ascii"))
+
+    assert protocol.buffer == ""
+    assert received == []  # never a valid line - nothing to dispatch
+    warning_records = [
+        record for record in caplog.records if "buffer exceeded" in record.message
+    ]
+    assert len(warning_records) == 1
+    assert warning_records[0].levelno == logging.WARNING
+
+
+def test_data_received_cap_is_measured_after_draining_complete_lines() -> None:
+    """A chunk that both completes a backlog of real lines *and* leaves a
+    new, still-partial tail under the cap must keep that tail rather than
+    discarding it - the cap only ever judges what is left after every
+    complete line already found has been drained and dispatched.
+    """
+    received: list[str] = []
+    protocol = api_module.SchellenbergProtocol(received.append, api=Mock())
+
+    protocol.data_received(b"t1\nt0\nss10ABCDEF0000")
+
+    assert received == ["t1", "t0"]
+    assert protocol.buffer == "ss10ABCDEF0000"

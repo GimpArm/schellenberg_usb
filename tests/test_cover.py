@@ -18,7 +18,9 @@ building the entity directly.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -44,11 +46,15 @@ from custom_components.schellenberg_usb.const import (
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
+    CONF_STATUS_IDENTITY_SOURCE,
     DOMAIN,
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
+    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     SIGNAL_DEVICE_EVENT,
+    STATUS_IDENTITY_SOURCE_UNKNOWN,
+    STOP_COMMAND_LATENCY_SECONDS,
     SUBENTRY_TYPE_BLIND,
 )
 from custom_components.schellenberg_usb.cover import (
@@ -104,6 +110,15 @@ def _build_cover(hass: HomeAssistant, api: Any, **overrides: Any) -> Schellenber
         api.pop_fresh_calibration_position.return_value, MagicMock
     ):
         api.pop_fresh_calibration_position.return_value = None
+    # Same reasoning, same idiom, for the new contention-aware stop-lead
+    # check in _async_position_update_loop(): a bare MagicMock's own
+    # .move_lock_busy would otherwise auto-vivify as a (truthy) MagicMock
+    # attribute, silently doubling the latency-compensation lead for
+    # every existing position-loop test that never heard of contention.
+    # Defaulted to "not busy" here, but only if a test hasn't already set
+    # its own value (before *or* after calling this helper).
+    if isinstance(api, MagicMock) and isinstance(api.move_lock_busy, MagicMock):
+        api.move_lock_busy = False
     return cover
 
 
@@ -194,6 +209,116 @@ async def test_async_close_cover_raises_when_control_blind_with_retry_fails(
     assert cover._move_start_time is None
 
 
+async def test_async_open_cover_clears_stale_target_when_a_preserved_leg_fails(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard for audit finding 2.
+
+    A failed set_cover_position() leg (_preserve_target=True) used to leave
+    _target_position stale, since only a plain, non-preserving open/close
+    cleared it on failure. A later, completely unrelated move - typically
+    the blind's own physical remote control, picked up via _handle_event() -
+    never touches _target_position either, so it could inherit that stale
+    value and get auto-stopped by _async_position_update_loop() at a long-
+    invalid position that has nothing to do with it.
+    """
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=False)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 40  # stale target a set_cover_position() leg set
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._attr_is_opening is False
+    assert cover._target_position is None
+
+
+async def test_async_close_cover_clears_stale_target_when_a_preserved_leg_fails(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors the open-side regression guard above for close."""
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=False)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 40
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_close_cover(_preserve_target=True)
+
+    assert cover._attr_is_closing is False
+    assert cover._target_position is None
+
+
+async def test_async_open_cover_failure_does_not_clobber_anothers_live_target(
+    hass: HomeAssistant,
+) -> None:
+    """A failing *plain* open must not wipe a different leg's live target.
+
+    The two regression tests above cover a *preserved* leg's own target
+    being cleared on its own failure (_preserve_target=True) - correct,
+    since that leg owns the target it is being asked to preserve. The
+    failure path used to clear self._target_position unconditionally
+    though, regardless of *this* call's own _preserve_target - so a
+    plain open (_preserve_target=False, which has no target concept of
+    its own; any stale one of its own was already dropped at the top of
+    this same method) could still wipe a target that arrived in the
+    meantime and belongs to someone else entirely: self._target_position
+    is shared, per-entity state, and this call's own two awaits (the
+    cancel-tracking call, and this one) are real suspension points a
+    different, genuinely live set_cover_position() leg's own first,
+    synchronous write can land inside, same as the STARTED_MOVING/STOPPED
+    tests elsewhere in this file already establish for other fields.
+    Reproduced here without needing any precise interleaving: the
+    control_blind_with_retry mock itself sets the other leg's target
+    before failing, which is enough to show the failure path's own
+    unconditional clear was the only thing that could still destroy it.
+    """
+
+    async def fake_retry_then_fail(*_args: object, **_kwargs: object) -> bool:
+        # A different, genuinely live set_cover_position() leg's target
+        # landing while this plain open's own write is in flight - then
+        # this call's own write fails outright.
+        cover._target_position = 40
+        return False
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry_then_fail)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover()  # plain open - _preserve_target defaults False
+
+    assert cover._target_position == 40
+
+
+async def test_async_close_cover_failure_does_not_clobber_anothers_live_target(
+    hass: HomeAssistant,
+) -> None:
+    """Mirrors the open-side regression guard above for close."""
+
+    async def fake_retry_then_fail(*_args: object, **_kwargs: object) -> bool:
+        cover._target_position = 60
+        return False
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry_then_fail)
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_close_cover()  # plain close - _preserve_target defaults False
+
+    assert cover._target_position == 60
+
+
 async def test_async_open_cover_does_not_start_tracking_before_retry_succeeds(
     hass: HomeAssistant,
 ) -> None:
@@ -280,6 +405,46 @@ async def test_async_close_cover_does_not_start_tracking_before_retry_succeeds(
     assert cover._move_start_time is not None
     assert cover._move_start_position == 50
     mock_start_tracking.assert_called_once_with()
+
+
+async def test_async_open_cover_pushes_move_start_time_past_the_dead_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real _move_start_time must land STOP_COMMAND_LATENCY_SECONDS ahead.
+
+    Companion to test_async_open_cover_does_not_start_tracking_before_
+    retry_succeeds above, which only proves _move_start_time is set at
+    all (not None) once control_blind_with_retry() succeeds. This proves
+    *where* it is set to - time.monotonic() plus STOP_COMMAND_LATENCY_
+    SECONDS, not plain time.monotonic() - see that assignment's own
+    comment in _async_open_cover_body() for why.
+    """
+    clock = _FakeClock(2_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    await cover.async_open_cover()
+
+    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
+
+
+async def test_async_close_cover_pushes_move_start_time_past_the_dead_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_async_open_cover_pushes_move_start_time_past_the_dead_time."""
+    clock = _FakeClock(2_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+
+    await cover.async_close_cover()
+
+    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
 
 
 async def test_async_close_cover_skips_reset_for_redundant_resend(
@@ -866,6 +1031,128 @@ async def test_position_loop_stops_at_a_partial_target(
     assert cover._attr_is_closing is False
 
 
+async def test_position_loop_retries_auto_stop_when_the_write_fails(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed auto-stop write must not be treated as a successful stop.
+
+    Regression guard for audit finding 1: control_blind_stop()'s return
+    value used to be discarded, so is_closing/is_opening/the target were
+    cleared unconditionally even when the write never reached the wire -
+    reporting the move as finished while the motor kept running toward its
+    real end stop, and discarding the loop's own ability to act on a later,
+    genuine stop. The fix retries on the next 0.2s tick instead of clearing
+    state, so it must call control_blind_stop() again rather than return.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(side_effect=[False, _LoopKeptRunning])
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 40),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    assert api.control_blind_stop.await_count == 2
+    # Must still be a live, untouched move so the retry (or the motor's own
+    # eventual end-stop) can still be acted on - not silently discarded.
+    assert cover._target_position == 40
+    assert cover._attr_is_closing is True
+
+
+async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-direction retarget landing mid-stop must not be wiped out.
+
+    Regression guard for the race the independent review of aa33670+#116
+    flagged (task #117): _has_live_tracking_in_direction() only checks
+    direction, not the target value, so async_close_cover()'s own
+    is_redundant_resend piggyback path can see this exact loop/task as
+    still live - same direction, not done, _move_start_* still set - and
+    deliberately leave it running rather than starting a tracking task of
+    its own, on the assumption that this loop will keep tracking its new
+    target. Before this fix, this loop had no way to notice the target
+    had moved out from under it while its own control_blind_stop() for
+    the *old* target was in flight: once that await returned, it
+    unconditionally cleared is_closing/_move_start_*/_target_position and
+    returned, ending itself - leaving the new leg's own, still-physically-
+    continuing move with nothing left tracking or auto-stopping it at
+    all. A plain _command_in_flight check could not close this gap either
+    (noted by the same reviewer): the new leg has already returned by the
+    time this loop's stop completes, so nothing is "in flight" to check.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    call_count = 0
+
+    async def _stop_side_effect(*_args: object, **_kwargs: object) -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Stands in for async_close_cover()'s own is_redundant_resend
+            # branch landing while this call is in flight: by the time it
+            # returns, self._target_position already points at its own,
+            # newer value - set directly here rather than by actually
+            # calling async_close_cover(), to isolate this loop's own
+            # reaction to the race from that method's side of it (already
+            # covered by the is_redundant_resend tests above).
+            cover._target_position = 25
+            return True
+        # Proves the loop re-evaluated against the new target on the very
+        # next tick instead of having already ended itself.
+        raise _LoopKeptRunning
+
+    api.control_blind_stop = AsyncMock(side_effect=_stop_side_effect)
+    cover = _build_cover(hass, api)
+    # Deliberately tracks self._target_position, not a fixed 40: the first
+    # tick only needs current==40 to satisfy position_reached against the
+    # original target (40), but the second tick, after the retarget to 25,
+    # needs current==25 to satisfy it against the *new* one - a fixed 40
+    # would make the second tick's own position_reached check (40 <= 25 +
+    # ~2-point lead) false, so control_blind_stop() would never be called
+    # a second time and this test would hang until pytest's own timeout
+    # instead of ever reaching _LoopKeptRunning. Found while independently
+    # re-verifying this test's own arithmetic rather than trusting it.
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", cover._target_position),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+    cover._move_start_time = time.monotonic()
+    cover._move_start_position = 50
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    # Called once for the original target (40) and once for the retarget
+    # (25) - proof the loop kept running and re-evaluated, rather than
+    # clearing everything and returning after the first, now-stale stop.
+    assert api.control_blind_stop.await_count == 2
+    assert cover._target_position == 25
+    assert cover._attr_is_closing is True
+    assert cover._move_start_time is not None
+    assert cover._move_start_position is not None
+
+
 async def test_position_loop_stops_early_to_compensate_stop_latency(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -986,6 +1273,98 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
     api.control_blind_stop.assert_not_awaited()
     api.cancel_pending_move.assert_not_called()
     assert cover._target_position == 20
+
+
+async def test_position_loop_widens_the_stop_lead_when_the_move_lock_is_busy(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contention for the shared transmit lock must widen the lead further.
+
+    Exact same fixture as test_position_loop_does_not_stop_before_the_
+    compensated_lead above - 6s close travel, estimate stuck at 45%,
+    target 20 - which that test used to prove the plain, uncontended lead
+    (~20 points, threshold ~40) does *not* yet cover 45%. The only
+    difference here is api.move_lock_busy=True: the lead doubles to ~40
+    points (threshold target(20) + 40 = 60), which 45 *does* satisfy -
+    proving the loop actually reads move_lock_busy and widens the lead
+    for it, rather than ignoring it or always capping at
+    MAX_STOP_LEAD_PERCENT regardless. Real-log motivation: see
+    move_lock_busy's own comment in api.py.
+    """
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(return_value=True)
+    api.move_lock_busy = True
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 45),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 20
+
+    await cover._async_position_update_loop()
+
+    api.cancel_pending_move.assert_called_once_with(cover._command_device_id)
+    api.control_blind_stop.assert_awaited_once_with(
+        cover._command_enum, device_id=cover._command_device_id
+    )
+    assert cover._attr_current_cover_position == 20
+    assert cover._target_position is None
+    assert cover._attr_is_closing is False
+
+
+async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The latency-compensation lead must not swallow the whole travel range.
+
+    Regression guard for audit finding 18. stop_lead_percent's own divisor
+    (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
+    - but unlike that calculation, whose final position *is* clamped to
+    [0, 100], stop_lead_percent itself used to carry no matching ceiling.
+    A 1s close time - clearly outside anything a real shutter reports, but
+    exactly the kind of corrupt/legacy config value that floor exists for
+    - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100) = 120
+    points: more than the entire 0-100 range. Uncapped, target(30) + 120 =
+    150 is satisfied by any position at all, so the loop used to fire its
+    stop the instant it was entered, however far from 30 the blind actually
+    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane 80:
+    a position of 85 - the blind has barely started closing from 100 -
+    must not satisfy "85 <= 80" and must not stop yet.
+    """
+
+    sleep_calls = 0
+
+    async def counting_sleep(*_args: object, **_kwargs: object) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            # See _LoopKeptRunning's own docstring above for why this is
+            # how this suite ends a loop proven not to stop, rather than a
+            # real cancellation.
+            raise _LoopKeptRunning
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 1.0})
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 85),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._target_position = 30
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    api.control_blind_stop.assert_not_awaited()
+    api.cancel_pending_move.assert_not_called()
+    assert cover._target_position == 30
 
 
 async def test_position_loop_endstop_target_skips_the_transmitter_wait_too(
@@ -1167,6 +1546,43 @@ async def test_update_position_estimates_closing_progress_from_elapsed_time(
     cover._update_position()
 
     assert cover._attr_current_cover_position == 50
+
+
+async def test_update_position_holds_at_start_during_the_transmit_dead_time(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position must not move before the modeled start-side latency elapses.
+
+    async_open_cover()/async_close_cover() push _move_start_time this far
+    into the future rather than leaving it at plain time.monotonic() (see
+    their own comments) - modeling the real ~1.1-1.2s it takes the stick
+    to accept a write before the motor actually starts turning, the same
+    figure STOP_COMMAND_LATENCY_SECONDS already measures for the opposite,
+    stop-side case. Exercises _update_position()'s own max(0.0, ...)
+    clamp directly: while time.monotonic() has not yet reached that
+    pushed-forward point, elapsed_time would otherwise go negative and
+    run total_position_change backwards past _move_start_position - the
+    clamp holds the estimate exactly at the start position instead, and
+    the position resumes its ordinary ramp, from that same start
+    position, once real time catches up to it.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._attr_is_opening = True
+    cover._move_start_position = 0
+    cover._move_start_time = clock() + STOP_COMMAND_LATENCY_SECONDS
+
+    clock.advance(STOP_COMMAND_LATENCY_SECONDS - 0.2)  # still inside the dead time
+    cover._update_position()
+
+    assert cover._attr_current_cover_position == 0
+
+    clock.advance(0.2 + 5.0)  # past the dead time, then a quarter of the 20s travel
+    cover._update_position()
+
+    assert cover._attr_current_cover_position == 25
 
 
 async def test_update_position_clamps_overshoot_to_the_travel_limits(
@@ -1370,6 +1786,31 @@ async def test_handle_event_started_moving_down_sets_closing_and_starts_tracking
     cover._start_position_tracking.assert_called_once_with()
 
 
+async def test_handle_event_started_moving_from_unknown_position_anchors_to_zero(
+    hass: HomeAssistant,
+) -> None:
+    """A move-start echo arriving while position is still None (e.g. right
+    after a restart with nothing restored - see async_added_to_hass()'s own
+    comment on why that can now happen) must not leave _move_start_position
+    None too: _update_position() refuses to track from a None baseline (its
+    own first guard), which would silently freeze tracking at "unknown"
+    forever, even once the blind is plainly moving. Mirrors async_open_
+    cover()'s/async_close_cover()'s identical guard for the same unknown
+    starting state on a Home Assistant-issued command.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_current_cover_position = None
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._move_start_position == 0
+    assert cover._attr_is_opening is True
+    cover._start_position_tracking.assert_called_once_with()
+
+
 async def test_handle_event_respects_invert_direction_for_the_physical_signal(
     hass: HomeAssistant,
 ) -> None:
@@ -1417,6 +1858,203 @@ async def test_handle_event_stopped_freezes_the_estimated_position(
     # remote), so the commanded target was never actually reached.
     assert cover._target_position is None
     cover._stop_position_tracking.assert_called_once_with()
+
+
+async def test_handle_event_stopped_cancels_any_pending_move_for_this_device(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every STOPPED echo cancels a pending move/resend for this device_id,
+    not only one this entity's own async_stop_cover() or the auto-stop-
+    at-target loop issued.
+
+    Closes the one source control_blind_with_retry()'s own cancellation
+    check (see MOVE_COMMAND_EXTRA_RESENDS's own comment in const.py)
+    cannot see on its own: a stop pressed directly on the physical remote
+    or a Gurtwickler winder's own local buttons, which never calls
+    cancel_pending_move() itself since it never goes through this
+    integration's own command path. cancel_pending_move() is a no-op
+    without a move actually in progress for this device_id (see its own
+    docstring) - this only proves _handle_event() calls it unconditionally,
+    the same way async_stop_cover()'s own identical first line does.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20
+
+    cover._handle_event(EVENT_STOPPED)
+
+    api.cancel_pending_move.assert_called_once_with(cover._command_device_id)
+
+
+async def test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_zero(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEAR_END_STOP_SNAP_TOLERANCE_PERCENT: calibration drift vs a real stop.
+
+    Real-world report (2026-10-31): closing a blind all the way via its
+    remote consistently left the estimate at 2% instead of 0%, every
+    time, regardless of how directly/quickly it was driven down - the
+    motor's own physical end stop does not line up exactly with elapsed
+    time crossing 0% once calibration's own travel_time is an
+    approximation of the real motor's, which it necessarily always is.
+    An untargeted move (_target_position already None, as every remote/
+    wall-switch/Gurtwickler-driven move always is - see EVENT_STARTED_
+    MOVING_DOWN's own handling) landing this close to the edge it was
+    already heading toward is this drift, not a deliberate mid-travel
+    stop - contrast test_handle_event_stopped_freezes_the_estimated_
+    position above, which proves a genuine mid-travel stop (far from
+    either edge, with a target still set) is correctly left exactly at
+    the raw estimate, un-snapped.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._move_start_time = clock()
+    cover._move_start_position = 100
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(19.6)  # 98% of the 20s close travel time: estimate lands
+    # at ~2% (1% once _update_position()'s int() truncates the
+    # binary-float result of 19.6/20.0*100 - either way, within tolerance)
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._attr_is_closed is True
+
+
+async def test_handle_event_stopped_snaps_a_near_full_targetless_open_to_100(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_
+    zero above, for the opening/98% side of the same real-world report.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 0
+    cover._move_start_time = clock()
+    cover._move_start_position = 0
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(19.6)  # 98% of the 20s open travel time: estimate lands at 98%
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._attr_is_closed is False
+
+
+async def test_handle_event_stopped_does_not_snap_a_near_full_open_started_mid_travel(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEAR_END_STOP_SNAP_TOLERANCE_PERCENT also requires the move to have
+    *started* near the opposite edge - see its own comment in const.py for
+    the direct user report that caught a first, position-only version of
+    this check. Starting at 20% (nowhere near the opposite edge, 0%) and
+    landing at a deliberately chosen 98% must be left exactly there, not
+    forced to 100% the way test_handle_event_stopped_snaps_a_near_full_
+    targetless_open_to_100 above - which starts at 0% - correctly is.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20  # not near the opposite edge (0%)
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(15.6)  # (98 - 20) / 100 * 20s: estimate lands at 98%
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 98
+    assert cover._attr_is_closed is False
+
+
+async def test_handle_event_stopped_does_not_snap_a_near_zero_close_started_mid_travel(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_handle_event_stopped_does_not_snap_a_near_full_open_
+    started_mid_travel above for the closing/near-zero side. Starting at
+    80% (nowhere near the opposite edge, 100%) and landing at a
+    deliberately chosen ~2% must be left there, not forced to 0%.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 80
+    cover._move_start_time = clock()
+    cover._move_start_position = 80  # not near the opposite edge (100%)
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(15.6)  # (80 - 2) / 100 * 20s: estimate lands at ~2%
+    # (1%, not 2%, once int() truncates the actual binary-float result -
+    # see the sibling snap-to-zero test's own comment above; either way,
+    # within tolerance, and the point here is that it stays un-snapped)
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 1
+    assert cover._attr_is_closed is False
+
+
+async def test_handle_event_stopped_logs_the_recalculated_position(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for audit finding 17.
+
+    The "Device %s STOPPED (position: %d%%)" info log used to be emitted
+    *before* _update_position() recalculated self._attr_current_cover_
+    position for the elapsed time, so it always printed the position as
+    of the last 0.2s polling tick (here, the move's unchanged starting
+    position of 20%) instead of where _handle_event's own recalculation -
+    the same one test_handle_event_stopped_freezes_the_estimated_position
+    already proves lands on 45% - says the blind actually stopped. Purely
+    a logging-field staleness: self._attr_current_cover_position itself,
+    and the diagnostics history record_position_update() writes right
+    after this log call, were never affected.
+    """
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.cover")
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20
+
+    clock.advance(5.0)  # a quarter of the 20s open travel time: +25
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 45
+    stopped_records = [
+        record for record in caplog.records if "STOPPED" in record.message
+    ]
+    assert len(stopped_records) == 1
+    # Before the fix this asserted "(position: 20%)" - the stale,
+    # pre-recalculation value - and failed.
+    assert "(position: 45%)" in stopped_records[0].message
+    assert "(position: 20%)" not in stopped_records[0].message
 
 
 @pytest.mark.parametrize(
@@ -1474,6 +2112,516 @@ async def test_handle_event_ignores_an_unrecognized_event(
     assert cover._attr_current_cover_position == 33
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
+
+
+# ---------------------------------------------------------------------------
+# _has_live_position_tracking(): the predicate _handle_event() and
+# _start_position_tracking() both now rely on to tell a position-tracking
+# task that is genuinely still running apart from one merely sitting in
+# the slot unmanaged (done, or mid-cancellation).
+# ---------------------------------------------------------------------------
+
+
+async def test_has_live_position_tracking_false_when_idle(
+    hass: HomeAssistant,
+) -> None:
+    """A fresh/idle cover has no live position tracking."""
+    cover = _build_cover(hass, MagicMock())
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_false_when_task_already_done(
+    hass: HomeAssistant,
+) -> None:
+    """A finished tracking task - the move already ended - is not live."""
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = True
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_false_when_task_is_cancelling(
+    hass: HomeAssistant,
+) -> None:
+    """A task mid-cancellation must not count as live either.
+
+    Mirrors _start_position_tracking()'s own pre-existing guard, which this
+    helper now backs - see its own docstring.
+    """
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = True
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is False
+
+
+async def test_has_live_position_tracking_true_when_task_is_running(
+    hass: HomeAssistant,
+) -> None:
+    """A task that is neither done nor cancelling counts as live."""
+    cover = _build_cover(hass, MagicMock())
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+
+    assert cover._has_live_position_tracking() is True
+
+
+# ---------------------------------------------------------------------------
+# _handle_event() STARTED_MOVING vs. a stale _target_position: a remote
+# control or wall switch (or an electric Gurtwickler's own local buttons)
+# drives a move this entity never initiated, so _handle_event() is the
+# *only* signal it ever gets - unlike async_open_cover()/async_close_
+# cover(), it never otherwise gets a chance to clear a target left over
+# from an earlier, not-cleanly-finished set_cover_position() leg.
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_started_moving_clears_stale_target_if_untracked(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard: an independently-triggered move must not inherit a
+    stale target.
+
+    _target_position can be left behind by an earlier set_cover_position()
+    leg that never cleanly finished (test_async_open_cover_clears_stale_
+    target_when_a_preserved_leg_fails's own docstring documents one way
+    that happens - a failed leg is only one of several; a STOPPED echo
+    that never arrives at all, the exact reliability problem this project
+    keeps running into, is another). With no position-tracking task yet
+    live, a STARTED_MOVING echo can only be *reporting* a move driven
+    independently - a paired remote control, a wall switch, or an electric
+    Gurtwickler's own local buttons - never one this entity itself started
+    (see _has_live_position_tracking()'s own docstring for why). Any
+    leftover target is therefore stale and must not cut that move short:
+    before this fix, _handle_event() never touched _target_position at
+    all, so _async_position_update_loop() would auto-stop - and report -
+    the blind at the old, unrelated percentage forever, even though it
+    physically kept going to its real 100/0 end stop.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 55  # stale, left over from an earlier leg
+    assert cover._position_update_task is None  # nothing tracking yet
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._target_position is None
+    assert cover._attr_is_opening is True
+
+
+async def test_handle_event_started_moving_preserves_a_live_targets_position(
+    hass: HomeAssistant,
+) -> None:
+    """A STARTED_MOVING echo confirming our own command must keep its target.
+
+    Mirrors the regression guard above for the opposite case: when a
+    position-tracking task is already live - which happens once async_
+    open_cover()/async_close_cover()'s own control_blind_with_retry() call
+    has actually succeeded - this echo is only confirming a move this
+    entity already knows about, so its _target_position (a set_cover_
+    position() leg's own, genuinely current target) is not stale and must
+    survive untouched. See test_handle_event_during_a_pending_command_
+    does_not_clear_its_target below for the other half of this same
+    guard: a command still in flight, before its own tracking task exists
+    yet.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+    cover._target_position = 55  # a genuinely in-progress set_cover_position()
+
+    cover._handle_event(EVENT_STARTED_MOVING_UP)
+
+    assert cover._target_position == 55
+
+
+async def test_handle_event_during_a_pending_command_does_not_clear_its_target(
+    hass: HomeAssistant,
+) -> None:
+    """A concurrent echo arriving mid-command must not clear its target either.
+
+    The two tests above only cover the two states that existed before
+    self._command_in_flight was introduced: nothing of ours in flight at
+    all, or a command whose own tracking task is already live. Between
+    those two moments sits a real, non-theoretical window: async_open_
+    cover()/async_close_cover() only start their own tracking task *after*
+    control_blind_with_retry() actually succeeds (see test_async_open_
+    cover_does_not_start_tracking_before_retry_succeeds), and that call
+    can itself stay suspended for a real stretch - hub-wide lock
+    contention, the busy-retry ack-wait. self._target_position is already
+    set for the whole of that stretch whenever this is a set_cover_
+    position() leg (_preserve_target=True), but self._position_update_
+    task is still None.
+
+    An independent, concurrently-triggered echo (a different remote
+    press, a wall switch, a Gurtwickler's own local buttons) can land at
+    exactly that moment. Checking only _has_live_position_tracking() - as
+    the first version of this fix did - would misread that window as
+    "nothing of ours is happening" and wrongly null out a target this
+    same entity's own in-flight command still needs, capping the leg at
+    whatever the live estimate happens to be once tracking finally starts
+    instead of the position it was actually asked to reach.
+    self._command_in_flight exists specifically to keep that window from
+    being mistaken for idle.
+    """
+
+    async def fake_retry(*_args: object, **_kwargs: object) -> bool:
+        # Simulates a concurrent, independently-triggered echo landing
+        # while this call is still suspended here - exactly the moment a
+        # real hub-wide lock wait or busy-retry ack-wait can occupy.
+        cover._handle_event(EVENT_STARTED_MOVING_UP)
+        return True
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(side_effect=fake_retry)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._target_position = 70  # a genuinely in-progress set_cover_position()
+    assert cover._position_update_task is None  # tracking hasn't started yet
+
+    await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._target_position == 70
+
+
+async def test_handle_event_stopped_does_not_clear_a_concurrent_commands_target(
+    hass: HomeAssistant,
+) -> None:
+    """A STOPPED echo for a just-superseded move must not clear a new leg's target.
+
+    Same self._command_in_flight window as the two tests above, but for
+    the STOPPED branch instead of STARTED_MOVING - nothing there ever
+    checked it, even though the branch's own comment already acknowledges
+    a target can still be set when STOPPED arrives (it reads that as
+    proof of an *external* interruption and clears it unconditionally on
+    that assumption).
+
+    Concrete scenario this misses: a set_cover_position() leg reverses
+    direction while an older, different move is still live - say that
+    older move is closing, and _async_position_update_loop()'s own
+    auto-stop-at-target branch has already sent it a real stop. The new
+    leg sets self._target_position to its own, brand new target
+    synchronously (see async_set_cover_position()), then its own async_
+    open_cover()/async_close_cover() call awaits _async_cancel_position_
+    tracking() to tear down the superseded move's tracking task - a real
+    suspension point, during which self._position_update_task is already
+    cleared (the real method clears it synchronously before its own
+    await), so _has_live_position_tracking() alone cannot tell this
+    window apart from genuine idle, exactly as test_handle_event_during_
+    a_pending_command_does_not_clear_its_target already established for
+    STARTED_MOVING. If the older move's own genuine STOPPED echo lands
+    during exactly that window, it is not an external interruption of the
+    new leg at all - it is just confirming the move the new leg itself is
+    in the middle of superseding - so it must not null out a target that
+    belongs to a different, still in-flight command.
+    """
+
+    async def fake_cancel_tracking(*_args: object, **_kwargs: object) -> None:
+        # Mirrors _async_cancel_position_tracking()'s own real order: it
+        # clears self._position_update_task synchronously, before its own
+        # suspension point - so by the time a concurrent echo could land
+        # here, nothing is "live" there any more, and self._command_in_
+        # flight is the only thing left that can tell this apart from
+        # genuine idle.
+        cover._position_update_task = None
+        cover._handle_event(EVENT_STOPPED)
+
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._async_cancel_position_tracking = AsyncMock(  # type: ignore[method-assign]
+        side_effect=fake_cancel_tracking
+    )
+    # The superseded move: closing, so this new open() is not itself
+    # mistaken for a redundant resend of the same direction (which would
+    # skip the cancel-tracking await entirely via a different path).
+    cover._attr_is_closing = True
+    cover._attr_is_opening = False
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+    cover._target_position = 70  # the new leg's own, brand new target
+
+    await cover.async_open_cover(_preserve_target=True)
+
+    assert cover._target_position == 70
+
+
+# ---------------------------------------------------------------------------
+# _handle_secondary_activity()/_clear_optimistic_secondary_move(): an
+# optimistic, direction-guessed dashboard state triggered by a secondary
+# identity's own frame (a second remote/wall-switch paired to the same
+# motor). Deliberately never decodes that frame's own command byte - see
+# the two methods' own docstrings/comments for why - so these tests never
+# pass one in either; async_call_later is stubbed so no test schedules a
+# real timer, and _clear_optimistic_secondary_move is always exercised by
+# calling it directly rather than by waiting one out.
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_secondary_activity_guesses_opening_when_mostly_closed(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schedule = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later", schedule
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 20
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    schedule.assert_called_once_with(
+        hass,
+        OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+        cover._clear_optimistic_secondary_move,
+    )
+    assert cover._optimistic_secondary_move_unsub is schedule.return_value
+
+
+async def test_handle_secondary_activity_guesses_closing_when_mostly_open(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later",
+        MagicMock(return_value=MagicMock()),
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 80
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_closing is True
+    assert cover._attr_is_opening is False
+
+
+async def test_handle_secondary_activity_does_nothing_while_already_tracking(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schedule = MagicMock()
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later", schedule
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 20
+    cover._attr_is_opening = False
+    cover._attr_is_closing = True  # a real move already tracked, in progress
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_closing is True
+    assert cover._attr_is_opening is False
+    schedule.assert_not_called()
+
+
+async def test_handle_secondary_activity_does_nothing_while_command_in_flight(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schedule = MagicMock()
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later", schedule
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 20
+    cover._command_in_flight = True
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    schedule.assert_not_called()
+
+
+async def test_handle_secondary_activity_does_nothing_without_a_known_position(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schedule = MagicMock()
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later", schedule
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = None
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    schedule.assert_not_called()
+
+
+async def test_handle_secondary_activity_debounces_a_repeated_frame(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote commonly repeats its frame every ~400ms while held down.
+
+    The first frame's guess and its withdrawal timeout must stand as they
+    are - not be re-guessed or re-scheduled on every repeat.
+    """
+    schedule = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later", schedule
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 20
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+    cover._attr_current_cover_position = 80  # would guess the other way
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_opening is True  # unchanged from the first guess
+    assert cover._attr_is_closing is False
+    schedule.assert_called_once()
+
+
+async def test_clear_optimistic_secondary_move_withdraws_unconfirmed_guess(
+    hass: HomeAssistant,
+) -> None:
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_is_opening = True
+    cover._optimistic_secondary_move_unsub = MagicMock()
+    cover._position_update_task = None  # no real echo ever took over
+
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
+
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._optimistic_secondary_move_unsub is None
+
+
+async def test_clear_optimistic_secondary_move_leaves_real_tracking_alone(
+    hass: HomeAssistant,
+) -> None:
+    """If the primary identity's own echo already took over, don't stomp it."""
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_is_opening = True  # the real, decoded direction by now
+    cover._attr_is_closing = False
+    cover._optimistic_secondary_move_unsub = MagicMock()
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancelling.return_value = False
+    cover._position_update_task = fake_task  # _handle_event() already took over
+
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
+
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    assert cover._optimistic_secondary_move_unsub is None
+
+
+async def test_clear_optimistic_secondary_move_leaves_a_pending_command_alone(
+    hass: HomeAssistant,
+) -> None:
+    """A command already in flight must not be pulled back to idle either.
+
+    Mirrors the test above, but for the other half of _handle_event()'s own
+    two-part check (_has_live_position_tracking() or self._command_in_
+    flight), which this method's guard had not been mirroring: async_open_
+    cover()/async_close_cover() set their own optimistic is_opening/
+    is_closing synchronously, before their own tracking task exists - it
+    only starts once control_blind_with_retry() actually succeeds, which
+    can stay suspended for a real stretch (hub-wide lock contention, the
+    busy-retry wait), same window test_handle_event_during_a_pending_
+    command_does_not_clear_its_target already proved for _handle_event()
+    itself. Before this fix, this method checked only _has_live_position_
+    tracking() - unlike _handle_secondary_activity()'s own, already-correct
+    mirror of this same check - so a withdrawal timeout firing inside that
+    window pulled a real, in-flight command's own optimistic state straight
+    back down to idle a few seconds into it.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_is_opening = True  # async_open_cover()'s own optimistic state
+    cover._attr_is_closing = False
+    cover._command_in_flight = True  # control_blind_with_retry() still pending
+    cover._optimistic_secondary_move_unsub = MagicMock()
+    cover._position_update_task = None  # tracking hasn't started yet
+
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
+
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    assert cover._optimistic_secondary_move_unsub is None
+
+
+async def test_secondary_activity_from_a_stale_post_restart_frame_self_corrects(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closes out the open "shows closed right after restart" regression note.
+
+    That regression (see CHANGELOG.md / commit d21735d) was caused by a
+    mechanism that no longer exists at all: the old close+open elapsed-
+    timer detection feature (reverted) plus a command-byte decode
+    fallback (also reverted) together let a stale, pre-restart secondary
+    frame - delivered as a burst the instant the integration starts
+    reading the serial port again - commit a blind straight to a wrong,
+    permanent state, since that old timer had no withdrawal of its own
+    to correct a guess nothing ever confirmed.
+
+    _handle_secondary_activity()/_clear_optimistic_secondary_move() is
+    the mechanism that replaced it, and until now each had only ever
+    been tested in isolation - never against this exact scenario end to
+    end. Simulates it directly: a position already restored from before
+    the restart (restore_state's own job, unrelated to either mechanism
+    and not re-tested here), one stale secondary frame with nothing ever
+    confirming it, then the withdrawal timeout firing with no primary
+    echo and no command of this entity's own having started either.
+    Confirms the worst case under the current design is a several-
+    second transient guess that clears itself - never a wrong state
+    left standing indefinitely, the way the old, withdrawn mechanism
+    did. No production code changed for this: the redesign that
+    replaced the old mechanism already closes this gap as a side
+    effect of never trusting an unconfirmed guess for longer than
+    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS; this test only makes
+    that confirmed rather than assumed.
+    """
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover.async_call_later",
+        MagicMock(return_value=MagicMock()),
+    )
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._attr_current_cover_position = 70  # restored: mostly open
+
+    cover._handle_secondary_activity("irrelevant - never decoded")
+
+    assert cover._attr_is_closing is True  # transient guess only
+    assert cover._attr_is_opening is False
+
+    # The primary identity's own echo never arrives for this stale frame
+    # - nothing physically moved - so only the withdrawal timeout fires.
+    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
+
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._optimistic_secondary_move_unsub is None
 
 
 # ---------------------------------------------------------------------------
@@ -1681,7 +2829,7 @@ async def test_added_to_hass_restores_position_from_a_plain_closed_state(
     assert cover._attr_is_closed is True
 
 
-async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
+async def test_added_to_hass_leaves_position_unknown_when_nothing_was_restored(
     hass: HomeAssistant,
 ) -> None:
     """A brand-new entity with no prior Home Assistant state at all, and no
@@ -1689,6 +2837,14 @@ async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
     before that key existed, or via the hybrid add_shutter_from_remote
     workflow, which never calibrates) - see the sibling test right below
     for the case where that key *is* present.
+
+    Used to default to 0%/closed here - see this branch's own comment in
+    cover.py for the real-world report that traced "every blind on a hub
+    shows closed right after a Home Assistant restart, even ones that
+    were not actually closed" to exactly this fallback. Position/
+    is_closed are both already None from __init__, so leaving them
+    untouched is what actually reports "unknown" rather than a specific,
+    wrong answer.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)
@@ -1698,8 +2854,8 @@ async def test_added_to_hass_defaults_to_closed_when_nothing_was_restored(
 
     await cover.async_added_to_hass()
 
-    assert cover._attr_current_cover_position == 0
-    assert cover._attr_is_closed is True
+    assert cover._attr_current_cover_position is None
+    assert cover._attr_is_closed is None
 
 
 async def test_added_to_hass_uses_calibration_ending_position_when_nothing_was_restored(
@@ -1940,6 +3096,55 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
             device_registry, (DOMAIN, "ABCDEF"), entry.entry_id
         )
         is None
+    )
+
+
+async def test_async_setup_entry_nulls_a_stale_status_identity_when_source_is_unknown(
+    hass: HomeAssistant,
+) -> None:
+    """Regression guard for audit finding 8.
+
+    identities.py's resolve_blind_identities() - the canonical logic for
+    this exact resolution, shared by config_flow.py's developer-tools
+    diagnostics step and diagnostics.py's own dump - treats
+    CONF_STATUS_IDENTITY_SOURCE == STATUS_IDENTITY_SOURCE_UNKNOWN as "no
+    confirmed primary status identity", regardless of whatever
+    CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM values are still sitting in the
+    subentry's data from before it became unconfirmed. async_setup_entry()
+    used to read those stale fields back out instead, so api.
+    register_entity() below would have briefly (re-)registered this
+    blind's old, no-longer-trusted status identity on every reload - not
+    reachable through the current UI (every write path already clears
+    these fields together), only with hand-edited or legacy config data,
+    which is exactly what this test constructs.
+    """
+    api = MagicMock()
+    entry = _build_hub_entry(hass, api)
+    _add_blind_subentry(
+        hass,
+        entry,
+        unique_id="blind-uuid-1",
+        data={
+            CONF_DEVICE_ID: "ABCDEF",
+            CONF_DEVICE_ENUM: "10",
+            CONF_STATUS_DEVICE_ID: "FEDCBA",
+            CONF_STATUS_ENUM: "20",
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_UNKNOWN,
+            CONF_OPEN_TIME: 20.0,
+            CONF_CLOSE_TIME: 18.0,
+        },
+    )
+    async_add_entities = Mock()
+
+    await async_setup_entry(hass, entry, async_add_entities)
+
+    api.register_entity.assert_called_once_with(
+        None,
+        None,
+        "Living Room Blind",
+        command_device_id="ABCDEF",
+        command_enum="10",
+        secondary_status_identities=(),
     )
 
 
@@ -2282,3 +3487,35 @@ async def test_will_remove_from_hass_shuts_down_tracking_then_calls_super(
     cover._async_shutdown_position_tracking.assert_awaited_once_with(
         "entity removal or entry unload"
     )
+
+
+async def test_will_remove_from_hass_cancels_this_devices_in_flight_move(
+    hass: HomeAssistant,
+) -> None:
+    """Regression for audit finding 16: removing a blind's own subentry/
+    device used to leave any in-flight control_blind_with_retry() loop for
+    it running untouched - still able to transmit a real RF command, or
+    process a stray ack, for a blind Home Assistant no longer has an
+    entity for - until the *subsequent* full hub reload's unload phase
+    eventually reached disconnect(), hub-wide. cancel_pending_move() is
+    the same per-device mechanism async_stop_cover() already uses (see its
+    own docstring in api.py); this proves async_will_remove_from_hass()
+    now also calls it, for this entity's own _command_device_id, and
+    before shutting down position tracking.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    call_order: list[str] = []
+    api.cancel_pending_move.side_effect = lambda _device_id: call_order.append(
+        "cancel_pending_move"
+    )
+    cover._async_shutdown_position_tracking = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda _reason: call_order.append(
+            "_async_shutdown_position_tracking"
+        )
+    )
+
+    await cover.async_will_remove_from_hass()
+
+    api.cancel_pending_move.assert_called_once_with("ABCDEF")
+    assert call_order == ["cancel_pending_move", "_async_shutdown_position_tracking"]

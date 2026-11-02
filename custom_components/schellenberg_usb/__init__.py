@@ -8,7 +8,8 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -208,7 +209,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             api.transmitter_active,
             api.busy_latched,
         )
-        if not await api.control_blind(
+        if not await api.control_blind_exclusive(
             call.data[CONF_ENUM],
             action,
             device_id=call.data[CONF_DEVICE_ID],
@@ -275,6 +276,25 @@ async def async_setup_entry(
     entry.runtime_data = api
 
     api.start_connecting()
+
+    async def _async_handle_hass_stop(_event: Event) -> None:
+        """Disconnect the USB stick when Home Assistant itself is stopping.
+
+        async_unload_entry() below already disconnects the stick on an
+        ordinary reload/remove/disable, but Home Assistant does not call
+        that for every loaded entry on a full Core stop/restart - until
+        now, only cover.py's own per-entity EVENT_HOMEASSISTANT_STOP
+        listener ran at that point, freezing each blind's own position
+        estimate but leaving this hub's shared serial connection itself
+        open for the process teardown to close however it happened to,
+        rather than the same clean, intentional close() a reload already
+        gets (audit finding 22).
+        """
+        await api.disconnect()
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_handle_hass_stop)
+    )
 
     hub_subentry = next(
         (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_HUB),

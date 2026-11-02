@@ -85,6 +85,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_CLOSE_TIME,
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
+    CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
     CONF_OPEN_TIME,
     CONF_SECONDARY_STATUS_IDENTITIES,
@@ -458,6 +459,189 @@ async def test_capture_signal_from_a_different_blind_does_not_satisfy_the_wait(
     assert result["step_id"] == "calibration_close_instruction"
 
 
+async def test_calibration_excludes_other_blinds_frames_from_identity_result(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign already-paired blind's real status frames must never win
+    this blind's calibration identity, even though api.py's hub-wide
+    capture buffer physically records both.
+
+    Regression test for audit finding 9. Unlike
+    test_capture_signal_from_a_different_blind_does_not_satisfy_the_wait
+    above - which only proves a foreign blind's SIGNAL_DEVICE_EVENT_CAPTURE
+    *timing* signal cannot fake out the movement-start/stop wait - this
+    feeds real "ss" status frames straight through
+    connected_api._handle_message(), the exact mechanism api.py itself
+    uses to populate _status_discovery_frames, so the foreign device's
+    frames are genuinely present in the capture buffer by the time
+    finish_status_frame_capture() scores it. It sends three such frames,
+    all with a command that matches the "opening" phase, against this
+    blind's own single matching frame - enough to outscore it on
+    summarize_status_discovery_frames()'s phase_confirmed_frame_count
+    tiebreak (identities.py), the first and highest-priority key compared
+    - and asserts the foreign device is excluded from the result entirely
+    rather than merely deprioritized: it must not become primary, nor
+    even appear as a secondary candidate.
+    """
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+    other_blind = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                CONF_DEVICE_ID: "112233",
+                CONF_DEVICE_ENUM: "05",
+                CONF_STATUS_DEVICE_ID: "112233",
+                CONF_STATUS_ENUM: "05",
+                CONF_OPEN_TIME: 15.0,
+                CONF_CLOSE_TIME: 14.0,
+                CONF_INVERT_DIRECTION: False,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_BLIND,
+        title="Kitchen Blind",
+        unique_id="112233",
+    )
+    hass.config_entries.async_add_subentry(entry, other_blind)
+
+    result = await _start_calibrate_flow(hass, entry, blind)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
+    )
+    await wait_for_registration()  # _wait_for_movement_start is now listening
+
+    # The capture's phase is "opening" by this point - set synchronously by
+    # async_step_calibration_open_instruction() itself before this very
+    # registration - so every frame injected below is captured and
+    # phase-labelled exactly as a real motor's would be. Raw wire format
+    # from api.py's _handle_message(): ss + enum(2) + device_id(6) +
+    # incrementor(4, ignored) + command(2) + padding(2, ignored) +
+    # signal(2, ignored). "01" is CMD_UP (const.py).
+
+    # This blind's own motor: one genuine "up" frame.
+    connected_api._handle_message("ss10ABCDEF0000010000")
+
+    # A different, already-paired blind on the same hub, moving on its own
+    # remote/automation during this capture window - sends more matching
+    # frames than the real blind above, which would otherwise win the
+    # phase_confirmed_frame_count tiebreak and get stored as *this* blind's
+    # status identity.
+    connected_api._handle_message("ss051122330000010000")
+    connected_api._handle_message("ss051122330001010000")
+    connected_api._handle_message("ss051122330002010000")
+
+    async_dispatcher_send(
+        hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STARTED_MOVING_UP
+    )
+    await wait_for_registration()  # _wait_for_stop_event is now listening
+    async_dispatcher_send(hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STOPPED)
+    result = await task
+    assert result["step_id"] == "calibration_close_instruction"
+
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
+    )
+    await wait_for_registration()  # _wait_for_movement_start is now listening
+    async_dispatcher_send(
+        hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STARTED_MOVING_DOWN
+    )
+    await wait_for_registration()  # _wait_for_stop_event is now listening
+    async_dispatcher_send(hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STOPPED)
+    result = await task
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_complete"
+    assert result["description_placeholders"] is not None
+    # The foreign blind's frames outscored this one's on every per-group
+    # count (3 frames to 1), so without finding 9's fix this would read
+    # "112233/05" instead.
+    assert result["description_placeholders"]["primary_status_identity"] == "ABCDEF/10"
+    assert result["description_placeholders"]["primary_frames"] == "01"
+    # Excluded from identity *selection* entirely (summarize_status_
+    # discovery_frames()'s own exclude_device_ids check), not merely
+    # outscored - so the foreign device must not even surface as a
+    # secondary candidate.
+    assert (
+        "112233"
+        not in result["description_placeholders"]["secondary_status_identities"]
+    )
+
+
+async def test_calibration_capture_survives_a_reload_mid_flow(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for audit finding 15: every subentry add/remove/edit on
+    this hub reloads the whole config entry, replacing entry.runtime_data
+    with a brand-new SchellenbergUsbApi - including for a change to some
+    other, unrelated blind, not just this one's own. Before this fix,
+    _finish_calibration_capture() re-fetched entry.runtime_data on every
+    call, so a reload racing in between a capture's start and finish would
+    have it read back the new, never-started instance instead (an empty
+    result, "not discovered") - silently discarding the real frames the
+    old instance had actually buffered, even though nothing about the
+    calibration itself went wrong.
+    """
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+    result = await _start_calibrate_flow(hass, entry, blind)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
+    )
+    await wait_for_registration()  # _wait_for_movement_start is now listening
+
+    # This blind's own motor, received while connected_api is still the
+    # live, connected instance the capture actually started on.
+    connected_api._handle_message("ss10ABCDEF0000010000")
+
+    # Simulate the hub reloading mid-flow - exactly as __init__.py's
+    # async_setup_entry() does on any subentry change, including some
+    # other, unrelated blind's: entry.runtime_data now points at a
+    # brand-new SchellenbergUsbApi, never connected or started.
+    entry.runtime_data = SchellenbergUsbApi(hass, "/dev/fake-reloaded")
+
+    async_dispatcher_send(
+        hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STARTED_MOVING_UP
+    )
+    await wait_for_registration()  # _wait_for_stop_event is now listening
+    async_dispatcher_send(hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STOPPED)
+    result = await task
+    assert result["step_id"] == "calibration_close_instruction"
+
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
+    )
+    await wait_for_registration()  # _wait_for_movement_start is now listening
+    async_dispatcher_send(
+        hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STARTED_MOVING_DOWN
+    )
+    await wait_for_registration()  # _wait_for_stop_event is now listening
+    async_dispatcher_send(hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STOPPED)
+    result = await task
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_complete"
+    assert result["description_placeholders"] is not None
+    # Without finding 15's fix, finish_status_frame_capture() would have
+    # run on the post-reload instance above instead, which never started a
+    # capture at all - this would read "not discovered" instead.
+    assert result["description_placeholders"]["primary_status_identity"] == "ABCDEF/10"
+
+
 async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
@@ -530,6 +714,18 @@ async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
     # blind ended up closed - args are
     # (entity_id, open_time, close_time, ending_position).
     assert signals[0][3] == 0
+    # Recalibrating an already-paired blind now also refreshes
+    # CONF_INITIAL_POSITION, the durable startup fallback (see that
+    # constant's own comment in cover.py, and the comment on this same key
+    # in options_flow_calibration.py's data_updates dict). Before this fix,
+    # this path only ever corrected the blind's *live* position via the
+    # SIGNAL_CALIBRATION_COMPLETED hand-off just asserted on above (
+    # signals[0][3]), leaving this persisted fallback stuck at whatever an
+    # earlier pairing had left (or nothing at all) - exactly the gap a
+    # real-world report (2026-11-01) traced a mix of "Unbekannt"/correctly-
+    # restored blinds on one hub back to. Same ending_position as the live
+    # hand-off above, for the same reason.
+    assert updated.data[CONF_INITIAL_POSITION] == 0
 
 
 async def test_choosing_open_advances_to_the_close_instruction_form(
@@ -648,6 +844,12 @@ async def test_close_leg_first_then_open_leg_ends_at_open_position(
     assert len(signals) == 1
     assert signals[0][0] == DEVICE_ID
     assert signals[0][3] == 100
+    # Mirror of the CONF_INITIAL_POSITION assertion in test_recalibrating_
+    # persists_new_times_and_notifies_the_live_entity above, for this test's
+    # own close-leg-first/ends-open order - see that assertion's comment for
+    # why this persistence matters. Same ending_position as the live
+    # hand-off (signals[0][3]) just above.
+    assert updated.data[CONF_INITIAL_POSITION] == 100
 
 
 def _build_bare_handler(
@@ -875,6 +1077,152 @@ async def test_open_instruction_stop_timeout_shows_error_and_reshows_form(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "calibration_open_instruction"
     assert result["errors"] == {"base": "calibration_timeout"}
+
+
+async def test_open_instruction_retry_after_timeout_reopens_the_capture(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for audit finding 3.
+
+    Every error exit from a calibration leg finishes the status-frame
+    capture (_finish_calibration_capture(), api.py's own
+    finish_status_frame_capture()). Retrying re-enters this same step,
+    which used to only call set_status_frame_capture_phase() - a silent
+    no-op once no capture is open (see api.py) - so the retry captured
+    zero status frames: _wait_for_movement_start()/_wait_for_stop_event()
+    still resolve normally, since they listen on a separate dispatcher
+    signal that does not depend on the capture buffer, so the retry could
+    still look like it succeeded while the blind actually ended up at
+    "status unknown" with no position tracking and no indication the
+    earlier timeout was the cause.
+    """
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+    result = await _start_calibrate_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    # First attempt: nothing ever moves, so the movement-start wait times
+    # out, same path as test_open_instruction_movement_start_timeout_
+    # shows_error_and_reshows_form above - this is what tears the capture
+    # down.
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["errors"] == {"base": "calibration_start_timeout"}
+    assert connected_api._status_discovery_frames is None
+
+    # Retry: re-enters the same step. Before the fix, the capture stayed
+    # None for the rest of this attempt.
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
+    )
+    await wait_for_registration()
+
+    assert connected_api._status_discovery_frames is not None
+
+    # Let the retry actually succeed too, proving the reopened capture is
+    # a real, working one and not just a non-None placeholder.
+    async_dispatcher_send(
+        hass, f"{SIGNAL_DEVICE_EVENT}_{DEVICE_ID}", EVENT_STARTED_MOVING_UP
+    )
+    await wait_for_registration()
+    async_dispatcher_send(hass, f"{SIGNAL_DEVICE_EVENT}_{DEVICE_ID}", EVENT_STOPPED)
+    result = await task
+
+    assert result["step_id"] == "calibration_close_instruction"
+
+
+async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Regression guard for audit finding 6.
+
+    _start_calibration_capture() used to catch start_status_frame_capture()'s
+    RuntimeError and force its way in anyway - finishing and discarding
+    whatever capture already held the one hub-wide buffer, then starting a
+    fresh one in its place. Nothing in this integration serializes two
+    blinds' calibration/discovery flows against each other, so this is a
+    realistic scenario, not a contrived one - and the steal silently
+    corrupted whichever operation lost the buffer, with no error shown to
+    either side. This simulates a second operation (another blind's own
+    calibration, or a status-discovery flow) already holding the buffer and
+    checks that starting this blind's own capture now backs off with a
+    clean error instead of stealing it.
+    """
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+
+    # Simulate a second operation - another blind's own calibration, or a
+    # status-discovery flow - already holding the one hub-wide buffer.
+    connected_api.start_status_frame_capture(phase="discovery")
+
+    result = await _start_calibrate_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_close"
+    assert result["errors"] == {"base": "calibration_capture_busy"}
+
+    # The other operation's capture must still be exactly as it was - not
+    # finished, not replaced.
+    assert connected_api._status_discovery_frames is not None
+    assert connected_api._status_discovery_phase == "discovery"
+
+
+async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for audit finding 6, retry path.
+
+    _set_calibration_capture_phase()'s own retry-reopen (added for finding
+    3, see test_open_instruction_retry_after_timeout_reopens_the_capture
+    above) calls _start_calibration_capture() again, which can itself find
+    a *different* operation now holding the buffer - the gap between this
+    leg's own timeout tearing its capture down and the user retrying is
+    plenty of time for another blind's flow to grab it. The retry must
+    surface the same clean busy error as the fresh-start path above, not
+    silently wait for movement that can never be attributed to a capture
+    that was never actually reopened.
+    """
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+    result = await _start_calibrate_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    # First attempt: nothing ever moves, so the movement-start wait times
+    # out - identical setup to the finding-3 retry test above - tearing
+    # this blind's own capture down.
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["errors"] == {"base": "calibration_start_timeout"}
+    assert connected_api._status_discovery_frames is None
+
+    # Before the retry, a different operation claims the now-free buffer.
+    connected_api.start_status_frame_capture(phase="discovery")
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_open_instruction"
+    assert result["errors"] == {"base": "calibration_capture_busy"}
+    # The other operation's capture is still untouched.
+    assert connected_api._status_discovery_phase == "discovery"
 
 
 async def test_calibration_close_step_aborts_without_a_selected_device() -> None:
