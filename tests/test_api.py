@@ -295,7 +295,7 @@ async def test_control_blind_sends_one_direct_unlocked_write(
 async def test_control_blind_updates_last_transmit_source(
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """Regression for audit finding 24: unlike send_command(), control_
+    """Regression: unlike send_command(), control_
     blind() used to never update _last_transmit_source at all - it writes
     straight to the transport instead of going through send_command() (see
     this class's own docstring above for why). Diagnostic/log-attribution
@@ -610,7 +610,7 @@ async def test_disconnect_also_unblocks_a_waiting_move_retry(
 def test_handle_connection_lost_clears_the_last_received_message_cache(
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """Regression for audit finding 13: every other piece of per-connection
+    """Regression: every other piece of per-connection
     state has long been cleared here (see
     test_handle_connection_lost_resets_retry_and_busy_state and
     test_handle_connection_lost_also_unblocks_a_waiting_move_retry above) -
@@ -1500,7 +1500,8 @@ async def test_control_blind_stop_bounds_the_ack_wait_to_the_remaining_budget(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression guard for audit finding 5.
+    """Regression guard: the ack-wait must bound itself to the time
+    remaining, not the full MOVE_ACK_TIMEOUT regardless of budget.
 
     The ack-wait used to always wait the full MOVE_ACK_TIMEOUT (1.0s)
     regardless of how much of STOP_RETRY_BUDGET lock contention and the
@@ -1638,7 +1639,7 @@ async def test_move_lock_busy_reflects_the_shared_locks_own_state(
 # for callers outside the regular cover-entity move/stop path (motor-
 # direction tests, developer-tools tests, the post-teach test, the
 # test_command service) that still need to share the hub-wide move-ack slot
-# safely - see audit finding 7.
+# safely.
 # ---------------------------------------------------------------------------
 
 
@@ -1711,7 +1712,8 @@ async def test_control_blind_exclusive_returns_true_on_a_silent_ack_timeout(
 async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression guard for audit finding 7.
+    """Regression guard: control_blind_exclusive() must not let an
+    unrelated blind's write steal this blind's move-ack slot.
 
     Before this fix, every one of control_blind_exclusive()'s current
     callers (the pairing wizard's motor-direction test, the reconfigure
@@ -1723,8 +1725,7 @@ async def test_control_blind_exclusive_does_not_steal_another_blinds_ack_slot(
     ack-wait, could have a totally unrelated test of blind B write right
     over it: B's write going out while A's slot is still marked
     outstanding means the stick's reply for B gets attributed to A
-    instead - exactly the concrete trace behind audit finding 7 (see
-    CHANGELOG.md's v1.3.0 entry), reproduced here with a real
+    instead - reproduced here with a real
     control_blind_with_retry() call standing in for blind A's own
     in-flight move.
 
@@ -2059,7 +2060,7 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
 ) -> None:
     """A second blind's own call starting must never steal blind A's spot.
 
-    Found during an independent audit: control_blind_with_retry() used to
+    control_blind_with_retry() used to
     track "which move is in progress" (and cancel_pending_move() its
     cancellation target) as a single hub-wide device_id rather than per
     device, even though driving several blinds together is this
@@ -2191,8 +2192,8 @@ async def test_cancel_pending_move_reaches_a_still_running_call_after_a_sibling_
 ) -> None:
     """A sibling call's own exit must not erase a device_id still in use.
 
-    Found by an independent audit of this session's own first attempt at
-    fixing this: _moves_in_progress was, at that point, a plain set, so
+    An earlier fix attempt within this same release left this gap open:
+    _moves_in_progress was, at that point, a plain set, so
     two genuinely concurrent control_blind_with_retry() calls for the very
     same device_id were indistinguishable from each other once either
     call's own `finally` ran - whichever one happened to exit *first*
@@ -2643,10 +2644,11 @@ async def test_pair_device_and_wait_timeout_leaves_stick_able_to_pair_again(
 ) -> None:
     """Regression test for the exact user-visible bug.
 
-    After a 2-minute pairing timeout, reopening "Pairing and calibrating
-    device" (or "Add roller shutter from remote control" - both pairing
-    entry points share this same pair_device_and_wait()/_stop_pairing_mode()
-    code path) used to immediately re-show the identical "pairing_timeout"
+    After a 2-minute pairing timeout, reopening the pairing wizard's entry
+    point - both of its old, separate entry points shared this same
+    pair_device_and_wait()/_stop_pairing_mode() code path before Issue #78
+    unified them into one, and the single entry point left today still
+    does - used to immediately re-show the identical "pairing_timeout"
     abort message, before any new attempt to find a device even began.
     Cause: _stop_pairing_mode()'s cleanup used to leave _device_mode stuck
     on "unknown" purely because an idle-confirmation wait it awaited timed
@@ -2962,7 +2964,7 @@ async def test_handle_message_ss_frame_broadcasts_capture_signal_during_capture(
 async def test_handle_message_caps_the_status_discovery_frame_list(
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """Regression for audit finding 14: before this fix, a status-frame
+    """Regression: before this fix, a status-frame
     capture window (calibration, remote-status discovery, teach_motor) had
     no limit on how many frames it would record while open, so sustained
     RF interference for as long as the window stayed open (up to
@@ -3021,7 +3023,7 @@ async def test_pop_fresh_calibration_position_without_a_prior_set_is_none(
 
 # ---------------------------------------------------------------------------
 # _record_last_received_message() (via _handle_message()'s own "ss" branch):
-# validation and the cap on _last_received_messages - audit finding 13.
+# validation and the cap on _last_received_messages.
 # Previously this cache had neither: any raw, merely-uppercased device_id/
 # enum substring became a permanent key, regardless of whether it was ever
 # real hex.
@@ -3214,7 +3216,7 @@ def test_data_received_keeps_buffering_a_partial_line_under_the_cap() -> None:
 def test_data_received_resets_the_buffer_once_it_exceeds_the_cap_without_a_terminator(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression for audit finding 12: a flaky connection, a firmware
+    """Regression: a flaky connection, a firmware
     glitch, a brownout, or a misconfigured port that stops producing a
     clean "\\n" terminator used to grow this buffer without limit for as
     long as that lasted, re-copying the whole (ever-larger) string on every

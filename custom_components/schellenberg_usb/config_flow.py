@@ -270,8 +270,7 @@ def _foreign_capture_device_ids(
     on this same hub - without this, a second blind's RF traffic arriving
     while this one is being paired or recalibrated could silently satisfy
     this one's movement-start/stop wait instead, corrupting the open/close
-    time being measured - found during the independent audit alongside
-    the CHANGELOG entries above this one.
+    time being measured.
 
     Deliberately permissive otherwise: an id belonging to *nobody* yet -
     including this same blind's own not-yet-discovered or not-yet-
@@ -412,7 +411,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         pairing_result = await api.pair_device_and_wait()
 
         if pairing_result is None:
-            # Audit finding 15's own deferred secondary observation: a
+            # A deferred secondary observation: a
             # hub-wide reload triggered by a *different* blind's own
             # subentry add/edit (or the hub unloading/Core stopping, or
             # an explicit stick reset) while this step was still waiting
@@ -1507,9 +1506,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 # this fix, clicking "Save" anyway unconditionally popped
                 # the existing, already-working CONF_STATUS_DEVICE_ID/
                 # CONF_STATUS_ENUM with no warning at all, silently
-                # erasing a working identity mapping - found during the
-                # lifecycle audit round. Mirrors the kind of protection
-                # recalibration's own async_step_calibration_complete()
+                # erasing a working identity mapping. Mirrors the kind of
+                # protection recalibration's own
+                # async_step_calibration_complete()
                 # (options_flow_calibration.py) already has for its own,
                 # analogous "discovered nothing" case. Leave data
                 # untouched: keeps the existing identity exactly as it was.
@@ -1722,11 +1721,11 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             raw, possibly-None previous_position/new_position straight
             into _t(...) instead, rendering the literal word "None" here
             for a freshly set up or just-restarted blind (nothing
-            recorded yet) where the live panel already showed "--"
-            (audit finding 21). Applied to current_estimated_position
-            too, just below - the same field as new_position, read a
-            second time for the confidence section, and wrong there for
-            the exact same reason.
+            recorded yet) where the live panel already showed "--".
+            Applied to current_estimated_position too, just below - the
+            same field as new_position, read a second time for the
+            confidence section, and wrong there for the exact same
+            reason.
             """
             return "--" if value is None else f"{value}%"
 

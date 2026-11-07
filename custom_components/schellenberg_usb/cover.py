@@ -145,8 +145,7 @@ async def async_setup_entry(
                 # STATUS_IDENTITY_SOURCE_UNKNOWN check), but never retracted
                 # in between. Not reachable through the current UI (every
                 # write path already clears these fields together), only
-                # with hand-edited or legacy config data - found during the
-                # lifecycle audit round.
+                # with hand-edited or legacy config data.
                 status_device_id = None
                 status_enum = None
             else:
@@ -308,8 +307,7 @@ async def async_setup_entry(
                 # (config_flow.py) silently reported success while the
                 # device page, dashboards and entity list kept showing
                 # whatever was registered at the very first pairing,
-                # forever - found during the same audit as the entries
-                # above. Guarded by the equality check so a reload with no
+                # forever. Guarded by the equality check so a reload with no
                 # real identity/name change (the overwhelmingly common case
                 # - most reloads are plain HA restarts, not edits) never
                 # writes to the device registry or fires its update event.
@@ -475,10 +473,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
         # This blind's own persisted CONF_INITIAL_POSITION startup fallback -
         # set whenever any setup or confirmation path has recorded a known
-        # position: a pair_device or hybrid "Add shutter from remote"
-        # calibration (options_flow_calibration.py's calibration_close
-        # step), that same hybrid workflow's manual_times sub-path (its own
-        # direct open/closed answer, not a measured one), recalibrating an
+        # position: a fresh pairing (async_step_user) regardless of which
+        # calibration_method_choice option was picked - a live calibration
+        # run (options_flow_calibration.py's calibration_close step) sets
+        # it to the real ending position, manual entry sets it directly
+        # from the person's own stated current position - recalibrating an
         # already-paired blind, or confirming a position via Developer
         # Tools' "Set position" sync (config_flow.py). None only for a
         # blind paired before this field existed, or under an older code
@@ -980,8 +979,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up background tracking when the entity is removed."""
-        # Audit finding 16: cancel_pending_move() is the same per-device
-        # mechanism async_stop_cover()/the auto-stop-at-target path already
+        # cancel_pending_move() is the same per-device mechanism
+        # async_stop_cover()/the auto-stop-at-target path already
         # use to end an in-flight control_blind_with_retry() loop for
         # *this* device_id (see its own docstring in api.py) - calling it
         # here too, first, means removing this blind's own subentry/
@@ -1218,8 +1217,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 self._attr_is_closed = self._attr_current_cover_position == 0
             self._attr_is_opening = False
             self._attr_is_closing = False
-            # Audit finding 17: this log used to run *before* the
-            # _update_position() recalculation (and clamp) above, right
+            # This log used to run *before* the _update_position()
+            # recalculation (and clamp) above, right
             # after previous_position was captured - so it always printed
             # the position as of the last 0.2s polling tick (or the move's
             # starting position, if STOPPED arrived before the tracking
@@ -1675,14 +1674,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         # keeps this division from raising or exploding -
                         # on its own it leaves the result with no matching
                         # ceiling. See MAX_STOP_LEAD_PERCENT's own comment
-                        # in const.py (audit finding 18) for why an
-                        # unbounded lead here is not just a cosmetically
-                        # large number: past 100 it makes the position_
-                        # reached check below satisfied by any position at
-                        # all, so a short/corrupted travel time used to
-                        # stop the blind the instant this loop was
-                        # entered, however far it actually was from
-                        # target_position.
+                        # in const.py for why an unbounded lead here is not
+                        # just a cosmetically large number: past 100 it
+                        # makes the position_reached check below satisfied
+                        # by any position at all, so a short/corrupted
+                        # travel time used to stop the blind the instant
+                        # this loop was entered, however far it actually
+                        # was from target_position.
                         stop_lead_percent = min(
                             (stop_latency_seconds / travel_time_for_lead) * 100,
                             MAX_STOP_LEAD_PERCENT,
@@ -1778,9 +1776,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                 # it untouched and retry next tick instead,
                                 # up to AUTO_STOP_CONFIRMATION_BACKSTOP_
                                 # SECONDS total (see that constant's own
-                                # comment in const.py) - found during the
-                                # concurrency/lifecycle audit round;
-                                # extended from FAILED-only to also cover
+                                # comment in const.py) - extended from
+                                # FAILED-only to also cover
                                 # UNCONFIRMED after a real six-blind Alexa
                                 # "25%" command (2026-11-01) left one blind
                                 # fully closed in reality while this entity
@@ -1882,8 +1879,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             # diagnostics history missing its "estimated from
                             # full travel" record for this transit, even
                             # though the live position reported above is
-                            # identical either way - found during the same
-                            # audit as the entries above.
+                            # identical either way.
                             self._confirm_full_travel_resync(
                                 "closing" if self._attr_is_closing else "opening",
                                 self._target_position,

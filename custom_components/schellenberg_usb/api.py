@@ -126,7 +126,7 @@ STOP_RETRY_BUDGET = 2.0
 # whole buffer, so per-chunk CPU cost grows right along with memory, not
 # just the one or the other. A reconnect already clears it (a fresh
 # SchellenbergProtocol instance starts with an empty buffer), but nothing
-# previously forced one on its own - audit finding 12.
+# previously forced one on its own.
 MAX_SERIAL_BUFFER_LENGTH = 4096
 
 # Cap on how many distinct status identities _handle_message() will
@@ -136,7 +136,7 @@ MAX_SERIAL_BUFFER_LENGTH = 4096
 # still bounding a noisy RF environment where many *different*,
 # syntactically-valid identities (someone else's remote, a neighbour's
 # winder, ...) that this hub will never register an entity for could
-# otherwise each mint their own permanent entry forever - audit finding 13.
+# otherwise each mint their own permanent entry forever.
 MAX_LAST_RECEIVED_MESSAGES = 64
 
 # Cap on how many frames one status-frame capture window
@@ -151,8 +151,7 @@ MAX_LAST_RECEIVED_MESSAGES = 64
 # above: finish_status_frame_capture() already only reads real signal out
 # of whatever this holds (summarize_status_discovery_frames() - garbage
 # frames cannot masquerade as a real identity either way), and the window
-# always closes and discards this list on its own regardless - audit
-# finding 14.
+# always closes and discards this list on its own regardless.
 MAX_STATUS_DISCOVERY_FRAMES = 1000
 
 
@@ -753,8 +752,7 @@ class SchellenbergUsbApi:
         dict already preserves insertion order, and popping an existing
         key before reinserting it moves it back to the end, so the oldest
         remaining key (`next(iter(...))`) is always the one least recently
-        updated. Audit finding 13 - this dict previously had no validation
-        and no cap at all.
+        updated. This dict previously had no validation and no cap at all.
         """
         if normalize_status_identity(*identity) is None:
             return
@@ -1247,14 +1245,15 @@ class SchellenbergUsbApi:
         """Public entry point for multi-step sequences outside this module.
 
         config_flow.py's short motor test (async_step_test_motor) sends a
-        direction command via control_blind() and, after a brief hold,
-        follows it with a stop - the same "don't start the next RF write
-        before the previous one's t0" problem _wait_for_transmitter_idle()
-        already solves for teach/pairing/raw-transmit below. control_blind()
-        itself never awaits this (it is deliberately lock-free and
-        immediate - see its own docstring), so the caller is responsible
-        for waiting between its own two writes. Thin wrapper only: all the
-        actual waiting logic lives in _wait_for_transmitter_idle().
+        direction command via control_blind_exclusive() and, after a
+        brief hold, follows it with a stop - the same "don't start the
+        next RF write before the previous one's t0" problem
+        _wait_for_transmitter_idle() already solves for teach/pairing/
+        raw-transmit below. control_blind() itself never awaits this (it
+        is deliberately lock-free and immediate - see its own docstring),
+        so the caller is responsible for waiting between its own two
+        writes. Thin wrapper only: all the actual waiting logic lives in
+        _wait_for_transmitter_idle().
         """
         return await self._wait_for_transmitter_idle(reason, timeout=timeout)
 
@@ -1307,14 +1306,15 @@ class SchellenbergUsbApi:
         """Stop capture and return grouped candidates plus raw phase-labelled frames.
 
         exclude_device_ids: forwarded as-is to summarize_status_discovery_
-        frames() - see its own docstring. Empty by default, so the two
-        async_discover_status_identities() call sites below are unaffected
-        (that flow deliberately never scopes this - overwriting an
-        existing identity is its whole point); only the calibration flow
+        frames() - see its own docstring. Empty by default, so the one
+        async_discover_status_identities() call site (config_flow.py's
+        async_step_discover_status) is unaffected (that flow deliberately
+        never scopes this - overwriting an existing identity is its whole
+        point); only the calibration flow
         (options_flow_calibration.py's _finish_calibration_capture())
         currently passes a real set, to keep a different, already-paired
         blind's own ordinary movement during the capture window from
-        outscoring the blind actually being worked on - audit finding 9.
+        outscoring the blind actually being worked on.
         """
         frames = list(self._status_discovery_frames or [])
         started_at = self._status_discovery_started_at
@@ -1445,10 +1445,9 @@ class SchellenbergUsbApi:
                 finish_pair_command,
             )
 
-            # Both pairing entry points (pair_device and
-            # add_shutter_from_remote) share this one sequence: the 0x60
-            # teach command followed by the 0x40 finish/allow-pairing
-            # command.
+            # Every pairing attempt (async_step_user) sends this one
+            # sequence: the 0x60 teach command followed by the 0x40
+            # finish/allow-pairing command.
             pairing_phases = (
                 ("teach_60", pair_command),
                 ("finish_40", finish_pair_command),
@@ -1518,11 +1517,10 @@ class SchellenbergUsbApi:
         succeeded) is what caused the real bug this fix addresses: since
         _transmit_capability_block_reason() then blocks every future
         pairing attempt on "wrong_mode:unknown" until a full reconnect,
-        the pairing config flow step (for both "pair_device" and
-        "add_shutter_from_remote", which share this same cleanup) would
-        abort with the same "pairing_timeout" message again immediately
-        on the very next attempt, before any new wait for a device even
-        began. Trusting the write alone, the same way "hello" already
+        the pairing config flow step (async_step_user) would abort with
+        the same "pairing_timeout" message again immediately on the
+        very next attempt, before any new wait for a device even began.
+        Trusting the write alone, the same way "hello" already
         does, fixes that and also drops the now-pointless wait entirely:
         the worst case if the stick genuinely is still finishing up is
         one more pairing attempt that does not find a device in time,
@@ -1812,8 +1810,8 @@ class SchellenbergUsbApi:
             )
             return False
 
-        # Audit finding 24: send_command() already does this for every
-        # command it routes through _pending_retry_command/_last_transmit_
+        # send_command() already does this for every command it routes
+        # through _pending_retry_command/_last_transmit_
         # source, but this method's whole reason to exist (see its own
         # docstring) is writing straight to the transport instead,
         # bypassing send_command() - and with it, this assignment -
@@ -2296,8 +2294,7 @@ class SchellenbergUsbApi:
                 # its own documented budget by up to that same margin.
                 # Never negative: asyncio.wait_for(timeout=0) still returns
                 # immediately (TimeoutError if not already set) rather
-                # than raising on its own - found during the lifecycle
-                # audit round.
+                # than raising on its own.
                 ack_wait_timeout = min(
                     MOVE_ACK_TIMEOUT, max(deadline - time.monotonic(), 0.0)
                 )
@@ -2392,8 +2389,8 @@ class SchellenbergUsbApi:
         different blind's real move or stop was still waiting on that
         same slot: a genuine asyncio race (two coroutines actually
         overlapping at a real await), confirmed reachable through every
-        one of these callers - see CHANGELOG.md's v1.3.0 entry for
-        audit finding 7.
+        one of these callers - see CHANGELOG.md's v1.3.0 entry on closing
+        the hub-wide move-ack slot to every caller that used to bypass it.
 
         Takes the lock ordinary (non-priority), exactly like an ordinary
         move - a test command is not the safety-critical operation
@@ -2751,11 +2748,12 @@ class SchellenbergUsbApi:
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
         self._retry_task = None
-        # Audit finding 13: every other piece of per-connection state above
-        # is already cleared on a reconnect; this cache of the latest frame
+        # Every other piece of per-connection state above is already
+        # cleared on a reconnect; this cache of the latest frame
         # per status identity previously was not, so a stale pre-reconnect
-        # frame (and, before finding 13's other half, an unbounded number of
-        # them) could linger in diagnostics indefinitely.
+        # frame (and, before this cache was also given a cap of its own
+        # above, an unbounded number of them) could linger in diagnostics
+        # indefinitely.
         self._last_received_messages.clear()
 
         # Unstick a control_blind_with_retry() loop that may be waiting on
@@ -2973,8 +2971,7 @@ class SchellenbergUsbApi:
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
         self._retry_task = None
-        # Same reasoning as handle_connection_lost()'s own identical line -
-        # audit finding 13.
+        # Same reasoning as handle_connection_lost()'s own identical line.
         self._last_received_messages.clear()
         # Same reasoning as handle_connection_lost(): wake a
         # control_blind_with_retry() loop that may be waiting right now

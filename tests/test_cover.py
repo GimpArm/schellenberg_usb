@@ -215,7 +215,8 @@ async def test_async_close_cover_raises_when_control_blind_with_retry_fails(
 async def test_async_open_cover_clears_stale_target_when_a_preserved_leg_fails(
     hass: HomeAssistant,
 ) -> None:
-    """Regression guard for audit finding 2.
+    """Regression guard: a failed, target-preserving leg must not leave
+    a stale target behind.
 
     A failed set_cover_position() leg (_preserve_target=True) used to leave
     _target_position stale, since only a plain, non-preserving open/close
@@ -1230,7 +1231,7 @@ async def test_position_loop_retries_auto_stop_when_the_write_fails(
 ) -> None:
     """A failed auto-stop write must not be treated as a successful stop.
 
-    Regression guard for audit finding 1: control_blind_stop()'s return
+    Regression guard: control_blind_stop()'s return
     value used to be discarded, so is_closing/is_opening/the target were
     cleared unconditionally even when the write never reached the wire -
     reporting the move as finished while the motor kept running toward its
@@ -1807,7 +1808,7 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
 ) -> None:
     """The latency-compensation lead must not swallow the whole travel range.
 
-    Regression guard for audit finding 18. stop_lead_percent's own divisor
+    Regression guard: stop_lead_percent's own divisor
     (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
     - but unlike that calculation, whose final position *is* clamped to
     [0, 100], stop_lead_percent itself used to carry no matching ceiling.
@@ -1940,8 +1941,7 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
     """Reaching 0/100 via an *explicit* target (set_cover_position) must
     confirm full-travel resync exactly like the plain open_cover()/
     close_cover() path (the target_position-is-None branch further below)
-    already does - found during the independent audit alongside the
-    CHANGELOG entries above this one. Before this fix, this branch set the
+    already does. Before this fix, this branch set the
     live position correctly but never called _confirm_full_travel_resync(),
     so _position_confirmed_since_restart stayed False and the diagnostics
     history never recorded this transit, even though the blind had, in
@@ -2602,7 +2602,8 @@ async def test_handle_event_stopped_logs_the_recalculated_position(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression for audit finding 17.
+    """Regression: the STOPPED info log must print the recalculated
+    position, not a stale polling-tick snapshot.
 
     The "Device %s STOPPED (position: %d%%)" info log used to be emitted
     *before* _update_position() recalculated self._attr_current_cover_
@@ -3417,9 +3418,10 @@ async def test_added_to_hass_leaves_position_unknown_when_nothing_was_restored(
 ) -> None:
     """A brand-new entity with no prior Home Assistant state at all, and no
     CONF_INITIAL_POSITION in its device_data either (e.g. a blind paired
-    before that key existed, or via the hybrid add_shutter_from_remote
-    workflow, which never calibrates) - see the sibling test right below
-    for the case where that key *is* present.
+    before that key existed, or - before the Issue #78 pairing-flow
+    unification (2026-11-07) - via what was then a separate manual-entry
+    path that never calibrated) - see the sibling test right below for
+    the case where that key *is* present.
 
     Used to default to 0%/closed here - see this branch's own comment in
     cover.py for the real-world report that traced "every blind on a hub
@@ -3685,7 +3687,8 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
 async def test_async_setup_entry_nulls_a_stale_status_identity_when_source_is_unknown(
     hass: HomeAssistant,
 ) -> None:
-    """Regression guard for audit finding 8.
+    """Regression guard: a stale status identity left over from before
+    the source went unconfirmed must not be read back as live.
 
     identities.py's resolve_blind_identities() - the canonical logic for
     this exact resolution, shared by config_flow.py's developer-tools
@@ -3738,8 +3741,7 @@ async def test_async_setup_entry_resyncs_device_registry_name_and_model_on_edit(
     form, via async_update_and_abort() -> the entry-update listener's
     async_reload() -> this same async_setup_entry() running again) must
     update the already-existing device registry entry's name/model to
-    match - found during the independent audit alongside the CHANGELOG
-    entries above this one. Before this fix, device_registry.async_get_or_
+    match. Before this fix, device_registry.async_get_or_
     create()'s name=/model= kwargs were only ever honored on the device's
     very first creation; every later call found the device already
     existing and left its name/model exactly as first registered, forever,
@@ -4075,7 +4077,7 @@ async def test_will_remove_from_hass_shuts_down_tracking_then_calls_super(
 async def test_will_remove_from_hass_cancels_this_devices_in_flight_move(
     hass: HomeAssistant,
 ) -> None:
-    """Regression for audit finding 16: removing a blind's own subentry/
+    """Regression: removing a blind's own subentry/
     device used to leave any in-flight control_blind_with_retry() loop for
     it running untouched - still able to transmit a real RF command, or
     process a stray ack, for a blind Home Assistant no longer has an

@@ -207,10 +207,10 @@ STOP_COMMAND_LATENCY_SECONDS = 1.2
 # uncapped lead would run into the hundreds of percent, pushing the
 # comparison it feeds so far past the valid 0-100 range that any position
 # at all would satisfy "already there" the instant a move starts,
-# regardless of how far from the real target it actually was (audit
-# finding 18 - unlike that divisor floor, this had no matching ceiling at
-# all before) - that extreme case is unaffected by this doubling, since
-# it was already far past this cap either way.
+# regardless of how far from the real target it actually was - unlike
+# that divisor floor, this had no matching ceiling at all before. That
+# extreme case is unaffected by this doubling, since it was already far
+# past this cap either way.
 MAX_STOP_LEAD_PERCENT = 50.0
 
 # How many *additional* stop frames control_blind_stop() fires, as plain,

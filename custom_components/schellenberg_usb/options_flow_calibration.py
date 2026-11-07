@@ -99,7 +99,7 @@ class CalibrationFlowHandler:
         self._capture_active = False
         # The SchellenbergUsbApi instance the currently-active capture was
         # actually started on, if any - see _start_calibration_capture()'s
-        # own comment (audit finding 15) for why _set_calibration_capture_
+        # own comment for why _set_calibration_capture_
         # phase()/_finish_calibration_capture() read this instead of each
         # re-fetching entry.runtime_data while a capture is active.
         self._capture_api: SchellenbergUsbApi | None = None
@@ -120,11 +120,11 @@ class CalibrationFlowHandler:
         let two concurrent flows for two *different* blinds silently
         corrupt each other's result, up to and including writing the
         wrong status identity into a blind's permanent config data.
-        async_discover_status_identities() in config_flow.py already
-        gets this right for the exact same buffer: it lets the
-        RuntimeError propagate so its caller can show a "busy" error
-        instead of stealing. This mirrors that behavior here - found
-        during the lifecycle audit round.
+        async_discover_status_identities() (api.py), called from
+        config_flow.py's async_step_discover_status, already gets this
+        right for the exact same buffer: it lets the RuntimeError
+        propagate so that caller can show a "busy" error instead of
+        stealing. This mirrors that behavior here.
         """
         api = self._runtime_api()
         if api is None:
@@ -134,7 +134,7 @@ class CalibrationFlowHandler:
         except RuntimeError:
             return False
         self._capture_active = True
-        # Audit finding 15: cache the instance this capture actually
+        # Cache the instance this capture actually
         # started on, rather than letting _set_calibration_capture_phase()/
         # _finish_calibration_capture() each re-fetch entry.runtime_data
         # (via self._runtime_api()) on every call. Every subentry add/
@@ -170,12 +170,12 @@ class CalibrationFlowHandler:
             # frames - leaving the blind at "status unknown" with no
             # position tracking and no indication the earlier timeout was
             # the cause. Start a fresh capture instead of labelling one
-            # that no longer exists - found during the lifecycle audit
-            # round. That fresh start can itself find another blind's
-            # capture already running, so callers must still check the
-            # return value rather than assuming a retry always succeeds.
+            # that no longer exists. That fresh start can itself find
+            # another blind's capture already running, so callers must
+            # still check the return value rather than assuming a retry
+            # always succeeds.
             return self._start_calibration_capture(phase=phase)
-        # Audit finding 15: read the instance this same capture actually
+        # Read the instance this same capture actually
         # started on (see _start_calibration_capture()'s own comment),
         # never a fresh self._runtime_api() lookup - entry.runtime_data may
         # already point at a different, newer instance by now.
@@ -186,7 +186,7 @@ class CalibrationFlowHandler:
         return True
 
     def _finish_calibration_capture(self, end_reason: str) -> None:
-        # Audit finding 15: same reasoning as _set_calibration_capture_
+        # Same reasoning as _set_calibration_capture_
         # phase() above - read back from the instance this capture was
         # actually started on, not whatever entry.runtime_data currently
         # points at.
@@ -199,8 +199,8 @@ class CalibrationFlowHandler:
         # that method's own comment) - without also passing it here, that
         # other blind's real frames, captured into this same hub-wide
         # buffer regardless of either protection, could still outscore
-        # this blind's own and get chosen as its identity instead. Audit
-        # finding 9: the wait was already scoped this way, the actual
+        # this blind's own and get chosen as its identity instead. The
+        # wait was already scoped this way; the actual
         # identity decision below was not.
         foreign_device_ids: frozenset[str] = (self._selected_device or {}).get(
             "foreign_capture_device_ids"
@@ -771,8 +771,8 @@ class CalibrationFlowHandler:
             # SIGNAL_DEVICE_EVENT_CAPTURE's own comment in api.py) - without
             # this check it accepted a *different*, unrelated blind moving
             # on the same hub at the same moment as a false positive for
-            # this one, corrupting the open/close time being measured here -
-            # found during the same audit as the entries above. Only ever
+            # this one, corrupting the open/close time being measured here.
+            # Only ever
             # rejects a frame positively attributed to one of those other
             # blinds; anything not yet claimed by anyone - including this
             # same blind's own not-yet-confirmed real identity, exactly the

@@ -393,8 +393,7 @@ async def test_capture_signal_from_a_different_blind_does_not_satisfy_the_wait(
 ) -> None:
     """A second, already-paired blind moving on the same hub while this one
     is being recalibrated must not falsely satisfy this one's movement-
-    start wait - found during the independent audit alongside the
-    CHANGELOG entries above this one. Before this fix, handle_capture_
+    start wait. Before this fix, handle_capture_
     event() (options_flow_calibration.py) matched on command alone, so
     *any* device's frame on the hub-wide SIGNAL_DEVICE_EVENT_CAPTURE
     channel would satisfy it, silently corrupting the open/close time
@@ -468,7 +467,7 @@ async def test_calibration_excludes_other_blinds_frames_from_identity_result(
     this blind's calibration identity, even though api.py's hub-wide
     capture buffer physically records both.
 
-    Regression test for audit finding 9. Unlike
+    Unlike
     test_capture_signal_from_a_different_blind_does_not_satisfy_the_wait
     above - which only proves a foreign blind's SIGNAL_DEVICE_EVENT_CAPTURE
     *timing* signal cannot fake out the movement-start/stop wait - this
@@ -579,7 +578,7 @@ async def test_calibration_capture_survives_a_reload_mid_flow(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for audit finding 15: every subentry add/remove/edit on
+    """Regression: every subentry add/remove/edit on
     this hub reloads the whole config entry, replacing entry.runtime_data
     with a brand-new SchellenbergUsbApi - including for a change to some
     other, unrelated blind, not just this one's own. Before this fix,
@@ -1084,7 +1083,8 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for audit finding 3.
+    """Regression guard: a retry after a timeout must reopen the
+    status-frame capture, not silently skip it.
 
     Every error exit from a calibration leg finishes the status-frame
     capture (_finish_calibration_capture(), api.py's own
@@ -1142,7 +1142,9 @@ async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """Regression guard for audit finding 6.
+    """Regression guard: starting a calibration capture must back off
+    with a clean error when another operation already holds the
+    hub-wide capture buffer, rather than stealing it.
 
     _start_calibration_capture() used to catch start_status_frame_capture()'s
     RuntimeError and force its way in anyway - finishing and discarding
@@ -1182,10 +1184,11 @@ async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for audit finding 6, retry path.
+    """Regression guard: the same buffer-steal protection above, now on
+    the retry path.
 
-    _set_calibration_capture_phase()'s own retry-reopen (added for finding
-    3, see test_open_instruction_retry_after_timeout_reopens_the_capture
+    _set_calibration_capture_phase()'s own retry-reopen (see
+    test_open_instruction_retry_after_timeout_reopens_the_capture
     above) calls _start_calibration_capture() again, which can itself find
     a *different* operation now holding the buffer - the gap between this
     leg's own timeout tearing its capture down and the user retrying is

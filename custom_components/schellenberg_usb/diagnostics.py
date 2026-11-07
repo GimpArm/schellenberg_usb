@@ -91,7 +91,7 @@ async def async_get_device_diagnostics(
     are checked here, branching only once a subentry's device actually
     matches.
 
-    Audit finding 10: this used to only ever check blind subentries (every
+    This used to only ever check blind subentries (every
     other subentry type, the hub included, was skipped outright), so asking
     for diagnostics from the hub device's own page - not any blind's - could
     never match anything and always fell through to the generic error below,

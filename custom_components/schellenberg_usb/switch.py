@@ -97,7 +97,7 @@ class SchellenbergLedSwitch(RestoreEntity, SwitchEntity):
         # default, sending one wrong hardware command immediately before
         # this method's own restore below sent the correct one - a race,
         # not a hardware quirk, and exactly a "brief, self-correcting"
-        # flicker right at Home Assistant startup (audit finding 19).
+        # flicker right at Home Assistant startup.
         last_state = await self.async_get_last_state()
         if last_state is not None:
             self._is_on = last_state.state == "on"

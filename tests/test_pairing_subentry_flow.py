@@ -92,10 +92,9 @@ def make_flow(hass: HomeAssistant) -> Any:
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
     # control_blind_exclusive() is what the developer-tools test-open/
-    # close/stop steps and the post-teach open+stop test actually call
-    # (audit finding 7) - control_blind itself stays mocked too, since
-    # this same api spy backs tests of other flow steps that still call
-    # it directly.
+    # close/stop steps and the post-teach open+stop test actually call -
+    # control_blind itself stays mocked too, since this same api spy
+    # backs tests of other flow steps that still call it directly.
     api.control_blind_exclusive = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.manual_sync_position = MagicMock(return_value=True)
@@ -206,9 +205,9 @@ async def test_developer_command_failed_when_control_blind_returns_false(
     hass: HomeAssistant,
 ) -> None:
     """control_blind_exclusive() refusing the write must be reported, not
-    silently dropped - this step actually calls control_blind_exclusive()
-    (audit finding 7), not control_blind() directly; overriding the latter
-    here was dead as of that fix, since make_flow()'s own default
+    silently dropped - this step actually calls control_blind_exclusive(),
+    not control_blind() directly; overriding the latter here was dead as
+    of that fix, since make_flow()'s own default
     control_blind_exclusive (return_value=True) was what this step's write
     still actually resolved against.
     """
