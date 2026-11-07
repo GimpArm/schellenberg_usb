@@ -50,6 +50,8 @@ from .const import (
     EVENT_STOPPED,
     MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS,
     MAX_STOP_LEAD_PERCENT,
+    MOVE_COMMAND_EXTRA_RESENDS,
+    MOVE_COMMAND_RESEND_DELAY_SECONDS,
     NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
@@ -1590,22 +1592,62 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
                 if self._target_position is not None:
                     # An intermediate target (unlike 0/100, see
-                    # needs_stop_command below) is only ever reached because
-                    # a stop command sent from here makes it so - and that
-                    # command still has to be transmitted and acted on after
-                    # this check fires. Measured on real hardware (see
-                    # STOP_COMMAND_LATENCY_SECONDS's own comment in
-                    # const.py), that takes roughly 1.1-1.2s, during which
-                    # the blind keeps moving under the already-issued open/
-                    # close command. Triggering this many percentage points
-                    # of this move's own travel early compensates for that
-                    # otherwise-fixed overshoot, scaled to this blind's own
-                    # travel time so a fast blind and a slow blind are each
-                    # compensated correctly. Uncompensated, this is what
-                    # made any target within roughly this fraction of a fast
+                    # needs_stop_command below) is only ever reached
+                    # because a stop command sent from here makes it so -
+                    # and three distinct real delays sit between "software
+                    # decides to stop" and "motor actually stops at
+                    # target":
+                    #
+                    # - D_start: the real motor doesn't start moving the
+                    #   instant the stick accepts this move's primary
+                    #   open/close write - that takes roughly STOP_COMMAND_
+                    #   LATENCY_SECONDS (see its own comment in const.py).
+                    # - T_stamp: _move_start_time, though, is stamped only
+                    #   once control_blind_with_retry()'s own inline resend
+                    #   loop returns - MOVE_COMMAND_EXTRA_RESENDS *
+                    #   MOVE_COMMAND_RESEND_DELAY_SECONDS (~0.5s) after
+                    #   that same write, not at the write itself.
+                    # - D_stop: once the stop command below is actually
+                    #   issued, the real motor doesn't stop instantly
+                    #   either - transmitting and acting on it takes
+                    #   roughly that same STOP_COMMAND_LATENCY_SECONDS,
+                    #   during which the blind keeps moving under the
+                    #   already-issued open/close command.
+                    #
+                    # D_start > T_stamp, so software's elapsed-time
+                    # estimate runs ahead of the real motor by a constant
+                    # (D_start - T_stamp) for the rest of the move - by
+                    # itself, that makes the real landing undershoot
+                    # target. D_stop, separately, keeps the real motor
+                    # moving on after the stop decision - by itself, that
+                    # makes it overshoot. Working the two through the
+                    # actual arithmetic (not just comparing their
+                    # magnitudes) shows they enter the needed lead with
+                    # opposite sign, so when D_start and D_stop are equal -
+                    # true uncontended, since both are the same measured
+                    # STOP_COMMAND_LATENCY_SECONDS - they cancel
+                    # completely, leaving only T_stamp itself (software's
+                    # own resend-loop bookkeeping delay, nothing to do
+                    # with hardware transmit latency) for this lead to
+                    # compensate for.
+                    #
+                    # An earlier version of this lead (Issue #78,
+                    # 2026-11-07) used 2x STOP_COMMAND_LATENCY_SECONDS as
+                    # its baseline instead, on the reasoning that
+                    # D_start's and D_stop's contributions should be
+                    # *added*. They don't add, they cancel - that version
+                    # undershot intermediate targets by 7 to 20+ points
+                    # depending on travel time, confirmed both by an
+                    # independent review and by a from-scratch, tick-
+                    # accurate simulation mirroring this loop's own 0.2s
+                    # polling and _update_position()'s int()-floored
+                    # estimate.
+                    #
+                    # Uncompensated altogether, this is what made any
+                    # target within roughly this fraction of a fast
                     # blind's travel time of either end stop unreachable -
-                    # the earliest a stop could physically land was already
-                    # past it.
+                    # the earliest a stop could physically land was
+                    # already past it.
                     needs_stop_command = self._target_position not in (0, 100)
                     stop_lead_percent = 0.0
                     if needs_stop_command:
@@ -1615,59 +1657,36 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             else self._travel_time_close,
                             0.1,
                         )
-                        # Base compensation doubled to 2x STOP_COMMAND_
-                        # LATENCY_SECONDS (Issue #78, 2026-11-07): this
-                        # used to be the one place the transmit-to-action
-                        # dead time this blind's own stop command spends
-                        # in flight was compensated for - async_open_
-                        # cover()/async_close_cover() used to push their
-                        # own _move_start_time forward by one more such
-                        # interval, to cover that same dead time at the
-                        # *start* of the move instead. That start-side
-                        # push froze the reported position for just over a
-                        # second at the start of every single move,
-                        # intermediate target or not - a real, user-
-                        # visible "sluggish position tracking" regression
-                        # of its own. Reverted there (see both call sites'
-                        # own comments) and folded into this side's
-                        # already-existing compensation instead: doubling
-                        # it here covers both this stop's own one-hop
-                        # transmit latency (what the single, un-doubled
-                        # figure always meant) and the same start-side
-                        # dead time the push used to subtract separately -
-                        # the two are the same hardware-measured figure
-                        # either way (see STOP_COMMAND_LATENCY_SECONDS's
-                        # own comment in const.py), so adding them here
-                        # costs nothing in precision versus doing it in
-                        # two places, only in how early this fires - a
-                        # cost intermediate-target stops already pay by
-                        # design, not every move the way the reverted
-                        # push did.
-                        #
-                        # STOP_COMMAND_LATENCY_SECONDS alone (before this
-                        # doubling) assumes this blind's own stop reaches
-                        # the wire after one ordinary, uncontended transmit
-                        # cycle. When the shared lock is held by some
-                        # *other* blind's own move or stop right now, this
-                        # blind's own stop - though served ahead of anyone
-                        # merely *waiting* for the lock (see move_lock_
-                        # busy's own comment in api.py) - still has to wait
-                        # out whatever that other cycle has left, which can
-                        # itself take up to about one more full cycle. Real
-                        # log evidence (2026-10-31): an uncontended stop
-                        # reached the wire in 0.39s; a contended one,
+                        # Baseline is T_stamp alone (see the derivation
+                        # above) - deliberately not STOP_COMMAND_LATENCY_
+                        # SECONDS in any form: uncontended, that
+                        # constant's two appearances (D_start, D_stop)
+                        # cancel out of this baseline exactly, since
+                        # they're equal.
+                        stop_latency_seconds = (
+                            MOVE_COMMAND_EXTRA_RESENDS
+                            * MOVE_COMMAND_RESEND_DELAY_SECONDS
+                        )
+                        # When the shared lock is held by some *other*
+                        # blind's own move or stop right now, this blind's
+                        # own stop - though served ahead of anyone merely
+                        # *waiting* for the lock (see move_lock_busy's own
+                        # comment in api.py) - still has to wait out
+                        # whatever that other cycle has left, which can
+                        # itself take up to about one more full cycle:
+                        # D_stop grows by one more STOP_COMMAND_LATENCY_
+                        # SECONDS while D_start doesn't, so unlike the
+                        # uncontended baseline above this no longer
+                        # cancels and has to be added back on top of it.
+                        # Real log evidence (2026-10-31): an uncontended
+                        # stop reached the wire in 0.39s; a contended one,
                         # queued behind another blind's own stop, took
                         # 1.37s - almost exactly one extra STOP_COMMAND_
                         # LATENCY_SECONDS - and that second blind overshot
                         # its target by close to the matching percentage.
                         # Checked fresh on every tick, so this only widens
-                        # the lead further for ticks where contention is
-                        # actually observed, not unconditionally for every
-                        # stop - stacked on top of the doubled base above,
-                        # not replacing it.
-                        stop_latency_seconds = (
-                            STOP_COMMAND_LATENCY_SECONDS + STOP_COMMAND_LATENCY_SECONDS
-                        )
+                        # the lead for ticks where contention is actually
+                        # observed, not unconditionally for every stop.
                         if self._api.move_lock_busy:
                             stop_latency_seconds += STOP_COMMAND_LATENCY_SECONDS
                         # travel_time_for_lead's own floor just above only
@@ -2227,16 +2246,15 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # the motor may already be genuinely moving - every move
             # appearing to "hang" for just over a second before the
             # dashboard shows any progress at all. Reverting this side and
-            # doubling the stop-side compensation instead moves the same
-            # fix to the one place it only costs accuracy on an
-            # intermediate stop's own exact trigger instant - already
-            # compensated for on purpose - rather than costing
-            # responsiveness on every single move, intermediate target or
-            # not. The STARTED_MOVING branch in _handle_event() still
-            # (re)sets this to plain time.monotonic() of its own accord
-            # when a real echo confirms the move, same as always - that
-            # was already a no-op against this plain assignment even
-            # before, so nothing changes there.
+            # compensating on the stop side instead moves the same fix to
+            # the one place it only costs accuracy on an intermediate
+            # stop's own exact trigger instant - already compensated for
+            # on purpose - rather than costing responsiveness on every
+            # single move, intermediate target or not. The STARTED_MOVING
+            # branch in _handle_event() still (re)sets this to plain
+            # time.monotonic() of its own accord when a real echo confirms
+            # the move, same as always - that was already a no-op against
+            # this plain assignment even before, so nothing changes there.
             self._move_start_time = time.monotonic()
             self._start_position_tracking()
         self.async_write_ha_state()

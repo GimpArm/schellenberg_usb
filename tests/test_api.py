@@ -1338,6 +1338,49 @@ async def test_control_blind_stop_sends_two_extra_resends_after_being_accepted(
     assert len(written(connected_api)) == 3
 
 
+async def test_control_blind_stop_skips_resends_once_a_real_stop_frame_arrives(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirmed motor-stop echo makes the remaining resends unnecessary.
+
+    Companion to test_control_blind_stop_sends_two_extra_resends_after_
+    being_accepted above - project owner's own follow-up request
+    (2026-11-07): those two resends exist only to cover for a *lost*
+    primary stop frame; once this blind's own real "ss" STOPPED status
+    frame has actually arrived, the motor is independently known to be
+    stopped already, so firing them anyway would just be redundant RF
+    traffic on an already-busy shared transmitter. register_entity()
+    below gives this device_id a status identity to receive that frame
+    on - a plain device_id with none registered is exactly the scenario
+    the test above exercises, which still passes unchanged (asserts all
+    three writes), so this is additive, not a replacement.
+    """
+    connected_api.register_entity("AAAAAA", "10", "Test Blind")
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # See the matching comment on the companion test above for why a
+        # bare `return None` would never let this task actually run.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary stop is accepted
+    # The motor's own real echo, independent of and after that stick
+    # accept - see _stop_confirmed_at's own comment in api.py.
+    connected_api._handle_message("ss" + "10" + "AAAAAA" + "0000" + CMD_STOP + "0000")
+
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
+    # Neither best-effort resend fired - just the one, already-confirmed
+    # primary write.
+    assert len(written(connected_api)) == 1
+
+
 async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,

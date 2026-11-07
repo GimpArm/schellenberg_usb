@@ -740,6 +740,7 @@ async def test_async_stop_cover_sends_stop_via_control_blind_stop(
     own docstring and test_api.py's tests for control_blind_stop() itself.
     control_blind() must not be called from here any more at all.
     """
+
     async def _confirmed_with_motor_echo(
         *_args: object, **_kwargs: object
     ) -> StopOutcome:
@@ -818,6 +819,7 @@ async def test_async_stop_cover_does_not_itself_wait_for_transmitter_idle(
     fail loudly with a TypeError, not silently pass, if it ever were
     awaited from here.
     """
+
     async def _confirmed_with_motor_echo(
         *_args: object, **_kwargs: object
     ) -> StopOutcome:
@@ -1640,13 +1642,15 @@ async def test_position_loop_stops_early_to_compensate_stop_latency(
 
     Companion to test_position_loop_stops_at_a_partial_target above: that
     test's default 60s travel time makes the latency-compensation lead
-    (2x STOP_COMMAND_LATENCY_SECONDS / travel_time * 100, roughly 4
-    points since the Issue #78 doubling, 2026-11-07) too small to tell
-    apart from the uncompensated boundary by itself. Here a short, 6s
-    close travel time makes the lead a much larger ~40 points, so a
-    position estimate that has only reached 25% (still well short of the
-    literal 20% target) is enough to trigger the stop - proving the
-    comparison is actually against `target + lead`, not `target`.
+    (MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS /
+    travel_time * 100, ~0.8 points - see stop_lead_percent's own comment
+    in _async_position_update_loop() for the derivation) too small to
+    tell apart from the uncompensated boundary by itself. Here a short,
+    5s close travel time makes the lead a much larger (proportionally)
+    ~10 points, so a position estimate that has only reached 25% (still
+    well short of the literal 20% target) is enough to trigger the stop -
+    proving the comparison is actually against `target + lead`, not
+    `target`.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -1655,7 +1659,7 @@ async def test_position_loop_stops_early_to_compensate_stop_latency(
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 5.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
@@ -1708,15 +1712,16 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
 ) -> None:
     """The early trigger must not fire any earlier than the compensated lead.
 
-    12s travel time, not the 6s this test used before the Issue #78
-    doubling (2026-11-07): 6s would now produce a ~40-point lead, pushing
-    the threshold (target 20 + lead) past this fixture's own 50%
-    starting position before the move has even begun - physically
-    impossible for a blind that is actually closing. 12s keeps the same
-    familiar ~20-point lead this test always exercised, just from a
-    doubled multiplier over a doubled travel time. The estimate (45%) is
-    still outside target(20) + lead(~20) = ~40 - so the loop must keep
-    waiting rather than stopping prematurely.
+    10s close travel time, uncontended: the lead (MOVE_COMMAND_EXTRA_
+    RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS / travel_time * 100 -
+    see stop_lead_percent's own comment in _async_position_update_loop()
+    for the derivation) is 0.5/10*100 = 5 points, putting the threshold
+    at target(20) + 5 = 25. The estimate (30%) is still outside that -
+    above it, since this is a close - so the loop must keep waiting
+    rather than stopping prematurely. Same fixture as test_position_
+    loop_widens_the_stop_lead_when_the_move_lock_is_busy below,
+    uncontended, to show the contrast: there, the same 30% estimate
+    *does* satisfy that test's own widened, contended threshold.
     """
 
     sleep_calls = 0
@@ -1744,11 +1749,11 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 12.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 10.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
-        lambda: setattr(cover, "_attr_current_cover_position", 45),
+        lambda: setattr(cover, "_attr_current_cover_position", 30),
     )
     cover._attr_is_closing = True
     cover._attr_current_cover_position = 50
@@ -1768,25 +1773,26 @@ async def test_position_loop_widens_the_stop_lead_when_the_move_lock_is_busy(
     """Contention for the shared transmit lock must widen the lead further.
 
     Exact same fixture as test_position_loop_does_not_stop_before_the_
-    compensated_lead above - 12s close travel, estimate stuck at 45%,
-    target 20 - which that test used to prove the plain, uncontended lead
-    (~20 points, threshold ~40) does *not* yet cover 45%. The only
-    difference here is api.move_lock_busy=True: the lead widens further,
-    from 2x to 3x STOP_COMMAND_LATENCY_SECONDS (Issue #78, 2026-11-07),
-    to ~30 points (threshold target(20) + 30 = 50), which 45 *does*
-    satisfy - proving the loop actually reads move_lock_busy and widens
-    the lead for it, rather than ignoring it or always capping at
-    MAX_STOP_LEAD_PERCENT regardless. Real-log motivation: see
-    move_lock_busy's own comment in api.py.
+    compensated_lead above - 10s close travel, estimate stuck at 30%,
+    target 20 - which that test used to prove the plain, uncontended
+    lead (5 points, threshold 25) does *not* yet cover 30. The only
+    difference here is api.move_lock_busy=True: the lead widens to
+    include one more STOP_COMMAND_LATENCY_SECONDS on top of the same
+    baseline (0.5 + 1.2 = 1.7s), to 1.7/10*100 = 17 points (threshold
+    target(20) + 17 = 37), which 30 *does* satisfy - proving the loop
+    actually reads move_lock_busy and widens the lead for it, rather
+    than ignoring it or always capping at MAX_STOP_LEAD_PERCENT
+    regardless. Real-log motivation: see move_lock_busy's own comment in
+    api.py.
     """
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.move_lock_busy = True
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 12.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 10.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
-        lambda: setattr(cover, "_attr_current_cover_position", 45),
+        lambda: setattr(cover, "_attr_current_cover_position", 30),
     )
     cover._attr_is_closing = True
     cover._attr_current_cover_position = 50
@@ -1812,16 +1818,16 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
     (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
     - but unlike that calculation, whose final position *is* clamped to
     [0, 100], stop_lead_percent itself used to carry no matching ceiling.
-    A 1s close time - clearly outside anything a real shutter reports, but
-    exactly the kind of corrupt/legacy config value that floor exists for
-    - makes the raw lead (2x STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100,
-    doubled since the Issue #78 change, 2026-11-07) = 240
-    points: more than the entire 0-100 range. Uncapped, target(30) + 240 =
-    270 is satisfied by any position at all, so the loop used to fire its
-    stop the instant it was entered, however far from 30 the blind actually
-    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane 80:
-    a position of 85 - the blind has barely started closing from 100 -
-    must not satisfy "85 <= 80" and must not stop yet.
+    A 0.2s close time - clearly outside anything a real shutter reports,
+    but exactly the kind of corrupt/legacy config value that floor exists
+    for - makes the raw lead (MOVE_COMMAND_EXTRA_RESENDS *
+    MOVE_COMMAND_RESEND_DELAY_SECONDS / 0.2 * 100) = 250 points: more
+    than the entire 0-100 range. Uncapped, target(30) + 250 = 280 is
+    satisfied by any position at all, so the loop used to fire its stop
+    the instant it was entered, however far from 30 the blind actually
+    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane
+    80: a position of 85 - the blind has barely started closing from 100
+    - must not satisfy "85 <= 80" and must not stop yet.
     """
 
     sleep_calls = 0
@@ -1838,7 +1844,7 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 1.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 0.2})
     monkeypatch.setattr(
         cover,
         "_update_position",

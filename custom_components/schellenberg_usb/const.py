@@ -143,74 +143,52 @@ TEST_COMMAND_DELAY = 0.75
 # figure): one open/close/stop frame consistently takes roughly 1.1-1.2s to
 # transmit end to end.
 #
-# Used doubled, as 2x this figure, for stop_lead_percent's own base
-# compensation in _async_position_update_loop() (Issue #78, 2026-11-01
-# originally, revised 2026-11-07 - see that call site's own comment for
-# the full history). That one multiplier now covers two distinct gaps
-# that used to each get their own, separately-applied copy of this same
-# constant, in two different places:
-#
-# - This blind's own stop command, fired once the elapsed-time estimate
-#   reaches an intermediate target, still has to actually transmit and be
-#   acted on after that - uncompensated, that made any target within
-#   roughly this fraction of a blind's own travel time of either end stop
-#   unreachable: the earliest a stop could physically land was already
-#   past it.
-# - async_open_cover()/async_close_cover() used to separately push their
-#   own optimistic _move_start_time this far into the future rather than
-#   leaving it at plain time.monotonic(), for the mirror-image reason -
-#   the stick accepting an open/close write is not the same instant the
-#   motor physically starts moving, and leaving that gap uncompensated
-#   there let the position estimate run ahead of the real motor for the
-#   rest of the move, making an intermediate target's auto-stop fire
-#   measurably early. That push fixed the overshoot, but froze the
-#   reported position for just over a second at the start of every single
-#   move - intermediate target or not - which is itself a real,
-#   user-visible "sluggish position tracking" regression (Issue #78).
-#   Reverted back to plain time.monotonic(); see both call sites' own
-#   comments.
-#
-# Deliberately still the one figure, doubled, rather than two separately-
-# tuned constants, because the underlying hardware latency measured above
-# is already described as applying to "one open/close/stop frame"
-# generically - a real difference between what used to be two call sites
-# has never been measured, so splitting them would just be two names for
-# one number. Used undoubled everywhere else this constant appears -
-# resend delays, the stick-ack baseline itself - this doubling is local
-# to stop_lead_percent's own calculation, not a change to what the
-# constant itself models.
-# _async_position_update_loop() widens the stop-side use further still,
-# only when api.py's move_lock_busy reports contention, for the time this
+# _async_position_update_loop() in cover.py (stop_lead_percent) is the one
+# place this figure's start-side and stop-side roles both matter at once -
+# see that call site's own comment for the full derivation (Issue #78,
+# 2026-11-01 originally, corrected 2026-11-07 after an intervening version
+# double-counted them). Summary: this same measured figure models both how
+# long after accepting an open/close write the real motor takes to actually
+# start moving (D_start) and how long after a stop command is actually
+# issued the real motor takes to actually stop (D_stop). Uncontended, D_start
+# and D_stop are equal and enter stop_lead_percent's own baseline with
+# opposite sign, so they cancel out of it completely - this constant doesn't
+# appear in that baseline at all any more. It still widens that same lead
+# further when api.py's move_lock_busy reports contention, for the time this
 # blind's own stop can additionally spend queued behind another blind's
-# move/stop sharing the same transmit lock - see that call site's own
-# comment for the real-log numbers behind it. Kept as one named constant,
-# rather than inline in cover.py, so every call site stays in sync and a
-# real-hardware test on a different stick/motor combination only needs to
-# change one number.
+# move/stop sharing the same transmit lock (D_stop grows under contention,
+# D_start doesn't, so the cancellation above no longer holds) - see that
+# call site's own comment for the real-log numbers behind it.
+#
+# Kept as one named constant, rather than inline at each call site, because
+# the underlying hardware latency measured above is already described as
+# applying to "one open/close/stop frame" generically - a real difference
+# between D_start and D_stop has never been measured, so splitting them
+# would just be two names for one number - and so a real-hardware test on a
+# different stick/motor combination only needs to change one number.
 STOP_COMMAND_LATENCY_SECONDS = 1.2
 
-# Sanity ceiling on the latency-compensation lead that STOP_COMMAND_
-# LATENCY_SECONDS above feeds into (stop_lead_percent, in
-# _async_position_update_loop() in cover.py), expressed in the same
-# percentage points as that lead. Not a tuned value, like the travel-time
-# floor (0.1s) that same calculation's divisor already has. Genuinely
-# reachable by a real, uncorrupted travel time now that the base
-# compensation is doubled (Issue #78, 2026-11-07) - not just a guard
-# against corrupt/legacy config data any more: real calibrated travel
-# times on the project owner's own six blinds range 8.45-23.27s
-# (2026-11-07), and the shortest of those already produces a contended
-# lead (3x this constant / 8.45s) of ~43 points, comfortably under this
-# 50-point cap but no longer "nowhere near" it either - any blind whose
-# shorter of open/close travel time drops under roughly 7.2s would hit
-# this cap on a contended stop even with an entirely genuine calibration.
-# Still binds hardest for a travel time so short or corrupted that the
+# Sanity ceiling on the latency-compensation lead that stop_lead_percent
+# (in _async_position_update_loop() in cover.py) computes, expressed in
+# the same percentage points as that lead. Not a tuned value, like the
+# travel-time floor (0.1s) that same calculation's divisor already has.
+# Real calibrated travel times stay well clear of it: the project owner's
+# own six blinds range 8.45-23.27s (2026-11-07), and even the shortest of
+# those, contended, only reaches about 20 points (1.7s / 8.45s - see
+# STOP_COMMAND_LATENCY_SECONDS's own comment for where that 1.7s comes
+# from) - comfortably under this 50-point cap. A blind would need a real
+# open/close travel time under roughly 3.4s to hit this cap on a
+# contended stop with an entirely genuine calibration - mainly a guard,
+# in practice, against corrupt/legacy config data (a near-zero or wildly
+# wrong travel time), same as the divisor floor above it, rather than
+# something a real blind's own calibration is expected to approach.
+# Binds hardest for a travel time so short or corrupted that the
 # uncapped lead would run into the hundreds of percent, pushing the
-# comparison it feeds so far past the valid 0-100 range that any position
-# at all would satisfy "already there" the instant a move starts,
-# regardless of how far from the real target it actually was - unlike
-# that divisor floor, this had no matching ceiling at all before. That
-# extreme case is unaffected by this doubling, since it was already far
-# past this cap either way.
+# comparison it feeds so far past the valid 0-100 range that any
+# position at all would satisfy "already there" the instant a move
+# starts, regardless of how far from the real target it actually was -
+# unlike that divisor floor, this has no matching ceiling at all
+# otherwise.
 MAX_STOP_LEAD_PERCENT = 50.0
 
 # How many *additional* stop frames control_blind_stop() fires, as plain,
