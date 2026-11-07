@@ -282,6 +282,29 @@ STOP_COMMAND_RESEND_DELAY_SECONDS = 0.3
 # a delayed frame ever catches up. Decided with the project owner
 # (2026-11-07) to scope this to the stop side only for exactly that
 # reason.
+#
+# Also confirmed with the project owner (2026-11-07): the motor does not
+# send this status frame at all when a stop lands at or very near its own
+# physical end stop (0%/100%) - only for a stop landing somewhere in the
+# 1-99% range does it reliably arrive. This is consistent with, and the
+# same underlying reason as, why _confirm_full_travel_resync() in cover.py
+# exists at all: a plain open_cover()/close_cover() reaching 0/100 has
+# never waited on a motor echo to begin with, confirming instead from the
+# elapsed-time position estimate crossing the threshold (see that
+# function's own call sites). async_stop_cover() has no way to know in
+# advance whether a given stop will land near an edge - NEAR_END_STOP_
+# SNAP_TOLERANCE_PERCENT's own comment above goes through why position
+# alone can't even tell a genuine end stop apart from a deliberate
+# near-edge stop *after the fact* - so this constant is not, and cannot
+# be, tuned to avoid that case: a stop landing near 0/100 always spends
+# the full grace period waiting on a frame that was never coming, then
+# falls back exactly as it would for a real RF loss. Harmless (same
+# bounded, best-effort fallback either way) but worth knowing: the extra
+# confidence this constant buys is specific to intermediate stops, which
+# is also async_stop_cover()'s overwhelmingly typical case (interrupting
+# a move partway rather than letting it run to an end stop, which a plain
+# open_cover()/close_cover() call - or simply not stopping it - would be
+# used for instead).
 MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS = 2.0
 
 # Total time _async_position_update_loop()'s auto-stop-at-target branch
