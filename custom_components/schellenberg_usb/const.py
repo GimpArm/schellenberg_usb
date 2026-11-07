@@ -571,10 +571,15 @@ CONF_CLOSE_TIME = "close_time"  # Time it takes to close (down) in seconds
 # - which now lets the person choose whether open or close is driven first,
 # see options_flow_calibration.py's calibration_close step - has finished.
 # Only ever 0 or 100: calibration always ends at whichever end stop the
-# second/last leg drove to. Only present on a subentry created fresh from a
-# pair_device calibration; cover.py falls back to 0 when it is absent, which
-# covers every blind paired before this key existed and the hybrid
-# (add_shutter_from_remote) workflow, which never runs this calibration flow.
+# second/last leg drove to. Set on every subentry created by a fresh pairing
+# regardless of which calibration_method_choice option was picked (Issue #78
+# pairing-flow unification, 2026-11-07, see config_flow.py's async_step_user()
+# docstring) - a live calibration run sets it to the real ending position
+# (options_flow_calibration.py), and the manual-entry route sets it directly
+# from the person's own stated current position (_pending_data(), fed by
+# async_step_manual_times()). cover.py falls back to 0 only when the key is
+# absent entirely, which now covers just blinds paired before this key
+# existed in the first place.
 CONF_INITIAL_POSITION = "initial_position"
 # Legacy top-level command-device-ID key from before CONF_COMMAND_DEVICE_ID
 # and the separate status identity existed. Despite living in this

@@ -1965,15 +1965,21 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         if self._move_start_time is None or self._move_start_position is None:
             return
 
-        # Never negative: async_open_cover()/async_close_cover() push
-        # self._move_start_time this far into the future to model the same
-        # transmit-to-motor-action dead time STOP_COMMAND_LATENCY_SECONDS
-        # already measures (see their own call sites' comments) - for as
-        # long as time.monotonic() has not yet reached that pushed-forward
-        # point, the real motor has not started moving yet either, so the
-        # clamp below holds the estimate at _move_start_position exactly,
-        # rather than letting a negative elapsed_time run total_position_
-        # change backwards past it.
+        # Never negative. Nothing in production currently pushes self.
+        # _move_start_time into the future - async_open_cover()/async_
+        # close_cover() used to, to model the same transmit-to-motor-
+        # action dead time STOP_COMMAND_LATENCY_SECONDS already measures,
+        # but that push was reverted (Issue #78, 2026-11-07): it fixed the
+        # intermediate-target overshoot it was added for, but froze the
+        # reported position for just over a second at the start of every
+        # single move in exchange, a regression of its own. See both call
+        # sites' own comments, and STOP_COMMAND_LATENCY_SECONDS's own
+        # comment in const.py for where that compensation moved instead.
+        # This clamp stays as a defensive guard against a negative
+        # elapsed_time regardless - clock weirdness, or some future
+        # caller setting _move_start_time ahead of now for a different
+        # reason - rather than letting total_position_change run
+        # backwards past _move_start_position.
         elapsed_time = max(0.0, time.monotonic() - self._move_start_time)
 
         # Guard against a zero/negative travel time (corrupt or hand-edited
