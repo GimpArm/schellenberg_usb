@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Gerät hinzufügen",
-          "description": "Wählen Sie, wie Sie dieses Gerät einrichten möchten. Geeignet für Rollläden, elektronische Gurt-/Bandwickler, Markisenmotoren und andere Schellenberg-kompatible Motoren.",
-          "menu_options": {
-            "pair_device": "Gerät koppeln und kalibrieren",
-            "add_shutter_from_remote": "Gerät von Fernbedienung hinzufügen (empfohlen)"
-          }
-        },
-        "pair_device": {
-          "title": "Gerät koppeln und kalibrieren",
-          "description": "Drücken Sie innerhalb von 2 Minuten die Kopplungstaste oder die Kopplungstasten an Ihrem Gerät.",
-          "submit": "Koppeln"
-        },
-        "add_shutter_from_remote": {
-          "title": "Gerät von Fernbedienung hinzufügen",
-          "description": "Diese Kopplungsmethode wird für jedes kompatible Schellenberg-Funkgerät empfohlen, egal ob es sich um einen Rollladenmotor, einen elektronischen Gurt-/Bandwickler oder einen Markisenmotor handelt. Verwenden Sie nach dem Drücken auf Koppeln innerhalb von 2 Minuten eine bereits gekoppelte Original-Fernbedienung und wählen Sie den Kanal des Geräts aus. Drücken Sie die Programmiertaste Ihrer Fernbedienung, bis die Kanal-LED blinkt, und drücken Sie anschließend Stopp. Home Assistant erkennt das Telegramm und sendet den Anlernbefehl 60, gefolgt vom Abschlussbefehl 40 auf demselben Enum-Wert. Eine ACK-Bestätigung des USB-Sticks belegt nicht, dass das Gerät den Sender gelernt hat. Anschließend folgt ein kurzer Testlauf. Danach bestätigen Sie, ob sich der Rollladen tatsächlich bewegt hat.",
+          "title": "Gerät koppeln",
+          "description": "Drücken Sie unten auf Koppeln, und drücken Sie dann entweder die Kopplungstaste am Gerät ODER die Programmiertaste Ihrer bereits gekoppelten Fernbedienung und senden Sie anschließend über diese bereits gekoppelte Fernbedienung einen Stopp-Befehl an den Motor, den Sie koppeln möchten.",
           "submit": "Koppeln"
         },
         "name_device": {
@@ -60,7 +47,7 @@
         "calibration_method_choice": {
           "title": "Laufzeiten festlegen",
           "menu_options": {
-            "calibration_close": "Durch Bewegen des Rollladens kalibrieren",
+            "test_motor": "Durch Bewegen des Rollladens kalibrieren",
             "manual_times": "Laufzeiten manuell eingeben"
           }
         },
@@ -113,10 +100,8 @@
         },
         "test_success": {
           "title": "Befehlstest erfolgreich",
-          "menu_options": {
-            "calibration_close": "Weiter zur Kalibrierung",
-            "manual_times": "Gerätedaten im nächsten Menü manuell eintragen"
-          }
+          "description": "Der Befehlstest hat bestätigt, dass sich der Rollladen bewegt. Fahren Sie fort, um die Laufzeiten zu messen.",
+          "submit": "Weiter"
         },
         "manual_times": {
           "title": "Laufzeiten eingeben",

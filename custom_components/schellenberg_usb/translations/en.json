@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Add a device",
-          "description": "Choose how to set up this device. Works for roller-shutter blinds, electronic belt/strap winders, awning motors, and other Schellenberg-compatible motors.",
-          "menu_options": {
-            "pair_device": "Pair and calibrate",
-            "add_shutter_from_remote": "Add device from remote (recommended)"
-          }
-        },
-        "pair_device": {
-          "title": "Pair device and calibrate",
-          "description": "Press the pairing button or pairing buttons on your device within 2 minutes.",
-          "submit": "Pair"
-        },
-        "add_shutter_from_remote": {
-          "title": "Add device from remote",
-          "description": "This pairing method is recommended for any compatible Schellenberg RF shutter, whether it is an RF shutter motor, an electronic belt/strap winder, or an awning motor. After pressing Pair, use an already paired original remote control within 2 minutes and select the device's channel. Press your remote control's programming button until the channel LED blinks, then press Stop. Home Assistant will detect the telegram and send teach command 60, followed by finish command 40 on the same enum value. A USB stick ACK confirmation does not prove that the device has learned the transmitter. A short test run follows. Afterwards, confirm whether the shutter actually moved.",
+          "title": "Pair Device",
+          "description": "Press the Pair button below, and then either press the pairing button on the device OR press the programming button on your already-paired remote control and afterwards send a stop command on your already-paired remote control to the motor you want to pair.",
           "submit": "Pair"
         },
         "name_device": {
@@ -60,7 +47,7 @@
         "calibration_method_choice": {
           "title": "Set travel times",
           "menu_options": {
-            "calibration_close": "Calibrate by moving the shutter",
+            "test_motor": "Calibrate by moving the shutter",
             "manual_times": "Enter travel times manually"
           }
         },
@@ -113,10 +100,8 @@
         },
         "test_success": {
           "title": "Command test successful",
-          "menu_options": {
-            "calibration_close": "Continue to calibration",
-            "manual_times": "Enter device data manually in the next menu"
-          }
+          "description": "The motor test confirmed the shutter moves. Continue to measure its travel times.",
+          "submit": "Continue"
         },
         "manual_times": {
           "title": "Enter travel times",

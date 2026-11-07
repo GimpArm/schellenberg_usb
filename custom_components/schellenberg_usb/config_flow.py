@@ -337,7 +337,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         # see that constant's own comment in cover.py.
         self._pending_initial_position: int | None = None
         self._pending_invert_direction = False
-        self._pairing_workflow = "legacy"
+        self._pairing_workflow = "pairing"
         # The direction chosen on the test_motor form (see
         # async_step_test_motor()) - "open" or "close" - remembered only so
         # did_motor_move's own description can report back what was just
@@ -374,40 +374,31 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Choose how to pair/calibrate a new device."""
-        return self.async_show_menu(
-            step_id="user",
-            menu_options=[
-                "pair_device",
-                "add_shutter_from_remote",
-            ],
-        )
+        """Pair a new device - the sole, unified pairing entry point.
 
-    async def async_step_pair_device(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Run the pair-then-calibrate workflow."""
-        self._pairing_workflow = "legacy"
-        return await self._async_pair_device("pair_device", user_input)
-
-    async def async_step_add_shutter_from_remote(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Pair a device by teaching the stick onto an existing remote's channel.
-
-        Captures whatever identity the person's already-paired physical
-        remote uses for the motor/channel they select, and teaches the
-        stick onto that same identity - rather than pair_device's own
-        fresh teach sequence. A short test move follows; see
-        async_step_did_motor_move()'s "hybrid" branch below.
+        Issue #78 discussion (2026-11-07): this used to be a menu
+        choosing between "Pair and calibrate" (no motor confirmation
+        afterward - the actually-redundant option, now gone) and "Add
+        device from remote" (recommended - taught the stick onto an
+        already-paired remote's channel, then confirmed with a short
+        test move). Both named choices are gone; this step's own
+        structure is what survives, just under a new, generic name,
+        since api.pair_device_and_wait() already listens for either
+        enrollment technique's own frame regardless of which old menu
+        option a person used to pick - see strings.json's "user" step
+        for the combined instructions that now cover both techniques
+        in one place. Every fresh pairing now gets the same motor-test
+        confirmation that only "Add device from remote" used to
+        require, via async_step_name_device()'s own now-unconditional
+        menu (calibration_method_choice's "test_motor" option, below).
         """
-        self._pairing_workflow = "hybrid"
-        return await self._async_pair_device("add_shutter_from_remote", user_input)
+        self._pairing_workflow = "pairing"
+        return await self._async_pair_device("user", user_input)
 
     async def _async_pair_device(
         self, step_id: str, user_input: dict[str, Any] | None
     ) -> SubentryFlowResult:
-        """Pair a device for either supported pairing workflow."""
+        """Pair a device for the single, unified pairing workflow."""
         _LOGGER.debug("Pairing step user input: %s", user_input)
         if user_input is None:
             _LOGGER.info("Showing pairing form")
@@ -643,12 +634,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask whether the short command moved the motor.
 
-        Reached by async_step_test_motor() from two different places: the
-        "hybrid" add_shutter_from_remote workflow's own quick test right
-        after pairing, and the "existing" setup's re-test of an
-        already-paired blind. The default "legacy" (pair_device) workflow
-        never reaches this step at all - async_step_name_device() sends
-        it straight into calibration instead.
+        Reached by async_step_test_motor() from two different places: a
+        fresh pairing's own quick test, chosen via calibration_method_
+        choice's "test_motor" option (self._pairing_workflow == "pairing" -
+        see async_step_name_device()'s own comment; every fresh pairing
+        can reach this step now, as of the Issue #78 pairing-flow
+        unification, 2026-11-07), and the "existing" setup's re-test of
+        an already-paired blind.
         """
         if user_input is None:
             return self.async_show_form(
@@ -689,27 +681,33 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         if self._pairing_workflow == "existing":
             return self.async_abort(reason="command_test_successful")
-        # "hybrid" (add_shutter_from_remote) is the only workflow that can
-        # still be set here: "existing" already returned above, and the
-        # default "legacy" (pair_device) never reaches this step at all -
-        # async_step_name_device() sends it straight into calibration
-        # instead (see its own branch there).
+        # "pairing" is the only value that can still be set here -
+        # "existing" already returned above.
         return await self.async_step_test_success()
 
     async def async_step_test_success(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Offer calibration or manual timing after a successful motor test.
+        """Confirm continuing to calibration after a successful motor test.
 
-        Home Assistant requires a menu's step_id to match a real
-        async_step_<id>() handler on this class; a bare
-        async_show_menu(step_id="test_success", ...) call with no such
-        method raises UnknownStep as soon as the menu is shown.
+        No longer a real choice as of the Issue #78 pairing-flow
+        unification (2026-11-07): "Enter travel times manually" moved
+        earlier, to calibration_method_choice's own menu before the
+        motor test ever runs (see async_step_name_device()'s own
+        comment) - by the time a person reaches this step, the motor has
+        already been confirmed working, so there is nothing left to
+        offer manual entry as an alternative *to*. Kept as an explicit,
+        plain confirmation (not silently chaining straight into
+        calibration) since the person has just watched their shutter
+        move and should see that result acknowledged before anything
+        else starts - a form rather than a menu, since a single-option
+        menu would not be a real choice either.
         """
-        return self.async_show_menu(
-            step_id="test_success",
-            menu_options=["calibration_close", "manual_times"],
-        )
+        if user_input is None:
+            return self.async_show_form(
+                step_id="test_success", data_schema=vol.Schema({})
+            )
+        return await self.async_step_calibration_close(None)
 
     async def async_step_manual_times(
         self, user_input: dict[str, Any] | None = None
@@ -844,23 +842,24 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             status_identity_source=self._pending_status_identity_source,
             invert_direction=self._pending_invert_direction,
         )
-        if self._pairing_workflow == "hybrid":
-            return await self.async_step_test_motor()
-
-        # "legacy" (pair_device): unlike "hybrid", which only offers this
-        # same choice after its own motor test succeeds (test_success's
-        # menu below), this workflow never tests the motor at all - nothing
-        # here has confirmed the blind can be driven and observed yet, so
-        # offer the same manual-entry alternative before committing to a
-        # live calibration that depends on exactly that (Issue #77,
-        # 2026-11-07: live calibration silently waiting - previously for up
-        # to 5 real minutes per leg, now 2, see CALIBRATION_TIMEOUT's own
-        # comment in const.py - for a movement message that, for whatever
-        # reason, never arrives was reported as the wizard "hanging
-        # endlessly", with no escape hatch visible anywhere on screen).
+        # Every fresh pairing reaches the same choice now (Issue #78
+        # discussion, 2026-11-07 - see async_step_user()'s own docstring
+        # for why the old "legacy"/"hybrid" branch that used to live here
+        # is gone): calibrate live - which, via the "test_motor" option
+        # below, now also runs the same motor-test confirmation that only
+        # the old "Add device from remote" workflow used to require
+        # before calibrating - or enter travel times directly, with
+        # nothing sent to the motor at all. Offering this choice *before*
+        # committing to a live calibration also keeps Issue #77's own
+        # fix meaningful here: that live calibration can still time out
+        # (CALIBRATION_TIMEOUT, see its own comment in const.py) if the
+        # person doesn't operate the shutter in time, and this upfront
+        # alternative is the first of the two escapes calibration_timeout_
+        # choice's own menu (options_flow_calibration.py) offers if it
+        # does.
         return self.async_show_menu(
             step_id="calibration_method_choice",
-            menu_options=["calibration_close", "manual_times"],
+            menu_options=["test_motor", "manual_times"],
         )
 
     async def async_step_reconfigure(

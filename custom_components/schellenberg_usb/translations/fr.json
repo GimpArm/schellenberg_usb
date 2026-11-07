@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Ajouter un appareil",
-          "description": "Choisissez comment configurer cet appareil. Compatible avec les volets roulants, les enrouleurs de sangle électroniques, les moteurs de store banne et d'autres moteurs compatibles Schellenberg.",
-          "menu_options": {
-            "pair_device": "Appairer et calibrer",
-            "add_shutter_from_remote": "Ajouter un appareil depuis la télécommande (recommandé)"
-          }
-        },
-        "pair_device": {
-          "title": "Appairer l'appareil et calibrer",
-          "description": "Appuyez sur le bouton ou les boutons d'appairage de votre appareil dans les 2 minutes.",
-          "submit": "Appairer"
-        },
-        "add_shutter_from_remote": {
-          "title": "Ajouter un appareil depuis la télécommande",
-          "description": "Cette méthode d'appairage est recommandée pour tout appareil Schellenberg compatible par radiofréquence, qu'il s'agisse d'un moteur de volet, d'un enrouleur de sangle électronique ou d'un moteur de store banne. Après avoir appuyé sur Appairer, utilisez une télécommande d'origine déjà appairée dans les 2 minutes et sélectionnez le canal de l'appareil. Appuyez sur le bouton de programmation de la télécommande jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop. Home Assistant détectera la trame et enverra la commande d'apprentissage 60, suivie de la commande de fin 40 sur la même valeur d'énumération. Un accusé de réception ACK de la clé USB ne prouve pas que l'appareil a appris l'émetteur. Un court test suit. Ensuite, confirmez si le volet a réellement bougé.",
+          "title": "Appairer l'appareil",
+          "description": "Appuyez sur le bouton Appairer ci-dessous, puis appuyez soit sur le bouton d'appairage de l'appareil, SOIT sur le bouton de programmation de votre télécommande déjà appairée, puis envoyez une commande d'arrêt depuis cette télécommande déjà appairée au moteur que vous souhaitez appairer.",
           "submit": "Appairer"
         },
         "name_device": {
@@ -60,7 +47,7 @@
         "calibration_method_choice": {
           "title": "Définir les durées de course",
           "menu_options": {
-            "calibration_close": "Calibrer en déplaçant le volet",
+            "test_motor": "Calibrer en déplaçant le volet",
             "manual_times": "Saisir les durées de course manuellement"
           }
         },
@@ -113,10 +100,8 @@
         },
         "test_success": {
           "title": "Test de commande réussi",
-          "menu_options": {
-            "calibration_close": "Continuer vers la calibration",
-            "manual_times": "Saisir manuellement les données de l'appareil dans le menu suivant"
-          }
+          "description": "Le test du moteur a confirmé que le volet se déplace. Continuez pour mesurer ses durées de course.",
+          "submit": "Continuer"
         },
         "manual_times": {
           "title": "Saisir les durées de course",

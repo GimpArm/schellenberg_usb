@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Añadir un dispositivo",
-          "description": "Elija cómo desea configurar este dispositivo. Compatible con persianas enrollables, enrolladores de cinta/correa electrónicos, motores de toldo y otros motores compatibles con Schellenberg.",
-          "menu_options": {
-            "pair_device": "Emparejar y calibrar",
-            "add_shutter_from_remote": "Añadir dispositivo desde mando a distancia (recomendado)"
-          }
-        },
-        "pair_device": {
-          "title": "Emparejar dispositivo y calibrar",
-          "description": "Pulse el botón o los botones de emparejamiento de su dispositivo en un plazo de 2 minutos.",
-          "submit": "Emparejar"
-        },
-        "add_shutter_from_remote": {
-          "title": "Añadir dispositivo desde mando a distancia",
-          "description": "Este método de emparejamiento se recomienda para cualquier dispositivo Schellenberg compatible por radiofrecuencia, ya sea un motor de persiana, un enrollador de cinta/correa electrónico o un motor de toldo. Después de pulsar Emparejar, utilice un mando a distancia original ya emparejado en un plazo de 2 minutos y seleccione el canal del dispositivo. Pulse el botón de programación de su mando a distancia hasta que el LED del canal parpadee y, a continuación, pulse Stop. Home Assistant detectará la trama y enviará el comando de aprendizaje 60, seguido del comando de finalización 40 en el mismo valor enum. Una confirmación ACK de la memoria USB no demuestra que el dispositivo haya aprendido el transmisor. A continuación se realiza una breve prueba. Después, confirme si la persiana se movió realmente.",
+          "title": "Emparejar dispositivo",
+          "description": "Pulse el botón Emparejar a continuación y, después, pulse el botón de emparejamiento del dispositivo O BIEN pulse el botón de programación de su mando a distancia ya emparejado y, a continuación, envíe un comando de parada desde ese mando a distancia ya emparejado al motor que desea emparejar.",
           "submit": "Emparejar"
         },
         "name_device": {
@@ -60,7 +47,7 @@
         "calibration_method_choice": {
           "title": "Establecer tiempos de recorrido",
           "menu_options": {
-            "calibration_close": "Calibrar moviendo la persiana",
+            "test_motor": "Calibrar moviendo la persiana",
             "manual_times": "Introducir los tiempos de recorrido manualmente"
           }
         },
@@ -113,10 +100,8 @@
         },
         "test_success": {
           "title": "Prueba de comando exitosa",
-          "menu_options": {
-            "calibration_close": "Continuar a la calibración",
-            "manual_times": "Introducir datos del dispositivo manualmente en el siguiente menú"
-          }
+          "description": "La prueba del motor confirmó que la persiana se mueve. Continúe para medir sus tiempos de recorrido.",
+          "submit": "Continuar"
         },
         "manual_times": {
           "title": "Introducir tiempos de recorrido",
