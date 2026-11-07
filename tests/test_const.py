@@ -86,7 +86,9 @@ def test_timeout_constants() -> None:
     """Test timeout constants are positive integers."""
     assert VERIFY_TIMEOUT == 5
     assert PAIRING_TIMEOUT == 120
-    assert CALIBRATION_TIMEOUT == 300
+    # Lowered from 300 to 120 for Issue #77 (2026-11-07) - see
+    # CALIBRATION_TIMEOUT's own comment in const.py.
+    assert CALIBRATION_TIMEOUT == 120
 
     assert VERIFY_TIMEOUT > 0
     assert PAIRING_TIMEOUT > 0
@@ -95,8 +97,12 @@ def test_timeout_constants() -> None:
 
 def test_timeout_relationships() -> None:
     """Test timeout relationships make sense."""
-    # Calibration should be longer than pairing
-    assert CALIBRATION_TIMEOUT > PAIRING_TIMEOUT
+    # Calibration and pairing are now deliberately equal (both 2 minutes) -
+    # see CALIBRATION_TIMEOUT's own comment in const.py for why calibration
+    # no longer needs the larger margin over pairing this test used to
+    # assert; it still must not end up *shorter*, since a fresh pairing
+    # offers no fallback once pairing itself has already succeeded.
+    assert CALIBRATION_TIMEOUT >= PAIRING_TIMEOUT
     # Pairing should be longer than verification
     assert PAIRING_TIMEOUT > VERIFY_TIMEOUT
 

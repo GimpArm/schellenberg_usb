@@ -57,6 +57,13 @@
             "device_name": "Nom de l'appareil"
           }
         },
+        "calibration_method_choice": {
+          "title": "Définir les durées de course",
+          "menu_options": {
+            "calibration_close": "Calibrer en déplaçant le volet",
+            "manual_times": "Saisir les durées de course manuellement"
+          }
+        },
         "calibration_close": {
           "title": "Avant de commencer",
           "description": "Pour calibrer {device_name} avec précision, Home Assistant doit savoir quelle direction de mouvement du volet doit être calibrée en premier.",
@@ -74,6 +81,14 @@
           "title": "Fermer le volet",
           "description": "Nous allons maintenant mesurer le temps nécessaire pour fermer {device_name}. Appuyez sur Démarrer **puis** sur le bouton de fermeture de la commande pour lancer la calibration. La calibration ne démarre que lorsqu'un message de mouvement vers le bas du volet a été transmis à Home Assistant et ensuite traité par Home Assistant.",
           "submit": "Démarrer"
+        },
+        "calibration_timeout_choice": {
+          "title": "Aucune réponse du volet",
+          "description": "Home Assistant n'a pas détecté le mouvement attendu à temps. Réessayez, ou saisissez les durées de course manuellement.",
+          "menu_options": {
+            "calibration_retry": "Réessayer",
+            "manual_times": "Saisir les durées de course manuellement"
+          }
         },
         "calibration_complete": {
           "title": "Calibration terminée",
@@ -206,7 +221,7 @@
         "already_configured": "Cet appareil est déjà configuré.",
         "initial_state_required": "Veuillez indiquer si le volet est actuellement complètement ouvert ou complètement fermé avant de continuer.",
         "test_direction_required": "Veuillez indiquer quelle direction de mouvement du volet doit être testée avant de continuer.",
-        "calibration_timeout": "Le minuteur de calibration a expiré. Le volet a mis plus de 5 minutes pour effectuer le mouvement. Veuillez vérifier l'appareil et réessayer.",
+        "calibration_timeout": "Le minuteur de calibration a expiré. Le volet a mis plus de 2 minutes pour effectuer le mouvement. Veuillez vérifier l'appareil et réessayer.",
         "calibration_start_timeout": "Délai d'attente dépassé en attendant que le volet commence à bouger. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
         "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
         "command_failed": "La commande série n'a pas pu être mise en file d'attente. Vérifiez la connexion USB et les journaux.",

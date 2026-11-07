@@ -57,6 +57,13 @@
             "device_name": "Device name"
           }
         },
+        "calibration_method_choice": {
+          "title": "Set travel times",
+          "menu_options": {
+            "calibration_close": "Calibrate by moving the shutter",
+            "manual_times": "Enter travel times manually"
+          }
+        },
         "calibration_close": {
           "title": "Before you start",
           "description": "To calibrate {device_name} accurately, Home Assistant needs to know which shutter movement direction should be calibrated first.",
@@ -74,6 +81,14 @@
           "title": "Close the shutter",
           "description": "Now we will measure how long it takes to close {device_name}. Press Start **and then** the close button on the control to start the calibration. The calibration only starts when a downward movement message from the shutter has been transmitted to Home Assistant and subsequently processed by Home Assistant.",
           "submit": "Start"
+        },
+        "calibration_timeout_choice": {
+          "title": "No response from the shutter",
+          "description": "Home Assistant did not detect the expected movement in time. Try again, or enter the travel times manually instead.",
+          "menu_options": {
+            "calibration_retry": "Try again",
+            "manual_times": "Enter travel times manually"
+          }
         },
         "calibration_complete": {
           "title": "Calibration complete",
@@ -206,7 +221,7 @@
         "already_configured": "This device is already configured.",
         "initial_state_required": "Please select whether the shutter is currently fully open or fully closed before proceeding.",
         "test_direction_required": "Please select which shutter movement direction should be tested before proceeding.",
-        "calibration_timeout": "The calibration timer has expired. The shutter took more than 5 minutes for the movement. Please check the device and try again.",
+        "calibration_timeout": "The calibration timer has expired. The shutter took more than 2 minutes for the movement. Please check the device and try again.",
         "calibration_start_timeout": "Timeout waiting for the shutter to move. Please ensure the device is properly connected and try again.",
         "unknown": "An unexpected error occurred during calibration. Please try again.",
         "command_failed": "The serial command could not be queued. Check the USB connection and logs.",

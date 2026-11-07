@@ -57,6 +57,13 @@
             "device_name": "Nombre del dispositivo"
           }
         },
+        "calibration_method_choice": {
+          "title": "Establecer tiempos de recorrido",
+          "menu_options": {
+            "calibration_close": "Calibrar moviendo la persiana",
+            "manual_times": "Introducir los tiempos de recorrido manualmente"
+          }
+        },
         "calibration_close": {
           "title": "Antes de empezar",
           "description": "Para calibrar {device_name} con precisión, Home Assistant necesita saber qué dirección de movimiento de la persiana debe calibrarse primero.",
@@ -74,6 +81,14 @@
           "title": "Cerrar la persiana",
           "description": "Ahora mediremos cuánto tiempo tarda en cerrarse {device_name}. Pulse Iniciar **y luego** el botón de cierre en el control para iniciar la calibración. La calibración solo comienza cuando Home Assistant recibe un mensaje de movimiento descendente de la persiana y este es procesado por Home Assistant.",
           "submit": "Iniciar"
+        },
+        "calibration_timeout_choice": {
+          "title": "Sin respuesta de la persiana",
+          "description": "Home Assistant no detectó el movimiento esperado a tiempo. Vuelva a intentarlo o introduzca los tiempos de recorrido manualmente.",
+          "menu_options": {
+            "calibration_retry": "Volver a intentarlo",
+            "manual_times": "Introducir los tiempos de recorrido manualmente"
+          }
         },
         "calibration_complete": {
           "title": "Calibración completada",
@@ -206,7 +221,7 @@
         "already_configured": "Este dispositivo ya está configurado.",
         "initial_state_required": "Seleccione si la persiana está actualmente totalmente abierta o totalmente cerrada antes de continuar.",
         "test_direction_required": "Seleccione qué dirección de movimiento de la persiana se debe probar antes de continuar.",
-        "calibration_timeout": "El temporizador de calibración ha caducado. La persiana tardó más de 5 minutos en realizar el movimiento. Compruebe el dispositivo e inténtelo de nuevo.",
+        "calibration_timeout": "El temporizador de calibración ha caducado. La persiana tardó más de 2 minutos en realizar el movimiento. Compruebe el dispositivo e inténtelo de nuevo.",
         "calibration_start_timeout": "Tiempo de espera agotado esperando a que la persiana se mueva. Asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
         "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
         "command_failed": "No se pudo encolar el comando serie. Compruebe la conexión USB y los registros.",

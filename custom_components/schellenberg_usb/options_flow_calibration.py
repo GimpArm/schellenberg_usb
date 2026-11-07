@@ -382,6 +382,23 @@ class CalibrationFlowHandler:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_UP)
             if not start_ok:
                 self._finish_calibration_capture("opening_start_timeout")
+                if self._create_subentry_after_calibration:
+                    # Issue #77 (2026-11-07): a fresh pairing gets an
+                    # explicit choice instead of only an on-screen error and
+                    # an implicit "submit this same form again" - see
+                    # async_step_calibration_retry()'s own docstring below
+                    # and CALIBRATION_TIMEOUT's own comment in const.py.
+                    # Recalibrating an already-paired blind
+                    # (_create_subentry_after_calibration is False there -
+                    # see async_step_calibrate() in config_flow.py) falls
+                    # through to the unchanged error-and-resubmit behavior
+                    # below instead; every other timeout branch in this
+                    # method mirrors this same check without repeating this
+                    # comment.
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -398,6 +415,11 @@ class CalibrationFlowHandler:
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
                 self._finish_calibration_capture("opening_stop_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -470,6 +492,11 @@ class CalibrationFlowHandler:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_DOWN)
             if not start_ok:
                 self._finish_calibration_capture("closing_start_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -486,6 +513,11 @@ class CalibrationFlowHandler:
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
                 self._finish_calibration_capture("closing_stop_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -681,6 +713,26 @@ class CalibrationFlowHandler:
             },
             last_step=True,
         )
+
+    async def async_step_calibration_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Re-enter whichever leg's instruction step is still pending.
+
+        The sole redirect target for calibration_timeout_choice's "retry"
+        option (see async_step_calibration_open_instruction's own comment
+        on its first timeout branch for when that menu is shown at all) -
+        shared by all four timeout cases (open/close leg, movement-start/
+        stop wait) rather than one retry step per case, since which leg is
+        still pending is exactly the same check async_step_calibration_
+        open_instruction/_close_instruction's own success tail already uses
+        to decide what comes after a leg completes: self._open_time is
+        None until the open leg has actually finished, regardless of which
+        leg's own wait just timed out.
+        """
+        if self._open_time is None:
+            return await self.async_step_calibration_open_instruction(user_input)
+        return await self.async_step_calibration_close_instruction(user_input)
 
     async def _wait_for_movement_start(self, event_type: str) -> bool:
         """Wait for one specific device-event command, or time out.

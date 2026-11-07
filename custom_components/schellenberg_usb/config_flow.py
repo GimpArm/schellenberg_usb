@@ -847,13 +847,20 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         if self._pairing_workflow == "hybrid":
             return await self.async_step_test_motor()
 
-        _LOGGER.debug(
-            "Starting calibration for paired device %s (%s) before creating subentry",
-            device_id,
-            device_name,
-        )
-        return await self._await_subentry_result(
-            handler.async_step_calibration_close(None)
+        # "legacy" (pair_device): unlike "hybrid", which only offers this
+        # same choice after its own motor test succeeds (test_success's
+        # menu below), this workflow never tests the motor at all - nothing
+        # here has confirmed the blind can be driven and observed yet, so
+        # offer the same manual-entry alternative before committing to a
+        # live calibration that depends on exactly that (Issue #77,
+        # 2026-11-07: live calibration silently waiting - previously for up
+        # to 5 real minutes per leg, now 2, see CALIBRATION_TIMEOUT's own
+        # comment in const.py - for a movement message that, for whatever
+        # reason, never arrives was reported as the wizard "hanging
+        # endlessly", with no escape hatch visible anywhere on screen).
+        return self.async_show_menu(
+            step_id="calibration_method_choice",
+            menu_options=["calibration_close", "manual_times"],
         )
 
     async def async_step_reconfigure(
@@ -2242,4 +2249,19 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         handler = self._get_calibration_handler()
         return await self._await_subentry_result(
             handler.async_step_calibration_complete(user_input)
+        )
+
+    async def async_step_calibration_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Delegate to calibration handler.
+
+        The "retry" option on calibration_timeout_choice's own menu (Issue
+        #77) - Home Assistant's menu machinery calls this directly by name,
+        the same way it already calls async_step_calibration_close/
+        manual_times for test_success's own menu options.
+        """
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_retry(user_input)
         )

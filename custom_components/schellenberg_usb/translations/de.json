@@ -57,6 +57,13 @@
             "device_name": "Gerätename"
           }
         },
+        "calibration_method_choice": {
+          "title": "Laufzeiten festlegen",
+          "menu_options": {
+            "calibration_close": "Durch Bewegen des Rollladens kalibrieren",
+            "manual_times": "Laufzeiten manuell eingeben"
+          }
+        },
         "calibration_close": {
           "title": "Bevor Sie beginnen",
           "description": "Um {device_name} genau zu kalibrieren, muss Home Assistant wissen, welche Fahrtrichtung des Rollladens zuerst kalibriert werden soll.",
@@ -74,6 +81,14 @@
           "title": "Rollladen schließen",
           "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu schließen. Drücken Sie Start **und dann** die Schließen-Taste an der Steuerung, um die Kalibrierung zu starten. Die Kalibrierung startet erst, wenn eine Abwärtsbewegungsnachricht vom Rollladen zu Home Assistant übermittelt wurde und danach von Home Assistant verarbeitet wurde.",
           "submit": "Start"
+        },
+        "calibration_timeout_choice": {
+          "title": "Keine Rückmeldung vom Rollladen",
+          "description": "Home Assistant hat die erwartete Bewegung nicht rechtzeitig erkannt. Versuchen Sie es erneut, oder geben Sie die Laufzeiten stattdessen manuell ein.",
+          "menu_options": {
+            "calibration_retry": "Erneut versuchen",
+            "manual_times": "Laufzeiten manuell eingeben"
+          }
         },
         "calibration_complete": {
           "title": "Kalibrierung abgeschlossen",
@@ -206,7 +221,7 @@
         "already_configured": "Dieses Gerät ist bereits konfiguriert.",
         "initial_state_required": "Bitte wählen Sie aus, ob der Rollladen aktuell vollständig geöffnet oder vollständig geschlossen ist, bevor Sie fortfahren.",
         "test_direction_required": "Bitte wählen Sie aus, welche Rolladenfahrtrichtung getestet werden soll, bevor Sie fortfahren.",
-        "calibration_timeout": "Der Kalibrierungstimer ist abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
+        "calibration_timeout": "Der Kalibrierungstimer ist abgelaufen. Der Rollladen hat mehr als 2 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
         "calibration_start_timeout": "Zeitüberschreitung beim Warten auf die Bewegung des Rollladens. Bitte stellen Sie sicher, dass das Gerät ordnungsgemäß angeschlossen ist, und versuchen Sie es erneut.",
         "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut.",
         "command_failed": "Der serielle Befehl konnte nicht eingereiht werden. Prüfen Sie die USB-Verbindung und die Protokolle.",

@@ -530,7 +530,34 @@ PAIRING_DEVICE_ENUM_START = 0x10  # Start from 0x10 for new devices
 STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 
 # Calibration constants
-CALIBRATION_TIMEOUT = 300  # Maximum 5 minutes (300 seconds) for calibration
+#
+# Shared by both of _wait_for_movement_start()'s uses in options_flow_
+# calibration.py: waiting for the user's own manual open/close to register
+# (no RF command is sent by this integration during calibration - see
+# calibration_open_instruction/calibration_close_instruction's own strings)
+# and, via _wait_for_stop_event()'s delegation to the same method, waiting
+# for the matching stop afterward.
+#
+# Lowered from 300 (5 minutes) to 120 (2 minutes) for Issue #77 (RolloDrive
+# 65 Premium reported calibration "hanging endlessly" - 2026-11-07): the old
+# value just meant a silent 5-minute wait before anything was shown at all,
+# which read indistinguishably from a genuine hang to someone watching the
+# pairing wizard. Still long enough that an ordinary, if slightly slow,
+# manual open/close is never cut short mid-motion - the project owner's own
+# six real blinds (see MAX_STOP_LEAD_PERCENT's own comment in this file) all
+# finish within 24s, nowhere near this budget either way.
+#
+# A fresh pairing (CalibrationFlowHandler._create_subentry_after_calibration
+# is True) now also gets an explicit choice - retry this same leg, or switch
+# to manual time entry - the moment either wait in that leg times out,
+# rather than only an on-screen error and an implicit "submit the form
+# again" (see calibration_open_instruction/calibration_close_instruction's
+# own comments in options_flow_calibration.py). Recalibrating an already-
+# paired blind keeps the old error-and-resubmit behavior unchanged - that
+# workflow already has its own direct manual-entry escape hatch one menu
+# level up (reconfigure's own "edit" option), so adding a second one here
+# would just be two routes to the same place.
+CALIBRATION_TIMEOUT = 120
 # Fallback travel time (seconds) used whenever a blind has no calibrated/manual
 # open or close time yet. Shared by cover.py (runtime default) and
 # config_flow.py (form defaults shown before a blind has been calibrated) so
