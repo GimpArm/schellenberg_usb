@@ -460,14 +460,26 @@ an update.
 > a redundant stop is harmless the same way a manual double-press of a
 > physical stop button would be.
 >
-> `stop_latenz`'s fixed margin and the integration's own widening are a
-> different pair, solving the same queueing problem differently rather
-> than one superseding the other, so this one is unchanged below: the
-> integration only adds its own margin when contention is actually
-> detected at that moment, so it is normally more precise than a fixed
-> margin applied every time. Try lowering `stop_latenz` (or setting it to
-> `0`) after upgrading, and raise it again only if you still see overshoot
-> when commanding several blinds together.
+> `stop_latenz` and `korrektur_dauer` (the fixed margin shortening a timed
+> `stop_cover`'s own wait, and the extra wait added after driving into an
+> end stop) have now been removed from both scripts below too, at the
+> project owner's own request, to match their own current, real-world
+> copy of these scripts rather than this more elaborate variant. The
+> timing that remains — `start_ts` plus the `rest_dauer` correction
+> described in the first Note below the scripts — already accounts for
+> the open/close call's own actual duration, which matters more in
+> practice than the smaller, further delay a queued `stop_cover` call can
+> still see on top of that; `stop_latenz` only ever compensated for the
+> latter. If you command several blinds at once and an intermediate
+> target lands a percentage point or two short, that is most likely this
+> trade-off rather than a regression.
+>
+> If you're running a copy with `stop_latenz`/`korrektur_dauer` still in
+> place, replace it with the version below, or remove the pieces
+> yourself: both variables, the `korrektur_dauer`-vs-`stop_cover` branch
+> in the final `choose:`, and `stop_latenz`'s own subtraction inside
+> `rest_dauer`. The same "harmless while both run at once" reasoning
+> above applies here too.
 
 This setup gives you two extra things on top of the integration's own cover
 entities:
@@ -509,7 +521,6 @@ switch it to YAML mode, and paste in everything from `alias:` down.
 | `helfer` | The number helper for this blind, from step 1 |
 | `auf` | Measured seconds for a full **opening** run |
 | `ab` | Measured seconds for a full **closing** run |
-| `stop_latenz` | Optional, in seconds (default `1.3`): for an intermediate (not 0/100) target, how much earlier than the calculated time `stop_cover` is called, to absorb it sitting queued behind other blinds' own commands before it actually transmits — see the note below |
 | `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
 
 **Script A — for normal use** (dashboards, automations). It does nothing if
@@ -530,19 +541,10 @@ interne_rollladenlogik_fuer_home_assistant:
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
         f_ab: "{{ ab | float(25) }}"
-        stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
         richtung_runter: "{{ soll > ist }}"
         dauer: >
           {% set diff = (ist - soll) | abs %} {% set faktor = f_ab if
           richtung_runter else f_auf %} {{ ((diff / 100.0) * faktor) | round(2) }}
-        korrektur_dauer: |
-          {% if soll == 0 %}
-            {{ (ist / 100.0 * f_auf) | round(2) }}
-          {% elif soll == 100 %}
-            {{ ((100 - ist) / 100.0 * f_ab) | round(2) }}
-          {% else %}
-            0
-          {% endif %}
     - choose:
         - conditions:
             - condition: template
@@ -563,13 +565,7 @@ interne_rollladenlogik_fuer_home_assistant:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: |
-          {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
-          {% if soll | int == 0 or soll | int == 100 %}
-            {{ roh | round(2) }}
-          {% else %}
-            {{ ([0, roh - stop_latenz] | max) | round(2) }}
-          {% endif %}
+        rest_dauer: "{{ [0, dauer - (now().timestamp() - start_ts)] | max | round(2) }}"
     - delay: "{{ rest_dauer }}"
     - choose:
         - conditions:
@@ -579,12 +575,6 @@ interne_rollladenlogik_fuer_home_assistant:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ soll | int == 0 or soll | int == 100 }}"
-          sequence:
-            - delay:
-                seconds: "{{ korrektur_dauer }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helfer }}"
@@ -611,7 +601,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
         ist: "{{ states(helfer) | float(0) }}"
         f_auf: "{{ auf | float(25) }}"
         f_ab: "{{ ab | float(25) }}"
-        stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
         reset_richtung_runter: "{{ soll >= 50 }}"
         richtung_runter: |
           {% if soll == ist %}
@@ -630,14 +619,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             {% set diff = (ist - soll) | abs %}
             {% set faktor = f_ab if richtung_runter else f_auf %}
             {{ ((diff / 100.0) * faktor) | round(2) }}
-          {% endif %}
-        korrektur_dauer: |
-          {% if soll == 0 or (soll == ist and not reset_richtung_runter) %}
-            {{ (ist / 100.0 * f_auf) | round(2) }}
-          {% elif soll == 100 or (soll == ist and reset_richtung_runter) %}
-            {{ ((100 - ist) / 100.0 * f_ab) | round(2) }}
-          {% else %}
-            0
           {% endif %}
     - choose:
         - conditions:
@@ -659,13 +640,7 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: |
-          {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
-          {% if not (soll == ist) and (soll | int != 0 and soll | int != 100) %}
-            {{ ([0, roh - stop_latenz] | max) | round(2) }}
-          {% else %}
-            {{ roh | round(2) }}
-          {% endif %}
+        rest_dauer: "{{ [0, dauer - (now().timestamp() - start_ts)] | max | round(2) }}"
     - delay: "{{ rest_dauer }}"
     - choose:
         - conditions:
@@ -676,12 +651,6 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ (soll | int == 0 or soll | int == 100) or (soll == ist) }}"
-          sequence:
-            - delay:
-                seconds: "{{ korrektur_dauer }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helfer }}"
@@ -803,24 +772,6 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   integration's own `cover.*` entity wait for the stick's reply before
   returning, and retry for as long as it answers busy, so neither call is
   always instant.
-- `stop_latenz` (default `1.3`, in seconds) shortens that same `rest_dauer`
-  further, but only for an intermediate target — one that still needs an
-  explicit `stop_cover` below, rather than driving into an end stop. A
-  `stop_cover` call can itself sit queued for a moment before it actually
-  reaches the stick (see the note on stop below) — measured on real
-  hardware, a bit over a second when another blind's own commands were
-  using the radio at the same time — during which the blind keeps moving
-  under its already-issued open/close command. Calling `stop_cover`
-  `stop_latenz` seconds earlier leaves that much headroom to absorb a
-  delayed send before it would otherwise overshoot the target. This is a
-  fixed, worst-case-ish margin, not a measurement of the delay actually
-  happening on any given run: raise it
-  if you regularly command several blinds at once and still see overshoot;
-  lower it toward `0` if your blinds are almost always moved one at a time
-  and you would rather have the extra precision than the margin. Either
-  way, an occasional full 0%/100% move (see the next note) corrects any
-  drift this leaves behind, the same way it already corrects drift from
-  other sources.
 - When the target is exactly 0 or 100, the scripts intentionally keep
   driving into the mechanical end stop instead of stopping at the
   calculated time, which corrects any position drift that built up over
@@ -831,8 +782,9 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   holds the radio, nor over another blind's own stop that asked for it
   first — falling back to an instant, unretried write if that brief
   window (a couple of seconds at most) runs out before its turn comes.
-  That queueing, when it happens, is exactly what `stop_latenz` above
-  compensates for. `open`/`close` are different: both wait (a few seconds
+  For an intermediate target, that queueing is the main source of the
+  small overshoot the note above (under Step 2) describes trading away
+  `stop_latenz` for. `open`/`close` are different: both wait (a few seconds
   at most, best-effort) for the stick to report itself idle before
   sending, and if the stick still answers that it is busy right as the
   command goes out (`Transmit error - stick busy`), they keep retrying -
