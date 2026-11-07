@@ -155,6 +155,9 @@
           "data": {
             "position": "Position"
           },
+          "data_description": {
+            "position": "La position indiquée ci-dessous concerne {selected_blind}."
+          },
           "submit": "Confirmer la position"
         },
         "reset_stick": {

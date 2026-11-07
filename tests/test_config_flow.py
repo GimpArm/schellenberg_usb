@@ -2457,7 +2457,7 @@ async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
     assert "Current estimated position: None" not in diagnostics_text
 
 
-def _load_calibration_close_step(language: str) -> dict[str, Any]:
+def _load_step(language: str, step_id: str) -> dict[str, Any]:
     integration_dir = (
         Path(__file__).parent.parent / "custom_components" / "schellenberg_usb"
     )
@@ -2468,9 +2468,7 @@ def _load_calibration_close_step(language: str) -> dict[str, Any]:
     )
     with path.open(encoding="utf-8") as handle:
         doc = json.load(handle)
-    step: dict[str, Any] = doc["config_subentries"]["blind"]["step"][
-        "calibration_close"
-    ]
+    step: dict[str, Any] = doc["config_subentries"]["blind"]["step"][step_id]
     return step
 
 
@@ -2510,7 +2508,7 @@ def test_calibration_close_forces_an_explicit_initial_state_choice() -> None:
     top-level "selector" translation key instead of an implied opposite.
     """
     for language in ("strings", "en", "de", "es", "fr"):
-        step = _load_calibration_close_step(language)
+        step = _load_step(language, "calibration_close")
         assert "initial_state" in step["data"], language
         assert "currently_open" not in step["data"], language
         assert "data_description" not in step, language
@@ -2528,3 +2526,30 @@ def test_calibration_close_forces_an_explicit_initial_state_choice() -> None:
         "open": "Der Rollladen ist aktuell vollständig geöffnet",
         "closed": "Der Rollladen ist aktuell vollständig geschlossen",
     }
+
+
+def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None:
+    """Reported from a screenshot: on a hub with several blinds, the
+    position field's own pre-filled value gave no hint by itself which
+    blind it belonged to - only the step's top-level description said so,
+    and that line is easy to have already scrolled past. A new
+    data_description under the "position" field repeats that same
+    {selected_blind} name right next to the field itself, in every
+    language - reusing the placeholder async_step_set_position_manual()
+    already fills via its existing description_placeholders, so no
+    config_flow.py change was needed for this to update per blind at
+    render time.
+
+    The German description text separately dropped its leading article on
+    the second sentence ("Aktuell erfasste Position" instead of "Die
+    aktuell erfasste Position") - also from that screenshot, and also
+    fixed here; "en"/"es"/"fr" already read naturally without one.
+    """
+    for language in ("strings", "en", "de", "es", "fr"):
+        step = _load_step(language, "set_position_manual")
+        assert "{selected_blind}" in step["data_description"]["position"], language
+
+    assert (
+        "Die aktuell erfasste Position"
+        in _load_step("de", "set_position_manual")["description"]
+    )
