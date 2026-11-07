@@ -141,31 +141,44 @@ TEST_COMMAND_DELAY = 0.75
 # Measured on real hardware (t1-to-t0 across the stick's own transmit cycle -
 # see the pairing-test fix's own comments in config_flow.py for the same
 # figure): one open/close/stop frame consistently takes roughly 1.1-1.2s to
-# transmit end to end. Used on two, symmetric sides of the same elapsed-time
-# position estimate in cover.py:
+# transmit end to end.
 #
-# - The stop side: set_cover_position's tracking loop fires its follow-up
-#   stop in software once the elapsed-time estimate reaches the target, but
-#   the blind keeps moving under the already-issued open/close command for
-#   about this long before that stop is actually transmitted and acted on -
-#   uncompensated, that made any target within roughly this fraction of a
-#   blind's own travel time of either end stop unreachable: the earliest a
-#   stop could physically land was already past it.
-# - The start side: async_open_cover()/async_close_cover() push their own
-#   optimistic _move_start_time this far into the future rather than
-#   leaving it at plain time.monotonic(), for the mirror-image reason - the
-#   stick accepting an open/close write is not the same instant the motor
-#   physically starts moving, and that gap used to run the position
-#   estimate ahead of the real motor for the rest of the move, invisible
-#   for a plain 0/100 open/close (the real end-stop echo corrects
-#   everything regardless) but making an intermediate target's auto-stop
-#   fire measurably early. See both call sites' own comments.
+# Used doubled, as 2x this figure, for stop_lead_percent's own base
+# compensation in _async_position_update_loop() (Issue #78, 2026-11-01
+# originally, revised 2026-11-07 - see that call site's own comment for
+# the full history). That one multiplier now covers two distinct gaps
+# that used to each get their own, separately-applied copy of this same
+# constant, in two different places:
 #
-# Both compensations are deliberately the same figure, not two separately-
+# - This blind's own stop command, fired once the elapsed-time estimate
+#   reaches an intermediate target, still has to actually transmit and be
+#   acted on after that - uncompensated, that made any target within
+#   roughly this fraction of a blind's own travel time of either end stop
+#   unreachable: the earliest a stop could physically land was already
+#   past it.
+# - async_open_cover()/async_close_cover() used to separately push their
+#   own optimistic _move_start_time this far into the future rather than
+#   leaving it at plain time.monotonic(), for the mirror-image reason -
+#   the stick accepting an open/close write is not the same instant the
+#   motor physically starts moving, and leaving that gap uncompensated
+#   there let the position estimate run ahead of the real motor for the
+#   rest of the move, making an intermediate target's auto-stop fire
+#   measurably early. That push fixed the overshoot, but froze the
+#   reported position for just over a second at the start of every single
+#   move - intermediate target or not - which is itself a real,
+#   user-visible "sluggish position tracking" regression (Issue #78).
+#   Reverted back to plain time.monotonic(); see both call sites' own
+#   comments.
+#
+# Deliberately still the one figure, doubled, rather than two separately-
 # tuned constants, because the underlying hardware latency measured above
 # is already described as applying to "one open/close/stop frame"
-# generically - a real difference between the two sides has never been
-# measured, so splitting them would just be two names for one number.
+# generically - a real difference between what used to be two call sites
+# has never been measured, so splitting them would just be two names for
+# one number. Used undoubled everywhere else this constant appears -
+# resend delays, the stick-ack baseline itself - this doubling is local
+# to stop_lead_percent's own calculation, not a change to what the
+# constant itself models.
 # _async_position_update_loop() widens the stop-side use further still,
 # only when api.py's move_lock_busy reports contention, for the time this
 # blind's own stop can additionally spend queued behind another blind's
@@ -180,16 +193,24 @@ STOP_COMMAND_LATENCY_SECONDS = 1.2
 # LATENCY_SECONDS above feeds into (stop_lead_percent, in
 # _async_position_update_loop() in cover.py), expressed in the same
 # percentage points as that lead. Not a tuned value, like the travel-time
-# floor (0.1s) that same calculation's divisor already has - for any real
-# shutter, whose travel time is measured in seconds to tens of seconds,
-# the lead this produces is a small single-digit percentage, nowhere near
-# this cap. It only ever binds for a travel time so short or corrupted
-# that the uncapped lead would run into the hundreds of percent, pushing
-# the comparison it feeds so far past the valid 0-100 range that any
-# position at all would satisfy "already there" the instant a move
-# starts, regardless of how far from the real target it actually was
-# (audit finding 18 - unlike that divisor floor, this had no matching
-# ceiling at all before).
+# floor (0.1s) that same calculation's divisor already has. Genuinely
+# reachable by a real, uncorrupted travel time now that the base
+# compensation is doubled (Issue #78, 2026-11-07) - not just a guard
+# against corrupt/legacy config data any more: real calibrated travel
+# times on the project owner's own six blinds range 8.45-23.27s
+# (2026-11-07), and the shortest of those already produces a contended
+# lead (3x this constant / 8.45s) of ~43 points, comfortably under this
+# 50-point cap but no longer "nowhere near" it either - any blind whose
+# shorter of open/close travel time drops under roughly 7.2s would hit
+# this cap on a contended stop even with an entirely genuine calibration.
+# Still binds hardest for a travel time so short or corrupted that the
+# uncapped lead would run into the hundreds of percent, pushing the
+# comparison it feeds so far past the valid 0-100 range that any position
+# at all would satisfy "already there" the instant a move starts,
+# regardless of how far from the real target it actually was (audit
+# finding 18 - unlike that divisor floor, this had no matching ceiling at
+# all before) - that extreme case is unaffected by this doubling, since
+# it was already far past this cap either way.
 MAX_STOP_LEAD_PERCENT = 50.0
 
 # How many *additional* stop frames control_blind_stop() fires, as plain,
@@ -312,6 +333,41 @@ MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS = 2.0
 # in favour of keeping the full margin above - noted here so this isn't
 # mistaken for an overlooked follow-up later.
 AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS = 30.0
+
+# Hard ceiling on how long _async_position_update_loop() itself may run for
+# one continuous tracking episode (captured once, when the loop's own task
+# starts, and checked every ~0.2s tick) before it gives up entirely and
+# reports the position as unknown - added as part of the Issue #78 fix
+# (2026-11-07, confirmed directly with the project owner), which is what
+# first made this loop's own worst-case running time worth bounding
+# explicitly rather than trusting it to always self-terminate.
+#
+# This is deliberately a different, *outer* bound from
+# AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS above: that one only times the
+# auto-stop-at-target branch's own retry-control_blind_stop() sub-loop,
+# which is just one of several ways this same task can end a tracking
+# episode (the others being a plain open/close reaching 0/100 with its
+# full-travel resync cleared, or - before now - never, if neither of those
+# conditions was ever satisfied). This constant instead bounds the whole
+# task, across every branch and however many times self._target_position is
+# changed underneath it (a same-direction retarget keeps the same task
+# running rather than starting a fresh one - see its own "continue" comment
+# above), so a bug or a misconfigured travel time in any one branch cannot
+# leave this task polling every 0.2s forever with the entity stuck
+# reporting "opening"/"closing" and a position estimate nobody can still
+# vouch for.
+#
+# Set well above anything this loop is expected to ever actually take: the
+# longest real travel time measured against the project owner's own six
+# blinds is 23.27s (see MAX_STOP_LEAD_PERCENT's own comment below), and even
+# DEFAULT_TRAVEL_TIME_SECONDS (60.0, a deliberately generous fallback for an
+# un-calibrated blind) plus a full AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS
+# retry budget on top only reaches 90s - a third below this. Ordinary
+# operation should never come close to tripping this; it exists purely as
+# the backstop of last resort for whatever this fix's own doubled stop_lead_
+# percent compensation, or some other interaction entirely, fails to
+# anticipate.
+POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 
 # Mirrors STOP_COMMAND_EXTRA_RESENDS, for the same reason, for a move
 # (open/close) command instead of a stop: control_blind_with_retry() only

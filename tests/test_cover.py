@@ -54,6 +54,7 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+    POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
     SIGNAL_DEVICE_EVENT,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
     STOP_COMMAND_LATENCY_SECONDS,
@@ -409,17 +410,22 @@ async def test_async_close_cover_does_not_start_tracking_before_retry_succeeds(
     mock_start_tracking.assert_called_once_with()
 
 
-async def test_async_open_cover_pushes_move_start_time_past_the_dead_time(
+async def test_async_open_cover_sets_move_start_time_to_plain_monotonic(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The real _move_start_time must land STOP_COMMAND_LATENCY_SECONDS ahead.
+    """The real _move_start_time must land at plain time.monotonic(), not
+    pushed into the future.
 
     Companion to test_async_open_cover_does_not_start_tracking_before_
     retry_succeeds above, which only proves _move_start_time is set at
     all (not None) once control_blind_with_retry() succeeds. This proves
-    *where* it is set to - time.monotonic() plus STOP_COMMAND_LATENCY_
-    SECONDS, not plain time.monotonic() - see that assignment's own
-    comment in _async_open_cover_body() for why.
+    *where* it is set to. Used to be pushed STOP_COMMAND_LATENCY_SECONDS
+    ahead instead; reverted (Issue #78, 2026-11-07) because that push
+    froze the reported position for just over a second at the start of
+    every move - see this assignment's own comment in
+    _async_open_cover_body() for the full reasoning, and
+    stop_lead_percent's own comment in _async_position_update_loop() for
+    where that compensation lives now instead.
     """
     clock = _FakeClock(2_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
@@ -430,13 +436,13 @@ async def test_async_open_cover_pushes_move_start_time_past_the_dead_time(
 
     await cover.async_open_cover()
 
-    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
+    assert cover._move_start_time == 2_000.0
 
 
-async def test_async_close_cover_pushes_move_start_time_past_the_dead_time(
+async def test_async_close_cover_sets_move_start_time_to_plain_monotonic(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mirrors test_async_open_cover_pushes_move_start_time_past_the_dead_time."""
+    """Mirrors test_async_open_cover_sets_move_start_time_to_plain_monotonic."""
     clock = _FakeClock(2_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
     api = MagicMock()
@@ -446,7 +452,7 @@ async def test_async_close_cover_pushes_move_start_time_past_the_dead_time(
 
     await cover.async_close_cover()
 
-    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
+    assert cover._move_start_time == 2_000.0
 
 
 async def test_async_close_cover_skips_reset_for_redundant_resend(
@@ -1467,6 +1473,83 @@ async def test_position_loop_backstop_resets_after_a_retarget_mid_unconfirmed_re
     )
 
 
+async def test_position_loop_times_out_after_the_outer_budget_is_exhausted(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole loop, not just the auto-stop retry sub-step, is bounded.
+
+    Issue #78's own outer safety net (2026-11-07, confirmed directly with
+    the project owner): POSITION_UPDATE_LOOP_TIMEOUT_SECONDS bounds
+    _async_position_update_loop()'s own total running time, regardless of
+    which branch it is stuck in - unlike AUTO_STOP_CONFIRMATION_BACKSTOP_
+    SECONDS above, which only times the auto-stop-at-target retry sub-loop
+    and never engages for a plain open()/close() at all (target_position
+    is None there). Exercised here via exactly that plain-close scenario,
+    with its own position estimate pinned well short of the 0% end stop no
+    matter how much simulated time passes, so neither the ordinary
+    "reached fully closed" branch nor the auto-stop backstop can be what
+    ends this loop - only this outer timeout can.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    caplog.set_level(logging.ERROR, logger="custom_components.schellenberg_usb.cover")
+    call_count = 0
+
+    def _pinned_position_update() -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Still well inside the budget - proves this isn't simply a
+            # one-tick give-up disguised as a timeout.
+            clock.advance(1.0)
+        else:
+            clock.advance(POSITION_UPDATE_LOOP_TIMEOUT_SECONDS)
+        # Pinned short of the end stop no matter how much simulated time
+        # passes - the real _update_position() is a monotonic, clamped
+        # function of elapsed time and would otherwise eventually reach 0
+        # on its own, which would let the ordinary end-stop branch end
+        # this loop first and defeat the point of this test.
+        cover._attr_current_cover_position = 50
+
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(cover, "_update_position", _pinned_position_update)
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = None
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+    # Set to prove this outer timeout's own cleanup clears it too - unlike
+    # the narrower auto-stop backstop above, this can fire mid-full-travel-
+    # resync as well as mid-auto-stop, so it has to clean up after either.
+    cover._full_travel_resync_direction = "closing"
+
+    await cover._async_position_update_loop()
+
+    assert call_count == 2
+    # Same "stop trusting a stale estimate" outcome as the auto-stop
+    # backstop above, reached via a completely different, outer path.
+    assert cover._attr_current_cover_position is None
+    assert cover._attr_is_closed is None
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
+    assert cover._move_start_position is None
+    assert cover._target_position is None
+    assert cover._pending_auto_stop_since is None
+    assert cover._pending_auto_stop_target is None
+    assert cover._full_travel_resync_direction is None
+    assert cover._position_source_kind == "unconfirmed - position update loop timed out"
+    assert any("still running after" in record.message for record in caplog.records)
+
+
 async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1556,11 +1639,12 @@ async def test_position_loop_stops_early_to_compensate_stop_latency(
 
     Companion to test_position_loop_stops_at_a_partial_target above: that
     test's default 60s travel time makes the latency-compensation lead
-    (STOP_COMMAND_LATENCY_SECONDS / travel_time * 100, roughly 2 points)
-    too small to tell apart from the uncompensated boundary by itself. Here
-    a short, 6s close travel time makes the lead a much larger ~20 points,
-    so a position estimate that has only reached 25% (still well short of
-    the literal 20% target) is enough to trigger the stop - proving the
+    (2x STOP_COMMAND_LATENCY_SECONDS / travel_time * 100, roughly 4
+    points since the Issue #78 doubling, 2026-11-07) too small to tell
+    apart from the uncompensated boundary by itself. Here a short, 6s
+    close travel time makes the lead a much larger ~40 points, so a
+    position estimate that has only reached 25% (still well short of the
+    literal 20% target) is enough to trigger the stop - proving the
     comparison is actually against `target + lead`, not `target`.
     """
 
@@ -1623,9 +1707,15 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
 ) -> None:
     """The early trigger must not fire any earlier than the compensated lead.
 
-    Mirrors the test above with the same 6s travel time (~20-point lead),
-    but the estimate (45%) is still outside target(20) + lead(~20) = ~40 -
-    so the loop must keep waiting rather than stopping prematurely.
+    12s travel time, not the 6s this test used before the Issue #78
+    doubling (2026-11-07): 6s would now produce a ~40-point lead, pushing
+    the threshold (target 20 + lead) past this fixture's own 50%
+    starting position before the move has even begun - physically
+    impossible for a blind that is actually closing. 12s keeps the same
+    familiar ~20-point lead this test always exercised, just from a
+    doubled multiplier over a doubled travel time. The estimate (45%) is
+    still outside target(20) + lead(~20) = ~40 - so the loop must keep
+    waiting rather than stopping prematurely.
     """
 
     sleep_calls = 0
@@ -1653,7 +1743,7 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 12.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
@@ -1677,20 +1767,21 @@ async def test_position_loop_widens_the_stop_lead_when_the_move_lock_is_busy(
     """Contention for the shared transmit lock must widen the lead further.
 
     Exact same fixture as test_position_loop_does_not_stop_before_the_
-    compensated_lead above - 6s close travel, estimate stuck at 45%,
+    compensated_lead above - 12s close travel, estimate stuck at 45%,
     target 20 - which that test used to prove the plain, uncontended lead
     (~20 points, threshold ~40) does *not* yet cover 45%. The only
-    difference here is api.move_lock_busy=True: the lead doubles to ~40
-    points (threshold target(20) + 40 = 60), which 45 *does* satisfy -
-    proving the loop actually reads move_lock_busy and widens the lead
-    for it, rather than ignoring it or always capping at
+    difference here is api.move_lock_busy=True: the lead widens further,
+    from 2x to 3x STOP_COMMAND_LATENCY_SECONDS (Issue #78, 2026-11-07),
+    to ~30 points (threshold target(20) + 30 = 50), which 45 *does*
+    satisfy - proving the loop actually reads move_lock_busy and widens
+    the lead for it, rather than ignoring it or always capping at
     MAX_STOP_LEAD_PERCENT regardless. Real-log motivation: see
     move_lock_busy's own comment in api.py.
     """
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.move_lock_busy = True
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 12.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
@@ -1722,9 +1813,10 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
     [0, 100], stop_lead_percent itself used to carry no matching ceiling.
     A 1s close time - clearly outside anything a real shutter reports, but
     exactly the kind of corrupt/legacy config value that floor exists for
-    - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100) = 120
-    points: more than the entire 0-100 range. Uncapped, target(30) + 120 =
-    150 is satisfied by any position at all, so the loop used to fire its
+    - makes the raw lead (2x STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100,
+    doubled since the Issue #78 change, 2026-11-07) = 240
+    points: more than the entire 0-100 range. Uncapped, target(30) + 240 =
+    270 is satisfied by any position at all, so the loop used to fire its
     stop the instant it was entered, however far from 30 the blind actually
     was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane 80:
     a position of 85 - the blind has barely started closing from 100 -
@@ -1947,20 +2039,27 @@ async def test_update_position_estimates_closing_progress_from_elapsed_time(
 async def test_update_position_holds_at_start_during_the_transmit_dead_time(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Position must not move before the modeled start-side latency elapses.
+    """A _move_start_time pushed into the future must not run the position
+    estimate backwards past the start position.
 
-    async_open_cover()/async_close_cover() push _move_start_time this far
-    into the future rather than leaving it at plain time.monotonic() (see
-    their own comments) - modeling the real ~1.1-1.2s it takes the stick
-    to accept a write before the motor actually starts turning, the same
-    figure STOP_COMMAND_LATENCY_SECONDS already measures for the opposite,
-    stop-side case. Exercises _update_position()'s own max(0.0, ...)
-    clamp directly: while time.monotonic() has not yet reached that
-    pushed-forward point, elapsed_time would otherwise go negative and
-    run total_position_change backwards past _move_start_position - the
-    clamp holds the estimate exactly at the start position instead, and
-    the position resumes its ordinary ramp, from that same start
-    position, once real time catches up to it.
+    async_open_cover()/async_close_cover() used to push _move_start_time
+    this far into the future themselves, modeling the real ~1.1-1.2s it
+    takes the stick to accept a write before the motor actually starts
+    turning - reverted (Issue #78, 2026-11-07; see both call sites' own
+    comments) because it froze the reported position for just over a
+    second at the start of every single move, a real, user-visible
+    regression of its own. Neither call site constructs this scenario any
+    more, but _update_position()'s own max(0.0, ...) clamp - the actual
+    thing under test here - is left in place as a defensive guard rather
+    than removed along with the one caller that used to exercise it, so
+    this test now builds the scenario directly rather than through
+    async_open_cover()/async_close_cover(): while time.monotonic() has
+    not yet reached a (here, manually set) pushed-forward _move_start_
+    time, elapsed_time would otherwise go negative and run total_
+    position_change backwards past _move_start_position - the clamp
+    holds the estimate exactly at the start position instead, and the
+    position resumes its ordinary ramp, from that same start position,
+    once real time catches up to it.
     """
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)

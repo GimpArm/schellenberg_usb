@@ -52,6 +52,7 @@ from .const import (
     MAX_STOP_LEAD_PERCENT,
     NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+    POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_MANUAL_POSITION_SYNC,
@@ -1526,12 +1527,65 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
     async def _async_position_update_loop(self) -> None:
         """Poll and estimate position every 0.2s while the cover is moving."""
         position_task = asyncio.current_task()
+        # Captured once, here, rather than re-based on any later retarget -
+        # see POSITION_UPDATE_LOOP_TIMEOUT_SECONDS's own comment in const.py
+        # for why this loop's own total running time, across however many
+        # targets it ends up tracking in a row (a same-direction retarget
+        # keeps this same task running - see its own "continue" below),
+        # is what gets bounded, rather than the time since whichever target
+        # happens to be current right now.
+        loop_start_time = time.monotonic()
         try:
             ha_update_counter = 0
             while True:
                 await asyncio.sleep(0.2)
 
                 self._update_position()
+
+                if (
+                    time.monotonic() - loop_start_time
+                    >= POSITION_UPDATE_LOOP_TIMEOUT_SECONDS
+                ):
+                    # Outer safety net - see POSITION_UPDATE_LOOP_TIMEOUT_
+                    # SECONDS's own comment in const.py. Everything below
+                    # mirrors the AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS-
+                    # exhausted cleanup further down (same "stop trusting a
+                    # stale estimate, report unknown instead" outcome), plus
+                    # clearing self._full_travel_resync_direction too, since
+                    # unlike that narrower branch this one can fire from any
+                    # state this loop was in, including a plain open/close
+                    # still waiting on its own full-travel resync.
+                    _LOGGER.error(
+                        "Device %s: position tracking still running after "
+                        "%.0fs with no target ever reached - reporting "
+                        "position as unknown rather than keep polling "
+                        "indefinitely",
+                        self._device_name,
+                        POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
+                    )
+                    previous_position = self._attr_current_cover_position
+                    self._attr_current_cover_position = None
+                    self._attr_is_closed = None
+                    self._attr_is_opening = False
+                    self._attr_is_closing = False
+                    self._move_start_time = None
+                    self._move_start_position = None
+                    self._target_position = None
+                    self._pending_auto_stop_since = None
+                    self._pending_auto_stop_target = None
+                    self._full_travel_resync_direction = None
+                    self._position_source_kind = (
+                        "unconfirmed - position update loop timed out"
+                    )
+                    self._record_position_update(
+                        source=self._position_update_source,
+                        direction="stop",
+                        previous_position=previous_position,
+                        new_position=None,
+                        status="unconfirmed - position update loop timed out",
+                    )
+                    self.async_write_ha_state()
+                    return
 
                 ha_update_counter += 1
 
@@ -1562,26 +1616,59 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             else self._travel_time_close,
                             0.1,
                         )
-                        # STOP_COMMAND_LATENCY_SECONDS alone assumes this
-                        # blind's own stop reaches the wire after one
-                        # ordinary, uncontended transmit cycle. When the
-                        # shared lock is held by some *other* blind's own
-                        # move or stop right now, this blind's own stop -
-                        # though served ahead of anyone merely *waiting*
-                        # for the lock (see move_lock_busy's own comment
-                        # in api.py) - still has to wait out whatever that
-                        # other cycle has left, which can itself take up
-                        # to about one more full cycle. Real log evidence
-                        # (2026-10-31): an uncontended stop reached the
-                        # wire in 0.39s; a contended one, queued behind
-                        # another blind's own stop, took 1.37s - almost
-                        # exactly one extra STOP_COMMAND_LATENCY_SECONDS -
-                        # and that second blind overshot its target by
-                        # close to the matching percentage. Checked fresh
-                        # on every tick, so this only widens the lead for
-                        # ticks where contention is actually observed,
-                        # not unconditionally for every stop.
-                        stop_latency_seconds = STOP_COMMAND_LATENCY_SECONDS
+                        # Base compensation doubled to 2x STOP_COMMAND_
+                        # LATENCY_SECONDS (Issue #78, 2026-11-07): this
+                        # used to be the one place the transmit-to-action
+                        # dead time this blind's own stop command spends
+                        # in flight was compensated for - async_open_
+                        # cover()/async_close_cover() used to push their
+                        # own _move_start_time forward by one more such
+                        # interval, to cover that same dead time at the
+                        # *start* of the move instead. That start-side
+                        # push froze the reported position for just over a
+                        # second at the start of every single move,
+                        # intermediate target or not - a real, user-
+                        # visible "sluggish position tracking" regression
+                        # of its own. Reverted there (see both call sites'
+                        # own comments) and folded into this side's
+                        # already-existing compensation instead: doubling
+                        # it here covers both this stop's own one-hop
+                        # transmit latency (what the single, un-doubled
+                        # figure always meant) and the same start-side
+                        # dead time the push used to subtract separately -
+                        # the two are the same hardware-measured figure
+                        # either way (see STOP_COMMAND_LATENCY_SECONDS's
+                        # own comment in const.py), so adding them here
+                        # costs nothing in precision versus doing it in
+                        # two places, only in how early this fires - a
+                        # cost intermediate-target stops already pay by
+                        # design, not every move the way the reverted
+                        # push did.
+                        #
+                        # STOP_COMMAND_LATENCY_SECONDS alone (before this
+                        # doubling) assumes this blind's own stop reaches
+                        # the wire after one ordinary, uncontended transmit
+                        # cycle. When the shared lock is held by some
+                        # *other* blind's own move or stop right now, this
+                        # blind's own stop - though served ahead of anyone
+                        # merely *waiting* for the lock (see move_lock_
+                        # busy's own comment in api.py) - still has to wait
+                        # out whatever that other cycle has left, which can
+                        # itself take up to about one more full cycle. Real
+                        # log evidence (2026-10-31): an uncontended stop
+                        # reached the wire in 0.39s; a contended one,
+                        # queued behind another blind's own stop, took
+                        # 1.37s - almost exactly one extra STOP_COMMAND_
+                        # LATENCY_SECONDS - and that second blind overshot
+                        # its target by close to the matching percentage.
+                        # Checked fresh on every tick, so this only widens
+                        # the lead further for ticks where contention is
+                        # actually observed, not unconditionally for every
+                        # stop - stacked on top of the doubled base above,
+                        # not replacing it.
+                        stop_latency_seconds = (
+                            STOP_COMMAND_LATENCY_SECONDS + STOP_COMMAND_LATENCY_SECONDS
+                        )
                         if self._api.move_lock_busy:
                             stop_latency_seconds += STOP_COMMAND_LATENCY_SECONDS
                         # travel_time_for_lead's own floor just above only
@@ -2118,35 +2205,37 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_opening = True
             self._attr_is_closing = False
             self._move_start_position = self._attr_current_cover_position
-            # Pushed STOP_COMMAND_LATENCY_SECONDS into the future, not set
-            # to plain time.monotonic(): the stick accepting this write is
-            # not the same instant the motor physically starts moving -
-            # the same ~1.1-1.2s transmit-to-action latency STOP_COMMAND_
-            # LATENCY_SECONDS already measures applies here too, per its
-            # own comment in const.py ("one open/close/stop frame", not
-            # just a stop frame). Previously uncompensated on this side
-            # only: _update_position()'s elapsed-time estimate ran ahead
-            # of the real motor for this whole gap, for the rest of the
-            # move - invisible for a plain 0/100 open/close (the real end-
-            # stop echo corrects everything regardless), but it made the
-            # auto-stop-at-target branch below fire measurably early for
-            # an intermediate target. Real log evidence (2026-10-31): two
-            # blinds targeting an intermediate position stopped at ~82%
-            # after only ~2.2-2.6s, consistent with this gap (measured via
-            # each blind's own STARTED_MOVING echo arriving ~1.66s after
-            # this same write) never being subtracted anywhere. The
-            # STARTED_MOVING branch in _handle_event() deliberately still
-            # sets this to plain time.monotonic() when a real echo
-            # confirms the move - that instant genuinely has zero dead
-            # time left (the motor is confirmed moving right then), and
-            # re-basing from the current, already-correctly-estimated
-            # position there is a no-op for this linear model, not a
-            # second deduction - so only this optimistic, not-yet-
-            # confirmed assignment needs the push. _update_position()'s
-            # own clamp (max(0.0, ...)) is what turns this future
-            # timestamp into an actual hold-at-start-position delay
-            # instead of a backwards jump.
-            self._move_start_time = time.monotonic() + STOP_COMMAND_LATENCY_SECONDS
+            # Plain time.monotonic(), not pushed into the future - see
+            # stop_lead_percent's own comment in _async_position_update_
+            # loop() below for where that compensation lives instead now
+            # and why (Issue #78, 2026-11-07). This WAS pushed
+            # STOP_COMMAND_LATENCY_SECONDS ahead for a while (see git
+            # history on this line for that version's own reasoning, still
+            # correct as far as it went): the stick accepting this write is
+            # not the same instant the motor physically starts moving, and
+            # leaving that gap uncompensated made the auto-stop-at-target
+            # branch below fire measurably early for an intermediate
+            # target (real log evidence, 2026-10-31: two blinds targeting
+            # an intermediate position stopped at ~82% after only
+            # ~2.2-2.6s). That push fixed the overshoot but introduced a
+            # new, user-visible problem of its own (Issue #78): for up to
+            # STOP_COMMAND_LATENCY_SECONDS after every single open/close
+            # command, _update_position()'s clamp (max(0.0, ...)) holds the
+            # reported position frozen at the start position even though
+            # the motor may already be genuinely moving - every move
+            # appearing to "hang" for just over a second before the
+            # dashboard shows any progress at all. Reverting this side and
+            # doubling the stop-side compensation instead moves the same
+            # fix to the one place it only costs accuracy on an
+            # intermediate stop's own exact trigger instant - already
+            # compensated for on purpose - rather than costing
+            # responsiveness on every single move, intermediate target or
+            # not. The STARTED_MOVING branch in _handle_event() still
+            # (re)sets this to plain time.monotonic() of its own accord
+            # when a real echo confirms the move, same as always - that
+            # was already a no-op against this plain assignment even
+            # before, so nothing changes there.
+            self._move_start_time = time.monotonic()
             self._start_position_tracking()
         self.async_write_ha_state()
 
@@ -2294,9 +2383,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_is_opening = False
             self._attr_is_closing = True
             self._move_start_position = self._attr_current_cover_position
-            # Pushed into the future, not plain time.monotonic() - see
-            # async_open_cover()'s own mirror of this exact point for why.
-            self._move_start_time = time.monotonic() + STOP_COMMAND_LATENCY_SECONDS
+            # Plain time.monotonic() - see async_open_cover()'s own mirror
+            # of this exact point for why (Issue #78, 2026-11-07).
+            self._move_start_time = time.monotonic()
             self._start_position_tracking()
         self.async_write_ha_state()
 
