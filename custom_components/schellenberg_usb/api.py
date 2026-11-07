@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, cast
 
 import serialx
@@ -80,7 +81,7 @@ MOVE_ACK_TIMEOUT = 1.0
 # hold the hub-wide lock open-endedly and block every other blind's own
 # open/close behind it - a new coupling between blinds that control_blind()
 # alone never had, since each of its writes was always instant and
-# independent. 15s comfortably covers several full retry cycles even at
+# independent. 30s comfortably covers several full retry cycles even at
 # TRANSMIT_IDLE_TIMEOUT's and MOVE_ACK_TIMEOUT's own worst case (busy
 # replies in normal operation arrive within tens of milliseconds, per real
 # logs - see MOVE_ACK_TIMEOUT's own comment - so this is not a budget meant
@@ -89,8 +90,10 @@ MOVE_ACK_TIMEOUT = 1.0
 # callers, from any other control_blind_with_retry() failure: it latches
 # _busy_latched, same as send_command()'s own exhausted-retry path, so the
 # existing "busy_latched" block reason explains it in the UI without a new
-# translation string.
-MOVE_RETRY_OVERALL_TIMEOUT = 15.0
+# translation string. Raised from 15s to 30s (2026-11-07, project owner's
+# own direction) for more headroom under this installation's real, heavier
+# multi-blind contention than the original figure assumed.
+MOVE_RETRY_OVERALL_TIMEOUT = 30.0
 
 # Total time control_blind_stop() spends, combined, waiting for the
 # transmitter to go idle, acquiring _move_lock (with priority - see
@@ -297,6 +300,51 @@ def _normalize_protocol_enum(value: object) -> str:
     ):
         return normalized.zfill(2)
     return text
+
+
+class StopOutcome(Enum):
+    """What control_blind_stop() actually knows once it returns.
+
+    A plain bool used to flatten two very different outcomes into the
+    same truthy value: the stick explicitly accepting the stop write
+    ("t1"), and the STOP_RETRY_BUDGET-exhausted fallback - one last,
+    completely unlocked, unretried control_blind() write, fired with
+    no idea whether the stick (let alone the motor) ever saw it. Both
+    returned True, and both callers (async_stop_cover() and the
+    auto-stop-at-target branch in _async_position_update_loop) then
+    treated "True" as "this blind has now stopped, safe to freeze/
+    clear tracking" - which is correct for the first case and simply
+    wrong for the second: a real 6-blind Alexa "25%" command (2026-
+    11-01) produced exactly this fallback for the living-room blind,
+    which then kept physically closing, uncontrolled, for several
+    more seconds while the entity's reported position stayed frozen
+    at the stale 68% _update_position() had last computed before
+    tracking was torn down - the blind actually ended up fully
+    closed, nothing in Home Assistant ever showed that.
+
+    - CONFIRMED: the stick accepted the write ("t1"). As always, this
+      still says nothing about whether the motor itself caught it
+      (see STOP_COMMAND_EXTRA_RESENDS's own comment in const.py) -
+      only that the one hop this integration can ever observe
+      succeeded. Safe to treat as done the way the old True did.
+    - UNCONFIRMED: STOP_RETRY_BUDGET ran out and the fallback plain
+      write fired, but nothing confirms the stick (or the motor) ever
+      received it. Callers must not finalize position tracking on
+      this - either keep retrying (the auto-stop-at-target branch,
+      which already has a safe "not yet done, retry next tick" path
+      for FAILED and now reuses it here) or, where retrying is not
+      appropriate (a manual stop should stay responsive, not hang),
+      mark the resulting position as unconfirmed rather than display
+      it with the same confidence as a CONFIRMED stop.
+    - FAILED: not even the fallback write reached the wire (e.g. the
+      serial port itself is down). Exactly the old False - nothing
+      about this blind's tracking state has changed, there is
+      nothing to tear down or restore.
+    """
+
+    CONFIRMED = "confirmed"
+    UNCONFIRMED = "unconfirmed"
+    FAILED = "failed"
 
 
 class SchellenbergUsbApi:
@@ -2140,8 +2188,13 @@ class SchellenbergUsbApi:
         *,
         device_id: str | None = None,
         source: str = "cover",
-    ) -> bool:
+    ) -> StopOutcome:
         """Stop a blind, served ahead of any blind's own pending move.
+
+        Returns a StopOutcome rather than a bare bool - see that class's
+        own docstring for why CONFIRMED and UNCONFIRMED must never be
+        collapsed into a single truthy result, the real bug this type
+        exists to make structurally impossible to reintroduce.
 
         async_stop_cover() used to call control_blind() directly for this -
         one immediate, unlocked write, same as open/close used to be before
@@ -2224,7 +2277,7 @@ class SchellenbergUsbApi:
                 )
                 if not sent:
                     self._move_awaiting_ack = False
-                    return False
+                    return StopOutcome.FAILED
                 # Snapshotted here, logged only below once this same write
                 # is confirmed accepted - not every attempt that merely
                 # transmitted and then got bounced "tE" (busy). A
@@ -2297,7 +2350,7 @@ class SchellenbergUsbApi:
                     await self.control_blind(
                         device_enum, CMD_STOP, device_id=device_id, source=source
                     )
-                return True
+                return StopOutcome.CONFIRMED
             await asyncio.sleep(0.1)
         _LOGGER.warning(
             "Giving up on stop after %.1fs with no accept, falling back to "
@@ -2306,9 +2359,15 @@ class SchellenbergUsbApi:
             source,
             device_id or "unknown",
         )
-        return await self.control_blind(
+        # This write is exactly as uncertain as the one STOP_RETRY_BUDGET
+        # just gave up waiting on - unlocked, unretried, no ack awaited -
+        # so even a truthy "bytes went on the wire" result here can only
+        # ever mean UNCONFIRMED, never CONFIRMED. See StopOutcome's own
+        # docstring for why collapsing this into a plain bool was the bug.
+        fallback_sent = await self.control_blind(
             device_enum, CMD_STOP, device_id=device_id, source=source
         )
+        return StopOutcome.UNCONFIRMED if fallback_sent else StopOutcome.FAILED
 
     async def control_blind_exclusive(
         self,

@@ -237,6 +237,35 @@ STOP_COMMAND_EXTRA_RESENDS = 1
 # goes out.
 STOP_COMMAND_RESEND_DELAY_SECONDS = 0.3
 
+# Total time _async_position_update_loop()'s auto-stop-at-target branch
+# keeps retrying control_blind_stop() for one target-reached episode
+# before giving up and reporting the position as unknown instead of a
+# stale number (see StopOutcome in api.py). This is deliberately much
+# longer than api.py's own STOP_RETRY_BUDGET (2.0s), which only bounds
+# one single call to control_blind_stop() - this constant bounds this
+# loop calling it again, and again, once per ~0.2s tick, across however
+# many of those single calls it takes. The two have different jobs:
+# STOP_RETRY_BUDGET exists so a *manual* stop (async_stop_cover()) stays
+# responsive for whoever just pressed it; this loop has no one waiting
+# on it synchronously, so it can afford to keep trying for much longer
+# before concluding the blind's own fate is genuinely unknown - a real
+# six-blind Alexa "25%" command (2026-11-01) produced exactly one
+# STOP_RETRY_BUDGET-exhausted UNCONFIRMED outcome, after which the
+# fallback write still very plausibly reached the stick (most of what
+# exhausts STOP_RETRY_BUDGET is lock/transmitter contention, not an
+# actually-unreachable stick), so declaring the position unknown after
+# only one more 2.0s attempt, the way the old code effectively did by
+# mistake, would throw away a real answer a few seconds later would
+# have given it. Not unbounded either: nothing here can distinguish
+# "still just contended" from "this blind stopped answering entirely",
+# and an entity whose auto-stop never gives up looks, from the dashboard,
+# exactly like one that is still confidently tracking a position it can
+# no longer vouch for. A drop to 15.0 was considered (2026-11-01) and
+# explicitly decided against (2026-11-07, project owner's own direction)
+# in favour of keeping the full margin above - noted here so this isn't
+# mistaken for an overlooked follow-up later.
+AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS = 30.0
+
 # Mirrors STOP_COMMAND_EXTRA_RESENDS, for the same reason, for a move
 # (open/close) command instead of a stop: control_blind_with_retry() only
 # ever retries while the *stick* reports busy/no-reply, so once the stick

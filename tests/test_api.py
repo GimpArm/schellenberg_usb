@@ -26,7 +26,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 import custom_components.schellenberg_usb.api as api_module
-from custom_components.schellenberg_usb.api import SchellenbergUsbApi
+from custom_components.schellenberg_usb.api import SchellenbergUsbApi, StopOutcome
 from custom_components.schellenberg_usb.const import (
     CMD_ALLOW_PAIRING,
     CMD_DOWN,
@@ -1234,7 +1234,7 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
     assert len(written(connected_api)) == 1
 
     connected_api._handle_message("t1")  # A's stop is accepted
-    assert await asyncio.wait_for(task_a, timeout=1) is True
+    assert await asyncio.wait_for(task_a, timeout=1) is StopOutcome.CONFIRMED
 
     # Same reasoning as the move-vs-move test: B is parked waiting for the
     # transmitter to actually go idle ("t0"), not merely for A's own task
@@ -1244,7 +1244,7 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
     await _run_until(lambda: len(written(connected_api)) == 2)
 
     connected_api._handle_message("t1")  # B's stop is accepted
-    assert await asyncio.wait_for(task_b, timeout=1) is True
+    assert await asyncio.wait_for(task_b, timeout=1) is StopOutcome.CONFIRMED
 
 
 async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmission(
@@ -1276,7 +1276,7 @@ async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmissio
 
     await _run_until(lambda: len(written(connected_api)) == 1)
     connected_api._handle_message("t1")  # the stop itself is accepted
-    assert await asyncio.wait_for(task, timeout=1) is True
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
 
 
 async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
@@ -1326,7 +1326,7 @@ async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
 
     connected_api._handle_message("t1")  # the primary stop is accepted
 
-    assert await asyncio.wait_for(task, timeout=1) is True
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
     # The primary stop plus one extra, best-effort resend - both plain
     # stop writes for the same device, since control_blind() itself never
     # waits for or reacts to a reply (see its own docstring).
@@ -1374,7 +1374,7 @@ async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
     await _run_until(lambda: len(written(connected_api)) == 1)
 
     connected_api._handle_message("t1")  # the primary stop is accepted
-    assert await asyncio.wait_for(task, timeout=1) is True
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
 
     wait_records = [
         record
@@ -1417,7 +1417,7 @@ async def test_control_blind_stop_logs_exactly_once_despite_a_busy_bounce(
     await _run_until(lambda: len(written(connected_api)) == 2)  # retried
 
     connected_api._handle_message("t1")  # second attempt accepted
-    assert await asyncio.wait_for(task, timeout=1) is True
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
 
     wait_records = [
         record
@@ -1448,11 +1448,44 @@ async def test_control_blind_stop_falls_back_to_a_plain_write_when_the_lock_is_b
                 connected_api.control_blind_stop("10", device_id="ABCDEF"),
                 timeout=1,
             )
-            is True
+            is StopOutcome.UNCONFIRMED
         )
         # Exactly the old, plain, unlocked, unretried control_blind() write -
-        # never worse than before control_blind_stop() existed.
+        # never worse than before control_blind_stop() existed, just now
+        # honestly reported as UNCONFIRMED rather than indistinguishable
+        # from a genuinely stick-accepted stop.
         assert len(written(connected_api)) == 1
+    finally:
+        connected_api._move_lock.release()
+
+
+async def test_control_blind_stop_reports_failed_when_even_the_fallback_write_fails(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """StopOutcome.FAILED, not UNCONFIRMED, when the fallback write itself never lands.
+
+    Sibling to test_control_blind_stop_falls_back_to_a_plain_write_when_the_
+    lock_is_busy above: that test's fallback write still reaches the wire
+    fine (UNCONFIRMED - sent, just never provably accepted). Here the
+    connection itself is down by the time STOP_RETRY_BUDGET gives up, so
+    even that last, unlocked, unretried control_blind() write cannot reach
+    the wire at all - exactly the old bare-False case (see
+    test_control_blind_is_blocked_while_disconnected), which must stay
+    FAILED, not get folded into the same UNCONFIRMED outcome a write that
+    actually went out gets.
+    """
+    monkeypatch.setattr(api_module, "STOP_RETRY_BUDGET", 0.05)
+    await connected_api._move_lock.acquire()
+    try:
+        connected_api._is_connected = False
+        assert (
+            await asyncio.wait_for(
+                connected_api.control_blind_stop("10", device_id="ABCDEF"),
+                timeout=1,
+            )
+            is StopOutcome.FAILED
+        )
+        assert written(connected_api) == []
     finally:
         connected_api._move_lock.release()
 
@@ -1489,8 +1522,9 @@ async def test_control_blind_stop_bounds_the_ack_wait_to_the_remaining_budget(
 
     # The write itself still goes out and is never acked - same fallback
     # behavior as before this fix, see control_blind_stop()'s own
-    # docstring - so this still returns True.
-    assert result is True
+    # docstring - so this still returns UNCONFIRMED, never CONFIRMED (the
+    # fallback write landing is never proof the stick saw it).
+    assert result is StopOutcome.UNCONFIRMED
     # Before this fix: ~0.2s idle wait + an unconditional, unbounded 1.0s
     # ack wait + the loop's own 0.1s backoff sleep = ~1.3s, well past the
     # 0.3s budget. Generous margin for CI jitter, still nowhere near that.
@@ -1564,7 +1598,7 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     assert not task_b.done()
 
     connected_api._handle_message("t1")  # the stop is accepted
-    assert await asyncio.wait_for(task_stop, timeout=1) is True
+    assert await asyncio.wait_for(task_stop, timeout=1) is StopOutcome.CONFIRMED
 
     # Only now, once the stop's own transmission has also finished, does
     # B's move get its turn.
@@ -2130,7 +2164,7 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
         lambda: written(connected_api).count(_blind_payload("10", CMD_STOP)) == 1
     )
     connected_api._handle_message("t1")  # A's own stop is accepted
-    assert await asyncio.wait_for(stop_a, timeout=1) is True
+    assert await asyncio.wait_for(stop_a, timeout=1) is StopOutcome.CONFIRMED
 
     # B then reaches its own, different target and gets its own stop too -
     # unaffected by anything done for A above. The test ends only once
@@ -2144,7 +2178,7 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
         lambda: written(connected_api).count(_blind_payload("20", CMD_STOP)) == 1
     )
     connected_api._handle_message("t1")  # B's own stop is accepted
-    assert await asyncio.wait_for(stop_b, timeout=1) is True
+    assert await asyncio.wait_for(stop_b, timeout=1) is StopOutcome.CONFIRMED
 
 
 async def test_cancel_pending_move_reaches_a_still_running_call_after_a_sibling_exits(
