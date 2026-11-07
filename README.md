@@ -465,7 +465,7 @@ an update.
 > end stop) have now been removed from both scripts below too, at the
 > project owner's own request, to match their own current, real-world
 > copy of these scripts rather than this more elaborate variant. The
-> timing that remains — `start_ts` plus the `rest_dauer` correction
+> timing that remains — `start_ts` plus the `remaining_duration` correction
 > described in the first Note below the scripts — already accounts for
 > the open/close call's own actual duration, which matters more in
 > practice than the smaller, further delay a queued `stop_cover` call can
@@ -478,8 +478,23 @@ an update.
 > place, replace it with the version below, or remove the pieces
 > yourself: both variables, the `korrektur_dauer`-vs-`stop_cover` branch
 > in the final `choose:`, and `stop_latenz`'s own subtraction inside
-> `rest_dauer`. The same "harmless while both run at once" reasoning
+> `remaining_duration`. The same "harmless while both run at once" reasoning
 > above applies here too.
+>
+> Every field and variable name in both scripts is now English
+> (`ziel`→`requested_position`, `helfer`→`helper`, `auf`→`open_seconds`,
+> `ab`→`close_seconds`, and the rest inside the scripts themselves), and
+> both scripts were renamed too (`interne_rollladenlogik_fuer_home_assistant`
+> → `internal_blind_position_logic`,
+> `rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen` →
+> `alexa_blind_position_logic`). If you're updating from an older copy,
+> replace *both* halves together: the scripts (Step 2) and the `data:`
+> blocks that call them from your template cover (Step 3/4). A template
+> cover still sending the old field names to a script expecting the new
+> ones fails outright - `UndefinedError`, the same failure mode the
+> `min_fahrzeit_doppel` fix further above already had to account for - not
+> just imprecisely, so update both halves in the same edit rather than one
+> at a time.
 
 This setup gives you two extra things on top of the integration's own cover
 entities:
@@ -517,38 +532,38 @@ switch it to YAML mode, and paste in everything from `alias:` down.
 
 | Field | Meaning |
 |---|---|
-| `ziel` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
-| `helfer` | The number helper for this blind, from step 1 |
-| `auf` | Measured seconds for a full **opening** run |
-| `ab` | Measured seconds for a full **closing** run |
+| `requested_position` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
+| `helper` | The number helper for this blind, from step 1 |
+| `open_seconds` | Measured seconds for a full **opening** run |
+| `close_seconds` | Measured seconds for a full **closing** run |
 | `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
 
 **Script A — for normal use** (dashboards, automations). It does nothing if
 the requested position already matches the stored one:
 
 ```yaml
-interne_rollladenlogik_fuer_home_assistant:
-  alias: Interne Rollladenlogik für Home Assistant
+internal_blind_position_logic:
+  alias: Internal Blind Position Logic
   mode: parallel
   max: 12
   sequence:
     - condition: template
-      value_template: "{{ ziel | int != states(helfer) | int }}"
+      value_template: "{{ requested_position | int != states(helper) | int }}"
     - delay:
         milliseconds: "{{ range(0, 300) | random }}"
     - variables:
-        soll: "{{ ziel | float(0) }}"
-        ist: "{{ states(helfer) | float(0) }}"
-        f_auf: "{{ auf | float(25) }}"
-        f_ab: "{{ ab | float(25) }}"
-        richtung_runter: "{{ soll > ist }}"
-        dauer: >
-          {% set diff = (ist - soll) | abs %} {% set faktor = f_ab if
-          richtung_runter else f_auf %} {{ ((diff / 100.0) * faktor) | round(2) }}
+        target_position: "{{ requested_position | float(0) }}"
+        current_position: "{{ states(helper) | float(0) }}"
+        open_time: "{{ open_seconds | float(25) }}"
+        close_time: "{{ close_seconds | float(25) }}"
+        moving_down: "{{ target_position > current_position }}"
+        duration: >
+          {% set diff = (current_position - target_position) | abs %} {% set factor = close_time if
+          moving_down else open_time %} {{ ((diff / 100.0) * factor) | round(2) }}
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ not richtung_runter }}"
+              value_template: "{{ not moving_down }}"
           sequence:
             - action: cover.open_cover
               target:
@@ -557,7 +572,7 @@ interne_rollladenlogik_fuer_home_assistant:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
             - condition: template
-              value_template: "{{ richtung_runter }}"
+              value_template: "{{ moving_down }}"
           sequence:
             - action: cover.close_cover
               target:
@@ -565,21 +580,21 @@ interne_rollladenlogik_fuer_home_assistant:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: "{{ [0, dauer - (now().timestamp() - start_ts)] | max | round(2) }}"
-    - delay: "{{ rest_dauer }}"
+        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
+    - delay: "{{ remaining_duration }}"
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ soll | int != 0 and soll | int != 100 }}"
+              value_template: "{{ target_position | int != 0 and target_position | int != 100 }}"
           sequence:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
     - action: input_number.set_value
       target:
-        entity_id: "{{ helfer }}"
+        entity_id: "{{ helper }}"
       data:
-        value: "{{ soll | float(0) }}"
+        value: "{{ target_position | float(0) }}"
 ```
 
 **Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
@@ -589,41 +604,41 @@ as an instruction to run a full close (target ≥ 50) or full open (target <
 50), so a repeated Alexa command still moves the blind:
 
 ```yaml
-rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
-  alias: Rollladenlogik fuer Alexasprachsteuerungen für Rollladen
+alexa_blind_position_logic:
+  alias: Blind Position Logic for Alexa Voice Control
   mode: parallel
   max: 12
   sequence:
     - delay:
         milliseconds: "{{ range(0, 300) | random }}"
     - variables:
-        soll: "{{ ziel | float(0) }}"
-        ist: "{{ states(helfer) | float(0) }}"
-        f_auf: "{{ auf | float(25) }}"
-        f_ab: "{{ ab | float(25) }}"
-        reset_richtung_runter: "{{ soll >= 50 }}"
-        richtung_runter: |
-          {% if soll == ist %}
-            {{ reset_richtung_runter }}
+        target_position: "{{ requested_position | float(0) }}"
+        current_position: "{{ states(helper) | float(0) }}"
+        open_time: "{{ open_seconds | float(25) }}"
+        close_time: "{{ close_seconds | float(25) }}"
+        reset_moving_down: "{{ target_position >= 50 }}"
+        moving_down: |
+          {% if target_position == current_position %}
+            {{ reset_moving_down }}
           {% else %}
-            {{ soll > ist }}
+            {{ target_position > current_position }}
           {% endif %}
-        dauer: |
-          {% if soll == ist %}
-            {% if reset_richtung_runter %}
-              {{ f_ab }}
+        duration: |
+          {% if target_position == current_position %}
+            {% if reset_moving_down %}
+              {{ close_time }}
             {% else %}
-              {{ (ist / 100.0) * f_auf }}
+              {{ (current_position / 100.0) * open_time }}
             {% endif %}
           {% else %}
-            {% set diff = (ist - soll) | abs %}
-            {% set faktor = f_ab if richtung_runter else f_auf %}
-            {{ ((diff / 100.0) * faktor) | round(2) }}
+            {% set diff = (current_position - target_position) | abs %}
+            {% set factor = close_time if moving_down else open_time %}
+            {{ ((diff / 100.0) * factor) | round(2) }}
           {% endif %}
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ not richtung_runter }}"
+              value_template: "{{ not moving_down }}"
           sequence:
             - action: cover.open_cover
               target:
@@ -632,7 +647,7 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
             - condition: template
-              value_template: "{{ richtung_runter }}"
+              value_template: "{{ moving_down }}"
           sequence:
             - action: cover.close_cover
               target:
@@ -640,26 +655,26 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: "{{ [0, dauer - (now().timestamp() - start_ts)] | max | round(2) }}"
-    - delay: "{{ rest_dauer }}"
+        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
+    - delay: "{{ remaining_duration }}"
     - choose:
         - conditions:
             - condition: template
               value_template: >-
-                {{ not (soll == ist) and (soll | int != 0 and soll | int != 100) }}
+                {{ not (target_position == current_position) and (target_position | int != 0 and target_position | int != 100) }}
           sequence:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
     - action: input_number.set_value
       target:
-        entity_id: "{{ helfer }}"
+        entity_id: "{{ helper }}"
       data:
         value: |
-          {% if soll == ist %}
-            {{ 100 if reset_richtung_runter else 0 }}
+          {% if target_position == current_position %}
+            {{ 100 if reset_moving_down else 0 }}
           {% else %}
-            {{ soll | float(0) }}
+            {{ target_position | float(0) }}
           {% endif %}
 ```
 
@@ -680,28 +695,28 @@ template:
         unique_id: living_room_blind_percent
         position: "{{ states('input_number.helper_living_room_blind') | int(0) }}"
         set_cover_position:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: "{{ position }}"
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: "{{ position }}"
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         open_cover:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: 0
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 0
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         close_cover:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: 100
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 100
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         stop_cover:
           action: cover.stop_cover
@@ -725,28 +740,28 @@ points at script B and reuses the **same** helper and the **same** real
         unique_id: living_room_blind_percent_alexa
         position: "{{ states('input_number.helper_living_room_blind') | int(0) }}"
         set_cover_position:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: "{{ position }}"
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: "{{ position }}"
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         open_cover:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: 0
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 0
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         close_cover:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: 100
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 100
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         stop_cover:
           action: cover.stop_cover
@@ -764,7 +779,7 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
 - The 0–100 scale used above is this helper's own convention (0 = open, 100
   = closed) and is independent of the position this integration tracks
   internally on the real `cover.*` entity — the two don't need to match.
-- `start_ts` and the second `rest_dauer` (recomputed right after the
+- `start_ts` and the second `remaining_duration` (recomputed right after the
   open/close `choose:` block, replacing the first, rougher estimate) measure
   how much time the open/close call above actually took, rather than
   assuming a fixed value — this corrects for whatever the stick's
