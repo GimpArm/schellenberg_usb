@@ -237,6 +237,53 @@ STOP_COMMAND_EXTRA_RESENDS = 1
 # goes out.
 STOP_COMMAND_RESEND_DELAY_SECONDS = 0.3
 
+# How long async_stop_cover() additionally waits, once control_blind_
+# stop() has returned StopOutcome.CONFIRMED, for this same blind's own
+# primary-identity SS status-frame to echo the stop back before treating
+# the position estimate as genuinely motor-confirmed rather than merely
+# stick-confirmed - closing, for the one call site that can afford the
+# wait, exactly the gap STOP_COMMAND_EXTRA_RESENDS's own comment above
+# already describes: CONFIRMED there only ever meant "the stick put the
+# frame on the air" (motor_result=unknown, always), never that the motor
+# itself actually received and acted on it.
+#
+# 2.0s, not a shorter figure: comfortably above STOP_COMMAND_LATENCY_
+# SECONDS' own 1.2s measured mechanical-stop latency, with the status
+# frame's own transmit-and-parse time still to come on top of that. A
+# real log gathered for this same evaluation (2026-11-07) showed a
+# Gurtwickler's secondary-identity "button held" repeats, sent roughly
+# every 0.11s, followed by the matching primary-identity confirmation
+# (for both a stop and a later open on the same blind) only 0.55-0.89s
+# after the last repeat - comfortably under this 2.0s ceiling, which
+# leaves real margin rather than being tuned to the exact figure
+# observed in one sample.
+#
+# Bounded and best-effort only, same spirit as STOP_RETRY_BUDGET and
+# _wait_for_transmitter_idle() elsewhere: this never holds _move_lock
+# (control_blind_stop() has already released it by the time this runs)
+# and never turns a missing frame into a retry or a hang - on timeout,
+# async_stop_cover() falls back to exactly the stick-ack-only confirmed
+# behavior it always had, so an RF-interference episode that drops the
+# motor's own echo frame still leaves every command processed normally,
+# just without the extra confidence this adds when the frame does
+# arrive.
+#
+# Deliberately not extended to control_blind_with_retry()'s own move
+# confirmation: the same evaluation found the matching primary-identity
+# confirmation for a *move* lagging materially further behind the
+# triggering action than a stop's does (same real log: on the order of
+# 1.4s from the first secondary repeat to the primary open confirmation,
+# against a much shorter hold-to-confirm gap for the stop case above) -
+# almost certainly the physical button needing to be held for a real
+# stretch before the motor commits to a move at all, not anything this
+# integration's own code could shorten. Waiting on it there would cost
+# materially more latency per move for no corresponding gain, and risks
+# a double-send if MOVE_RETRY_OVERALL_TIMEOUT's own retry fires before
+# a delayed frame ever catches up. Decided with the project owner
+# (2026-11-07) to scope this to the stop side only for exactly that
+# reason.
+MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS = 2.0
+
 # Total time _async_position_update_loop()'s auto-stop-at-target branch
 # keeps retrying control_blind_stop() for one target-reached episode
 # before giving up and reporting the position as unknown instead of a
