@@ -435,7 +435,7 @@ an update.
 > [!IMPORTANT]
 > As of the version adding `MOVE_COMMAND_EXTRA_RESENDS`/`STOP_COMMAND_EXTRA_RESENDS`
 > (see `CHANGELOG.md`), the integration itself already re-sends a lost
-> open/close command once, re-sends a lost stop command once, and already
+> open/close command twice, re-sends a lost stop command twice, and already
 > widens its own stop-call timing when it detects another blind's command
 > using the radio at that moment — the same reliability problems the two
 > scripts below were written to work around. The scripts below have

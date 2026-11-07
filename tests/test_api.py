@@ -706,18 +706,19 @@ async def test_control_blind_with_retry_succeeds_on_first_accept(
     assert await asyncio.wait_for(task, timeout=1) is True
 
 
-async def test_control_blind_with_retry_sends_an_extra_resend_after_being_accepted(
+async def test_control_blind_with_retry_sends_two_extra_resends_after_being_accepted(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """MOVE_COMMAND_EXTRA_RESENDS: one extra best-effort move frame.
+    """MOVE_COMMAND_EXTRA_RESENDS: two extra best-effort move frames.
 
-    Mirrors test_control_blind_stop_sends_an_extra_resend_after_being_
+    Mirrors test_control_blind_stop_sends_two_extra_resends_after_being_
     accepted above for the move side - see MOVE_COMMAND_EXTRA_RESENDS's
-    own comment in const.py for why this exists (the same zero-end-to-end-
-    delivery-confirmation gap as the stop side, requested directly once a
-    user pointed out the stop-only fix left it open for open/close) and
-    the one way it is not quite as unconditionally safe as that side's
-    version.
+    own comment in const.py for why this exists at all (the same zero-
+    end-to-end-delivery-confirmation gap as the stop side, requested
+    directly once a user pointed out the stop-only fix left it open for
+    open/close), the one way it is not quite as unconditionally safe as
+    that side's version, and why the count is two rather than the original
+    one (raised 2026-11-07, project owner's own direct decision).
     """
     real_sleep = asyncio.sleep
 
@@ -742,10 +743,10 @@ async def test_control_blind_with_retry_sends_an_extra_resend_after_being_accept
     connected_api._handle_message("t1")  # the primary move write is accepted
 
     assert await asyncio.wait_for(task, timeout=1) is True
-    # The primary move write plus one extra, best-effort resend - both
-    # plain CMD_UP writes for the same device, since control_blind()
+    # The primary move write plus two extra, best-effort resends - all
+    # three plain CMD_UP writes for the same device, since control_blind()
     # itself never waits for or reacts to a reply (see its own docstring).
-    assert len(written(connected_api)) == 2
+    assert len(written(connected_api)) == 3
 
 
 async def test_control_blind_with_retry_logs_the_transmitter_wait_before_writing(
@@ -1279,10 +1280,10 @@ async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmissio
     assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
 
 
-async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
+async def test_control_blind_stop_sends_two_extra_resends_after_being_accepted(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """STOP_COMMAND_EXTRA_RESENDS: one extra best-effort stop frame.
+    """STOP_COMMAND_EXTRA_RESENDS: two extra best-effort stop frames.
 
     Real-world report (2026-10-31): in a six-blind "close to an
     intermediate target" batch, run through a shared transmitter in the
@@ -1296,10 +1297,14 @@ async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
     included (motor_result stays unknown either way; see this constant's
     own comment in const.py), so a single stop frame lost to interference
     leaves the motor with nothing telling it to stop. control_blind_stop()
-    now fires one extra, best-effort control_blind() write - unlocked, no
-    ack-wait of its own, exactly like the give-up fallback already at the
-    bottom of this same method - after its own primary, acked stop is
-    accepted, rather than relying on that single frame alone.
+    fires two extra, best-effort control_blind() writes - unlocked, no
+    ack-wait of their own, exactly like the give-up fallback already at
+    the bottom of this same method - after its own primary, acked stop is
+    accepted, rather than relying on that single frame alone. Originally
+    one extra frame; raised to two (2026-11-07, project owner's own direct
+    decision, the same high-RF-interference environment this report came
+    from) for further margin - see this constant's own comment in
+    const.py for why that is still safe.
     """
 
     real_sleep = asyncio.sleep
@@ -1327,10 +1332,10 @@ async def test_control_blind_stop_sends_an_extra_resend_after_being_accepted(
     connected_api._handle_message("t1")  # the primary stop is accepted
 
     assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
-    # The primary stop plus one extra, best-effort resend - both plain
-    # stop writes for the same device, since control_blind() itself never
-    # waits for or reacts to a reply (see its own docstring).
-    assert len(written(connected_api)) == 2
+    # The primary stop plus two extra, best-effort resends - all three
+    # plain stop writes for the same device, since control_blind() itself
+    # never waits for or reacts to a reply (see its own docstring).
+    assert len(written(connected_api)) == 3
 
 
 async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(

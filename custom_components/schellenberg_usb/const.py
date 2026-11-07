@@ -238,13 +238,24 @@ MAX_STOP_LEAD_PERCENT = 50.0
 # has started in the meantime, in which case that move's own retry loop
 # (control_blind_with_retry()) is already serialized against this same
 # _move_lock and simply queues behind these extra writes for the ~1-2
-# transmit cycles they take, rather than racing them. Kept to one extra
-# frame, not several: each additional write still costs one more shared-
-# transmitter slot that every other blind in the same batch is queued
-# behind, so this is deliberately the smallest change that gives the
-# motor a second chance without meaningfully compounding the very
-# contention this exists alongside.
-STOP_COMMAND_EXTRA_RESENDS = 1
+# transmit cycles they take, rather than racing them. Originally kept to
+# one extra frame, not several, for exactly that contention reason: each
+# additional write still costs one more shared-transmitter slot that
+# every other blind in the same batch is queued behind.
+#
+# Raised from one extra frame to two (2026-11-07, project owner's own
+# direct decision, the same high-RF-interference environment the real-
+# world report above came from): the contention cost described above is
+# real and still applies - a third frame queues behind other blinds the
+# same way a second one does - but is being accepted further, for
+# additional margin against exactly the failure mode this section opened
+# with, in an environment that keeps producing it. Harmless for the same
+# reason a second frame already was: a third plain repeat of the
+# identical stop write is still either a no-op (blind already stopped) or
+# queues safely behind a genuinely new move (as above) - nothing about
+# going from one extra frame to two changes which of those two cases
+# applies, only how many times the harmless one repeats.
+STOP_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_stop() waits after its primary, acked stop before
 # firing each of the extra resends above, so they do not immediately
@@ -432,7 +443,21 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # racing an externally-originated stop for this same blind) - not a
 # defect introduced by adding this, just the same category of real-world
 # RF/timing uncertainty this whole module already has to live with.
-MOVE_COMMAND_EXTRA_RESENDS = 1
+#
+# Raised from one extra resend to two (2026-11-07, project owner's own
+# direct decision, mirroring the same change and the same reasoning on
+# the stop side above) for further margin in the same high-RF-
+# interference environment this whole constant exists for. This stretches
+# the externally-originated-stop residual window described just above
+# proportionally further - out to roughly two resend intervals after the
+# primary write instead of one - since there is now one more best-effort
+# write such a stop has no way to prevent. Accepted for the same reason
+# the window existed at all before this change: nothing in this module
+# can close it outright, and the realistic alternative - going back to a
+# single, unconfirmed frame - reintroduces the exact lost-command failure
+# this resend exists to cover, the more frequent, better-evidenced risk of
+# the two.
+MOVE_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_with_retry() waits after its primary, acked move
 # write before firing each of the extra resends above - see
