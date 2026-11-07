@@ -1,8 +1,8 @@
 # Changelog
 
-## v1.3.1
+## v1.4.0
 
-Split out from v1.3.0 (2026-11-07, project owner's own direction) so GimpArm isn't reviewing this alongside everything else already bundled into that release: a real-world auto-stop reliability fix plus two issues an independent review found in it, and one unrelated timeout increase.
+v1.3.0 has already shipped, so everything below is new work for this next release - starting with a real-world auto-stop reliability fix plus two issues an independent review found in it, and one unrelated timeout increase.
 
 * **Real-world report, not an audit finding:** a six-blind Alexa "25%" voice command (2026-11-01) left one blind (Wohnzimmerrolladen) fully closed in reality while its dashboard card stayed frozen at 68%, reported live with two dashboard warning screenshots plus a fresh log capturing the exact reproduction. Root cause: `control_blind_stop()` (`api.py`) returned a bare `bool`, collapsing two genuinely different outcomes into the same truthy value - the stick explicitly accepting the stop write ("t1"), and `STOP_RETRY_BUDGET` (2.0s) running out and falling back to one last, completely unlocked, unretried `control_blind()` write with no idea whether the stick (let alone the motor) ever saw it. Both call sites treated any truthy result as "this blind has now stopped": in this reproduction, the fallback fired for the living-room blind, `_async_position_update_loop()`'s auto-stop-at-target branch finalized on the strength of it - clearing `is_opening`/`is_closing`/the tracking state and freezing `_attr_current_cover_position` at whatever `_update_position()` had last estimated (68%) - and the blind then kept physically closing, uncontrolled, all the way to its own end stop; the real, later confirming "STOPPED" activity event that did eventually arrive (8.4s afterward, per the reproduction's own log) could not correct this, since `_update_position()`'s own first line (`if self._move_start_time is None or self._move_start_position is None: return`) is a no-op once that tracking state is already torn down.
 
