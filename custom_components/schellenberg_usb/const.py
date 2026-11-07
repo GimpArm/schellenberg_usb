@@ -267,7 +267,7 @@ STOP_COMMAND_EXTRA_RESENDS = 2
 # that the blind has travelled only a negligible, sub-percent distance
 # past where the primary stop already landed it by the time the resend
 # goes out.
-STOP_COMMAND_RESEND_DELAY_SECONDS = 0.3
+STOP_COMMAND_RESEND_DELAY_SECONDS = 0.25
 
 # How long async_stop_cover() additionally waits, once control_blind_
 # stop() has returned StopOutcome.CONFIRMED, for this same blind's own
@@ -473,7 +473,7 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # it has to; lengthening it would only widen that window for no offsetting
 # benefit, since the failure this resend targets (a single lost frame)
 # does not get any likelier to have happened the longer this waits.
-MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.3
+MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
 
 # How close cover.py's own elapsed-time position estimate must already be
 # to the edge it was heading toward (0 for closing, 100 for opening), AND

@@ -21,6 +21,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_OPEN_TIME_SECONDS,
     CONF_SERIAL_PORT,
     DOMAIN,
+    MOVE_COMMAND_RESEND_DELAY_SECONDS,
     PAIRING_TIMEOUT,
     PLATFORMS,
     SIGNAL_CALIBRATION_COMPLETED,
@@ -29,6 +30,7 @@ from custom_components.schellenberg_usb.const import (
     SIGNAL_PAIRING_STARTED,
     SIGNAL_PAIRING_TIMEOUT,
     SIGNAL_STICK_STATUS_UPDATED,
+    STOP_COMMAND_RESEND_DELAY_SECONDS,
     VERIFY_TIMEOUT,
     resolve_direction_command,
 )
@@ -105,6 +107,20 @@ def test_timeout_relationships() -> None:
     assert CALIBRATION_TIMEOUT >= PAIRING_TIMEOUT
     # Pairing should be longer than verification
     assert PAIRING_TIMEOUT > VERIFY_TIMEOUT
+
+
+def test_resend_delay_constants() -> None:
+    """How long control_blind_with_retry()/control_blind_stop() (api.py)
+    wait after their own primary, accepted write before firing each extra
+    resend - see either constant's own comment in const.py for why both
+    are kept equal.
+    """
+    # Lowered from 0.3 to 0.25 (2026-11-07, project owner's own direction).
+    assert MOVE_COMMAND_RESEND_DELAY_SECONDS == 0.25
+    assert STOP_COMMAND_RESEND_DELAY_SECONDS == 0.25
+
+    assert MOVE_COMMAND_RESEND_DELAY_SECONDS > 0
+    assert STOP_COMMAND_RESEND_DELAY_SECONDS > 0
 
 
 def test_resolve_direction_command() -> None:
