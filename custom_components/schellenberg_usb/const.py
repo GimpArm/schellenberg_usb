@@ -435,6 +435,14 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # single, unconfirmed frame - reintroduces the exact lost-command failure
 # this resend exists to cover, the more frequent, better-evidenced risk of
 # the two.
+#
+# Also, together with MOVE_COMMAND_RESEND_DELAY_SECONDS below, this is the
+# other factor in stop_lead_percent's own uncontended baseline in cover.py's
+# _async_position_update_loop() (T_stamp - see that call site's own comment
+# for the full derivation): control_blind_with_retry()'s inline resend loop,
+# built from these same two constants, is what delays stamping
+# _move_start_time past the primary write in the first place. Changing
+# either constant changes that lead too, not just this resend's own timing.
 MOVE_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_with_retry() waits after its primary, acked move
@@ -451,6 +459,8 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # it has to; lengthening it would only widen that window for no offsetting
 # benefit, since the failure this resend targets (a single lost frame)
 # does not get any likelier to have happened the longer this waits.
+# Also stop_lead_percent's own baseline in cover.py together with
+# MOVE_COMMAND_EXTRA_RESENDS above - see that constant's own comment.
 MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
 
 # How close cover.py's own elapsed-time position estimate must already be
