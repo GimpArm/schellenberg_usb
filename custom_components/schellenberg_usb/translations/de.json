@@ -215,8 +215,7 @@
         "invalid_status_identities": "Geben Sie jede zusätzliche Statusidentität als Gerät_ID/Enum ein, getrennt durch Kommas oder neue Zeilen (zum Beispiel F2B8D5/23).",
         "status_identity_incomplete": "Geben Sie beide primären Statusfelder ein oder lassen Sie beide leer.",
         "status_discovery_unavailable": "Der USB-Stick ist nicht verbunden. Verbinden Sie ihn erneut und versuchen Sie es noch einmal.",
-        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut.",
-        "calibration_capture_busy": "Die gemeinsame Aufzeichnung wird bereits von der Telegrammaufzeichnung eines anderen Rollladens verwendet. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
+        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
       },
       "abort": {
         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",

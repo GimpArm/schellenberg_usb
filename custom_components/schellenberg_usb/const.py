@@ -567,10 +567,26 @@ STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 # 65 Premium reported calibration "hanging endlessly" - 2026-11-07): the old
 # value just meant a silent 5-minute wait before anything was shown at all,
 # which read indistinguishably from a genuine hang to someone watching the
-# pairing wizard. Still long enough that an ordinary, if slightly slow,
-# manual open/close is never cut short mid-motion - the project owner's own
-# six real blinds (see MAX_STOP_LEAD_PERCENT's own comment in this file) all
-# finish within 24s, nowhere near this budget either way.
+# pairing wizard.
+#
+# Raised back to 300 (2026-11-08), on the project owner's own real-world
+# report: 120s proved too tight for an ordinary manual open/close under
+# this installation's real RF interference (see the person's own stated
+# environment in its wider project notes) - a leg that would have finished
+# fine given a little more time instead hit this timeout mid-motion and
+# bounced the person into the retry/manual-entry menu below for a
+# calibration that was never actually stuck. The *actual* fix for Issue
+# #77's "hanging endlessly with nothing to distinguish a hang from a slow
+# wait" complaint turned out to be the explicit retry/manual-entry choice
+# below, not the shorter raw timeout - that choice already replaces 120s
+# (or 300s) of silence with an on-screen, navigable menu the moment a leg
+# genuinely does time out, regardless of how long this constant is set to.
+# Lowering CALIBRATION_TIMEOUT was the wrong lever for that complaint and
+# cost real, legitimate calibrations instead; this constant is now back at
+# its original, more generous value while that menu keeps doing the actual
+# work. Still comfortably bounded either way - the project owner's own six
+# real blinds (see MAX_STOP_LEAD_PERCENT's own comment in this file) all
+# finish within 24s, nowhere near even the old 120s budget.
 #
 # A fresh pairing (CalibrationFlowHandler._create_subentry_after_calibration
 # is True) now also gets an explicit choice - retry this same leg, or switch
@@ -582,7 +598,36 @@ STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 # workflow already has its own direct manual-entry escape hatch one menu
 # level up (reconfigure's own "edit" option), so adding a second one here
 # would just be two routes to the same place.
-CALIBRATION_TIMEOUT = 120
+CALIBRATION_TIMEOUT = 300
+
+# How old the hub-wide status-frame capture buffer (api.py's
+# start_status_frame_capture()/finish_status_frame_capture() - a single
+# shared slot, since this integration listens through one USB stick) has
+# to be, with no finish_status_frame_capture() ever called on it, before a
+# *different* flow's own attempt to claim it is allowed to reclaim it
+# instead of being refused outright.
+#
+# Added 2026-11-08: a flow that claims this buffer (CalibrationFlowHandler.
+# _start_calibration_capture(), options_flow_calibration.py) and is then
+# abandoned before its own _finish_calibration_capture() ever runs - the
+# person closes the wizard, navigates away, or anything else removes the
+# flow while it is sitting on a plain, un-awaited form between claiming the
+# buffer and actually awaiting a movement/stop event - leaked it forever:
+# nothing in Home Assistant's flow-removal path called back into this
+# integration to release it, and every later attempt (this blind's own
+# retry included) kept being refused with no way to tell a genuinely
+# still-running capture apart from a permanently abandoned one. Reported by
+# the project owner as a real, reproducible dead end after aborting a test
+# pairing mid-flow. A capture past this age is assumed abandoned and is
+# reclaimed instead of refused - see start_status_frame_capture()'s own
+# comment in api.py. Deliberately its own constant, not CALIBRATION_TIMEOUT
+# above: that one bounds a single movement/stop wait *within* an active
+# capture, this one bounds how long a capture can sit unclaimed-but-open
+# before it is treated as dead - two different questions that happened to
+# share a number before CALIBRATION_TIMEOUT was raised to 300 above, and
+# would otherwise have silently drifted apart from the "two minutes" the
+# project owner actually asked for this one to be.
+STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS = 120
 # Fallback travel time (seconds) used whenever a blind has no calibrated/manual
 # open or close time yet. Shared by cover.py (runtime default) and
 # config_flow.py (form defaults shown before a blind has been calibrated) so

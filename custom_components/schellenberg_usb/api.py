@@ -39,6 +39,7 @@ from .const import (
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
     STATUS_DISCOVERY_TIMEOUT,
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS,
     STOP_COMMAND_EXTRA_RESENDS,
     STOP_COMMAND_RESEND_DELAY_SECONDS,
     VERIFY_TIMEOUT,
@@ -1325,9 +1326,45 @@ class SchellenbergUsbApi:
 
     @callback
     def start_status_frame_capture(self, *, phase: str) -> None:
-        """Start one bounded receive-frame capture for pairing or calibration."""
+        """Start one bounded receive-frame capture for pairing or calibration.
+
+        Raises RuntimeError, without starting anything, when a different
+        capture is already open and still fresh - see
+        CalibrationFlowHandler._start_calibration_capture()'s own docstring
+        (options_flow_calibration.py) for why callers must not force their
+        way in on that RuntimeError.
+
+        A still-open capture older than
+        STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS (const.py) is reclaimed
+        here instead: nothing in Home Assistant's own flow-removal path
+        calls back into this integration to release a capture its owning
+        flow never finished, so a wizard closed, navigated away from, or
+        otherwise abandoned between claiming this buffer and its own next
+        await - start_status_frame_capture() succeeding is itself a plain,
+        synchronous @callback, not an await point - used to leak it
+        forever, refusing every later attempt (including retries of the
+        very same blind) with no way to tell a genuinely still-running
+        capture apart from a permanently abandoned one. See that constant's
+        own comment for the real-world report this fixes.
+        """
         if self._status_discovery_frames is not None:
-            raise RuntimeError("status frame capture is already active")
+            started_at = dt_util.parse_datetime(self._status_discovery_started_at or "")
+            age_seconds = (
+                (dt_util.now() - started_at).total_seconds()
+                if started_at is not None
+                else None
+            )
+            if (
+                age_seconds is None
+                or age_seconds < STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
+            ):
+                raise RuntimeError("status frame capture is already active")
+            _LOGGER.warning(
+                "Reclaiming a stale status-frame capture phase=%s age=%.1fs - "
+                "its owning flow never finished it",
+                self._status_discovery_phase,
+                age_seconds,
+            )
         self._status_discovery_frames = []
         self._status_discovery_phase = phase
         self._status_discovery_started_at = dt_util.now().isoformat()

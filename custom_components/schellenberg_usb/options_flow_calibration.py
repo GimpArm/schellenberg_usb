@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -43,6 +44,7 @@ from .const import (
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_DEVICE_EVENT_CAPTURE,
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS,
     STATUS_IDENTITY_SOURCE_CALIBRATION,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
 )
@@ -58,6 +60,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 type FlowResult = SubentryFlowResult
+
+# How often _claim_or_advance_capture() below re-polls a capture claim that
+# first came back busy. Short enough that a genuinely concurrent claim
+# (the only way to still be busy once start_status_frame_capture()'s own
+# staleness reclaim applies - api.py) clears within a couple of polls of
+# whichever flow actually holds it finishing normally, long enough not to
+# spin needlessly while the person simply waits.
+CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS = 2.0
 
 
 class CalibrationFlowHandler:
@@ -211,6 +221,38 @@ class CalibrationFlowHandler:
         self._capture_active = False
         self._capture_api = None
 
+    async def _claim_or_advance_capture(self, claim: Callable[[], bool]) -> bool:
+        """Run `claim` (either _start_calibration_capture or
+        _set_calibration_capture_phase, bound to its phase), waiting out a
+        busy capture instead of failing on the first try.
+
+        start_status_frame_capture()'s own staleness reclaim (api.py)
+        already means a capture abandoned by a flow that never finished it
+        stops blocking anyone on its own, within
+        STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS - so the only way
+        `claim` can still come back False here is a second flow's own
+        genuinely still-running capture for a *different* blind, which
+        this waits out rather than surfacing as a dead end the person has
+        to notice and manually retry (2026-11-08, replacing the
+        "calibration_capture_busy" error this step used to show - see
+        CALIBRATION_TIMEOUT's neighbour in const.py for the fuller story).
+        Bounded by that same staleness window plus one extra poll's worth
+        of margin: by the time that elapses, either `claim` has already
+        succeeded on an earlier poll, or the other flow's own capture has
+        itself gone stale and this call's own next poll reclaims it.
+        """
+        deadline = (
+            time.monotonic()
+            + STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
+            + CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS
+        )
+        while True:
+            if claim():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS)
+
     def _apply_calibration_status_candidates(self) -> None:
         result = self._calibration_discovery_result
         if not result:
@@ -307,15 +349,24 @@ class CalibrationFlowHandler:
         if user_input is not None:
             initial_state = user_input.get("initial_state")
             if initial_state == "open":
-                if not self._start_calibration_capture(phase="closing"):
-                    errors["base"] = "calibration_capture_busy"
-                else:
+                if await self._claim_or_advance_capture(
+                    lambda: self._start_calibration_capture(phase="closing")
+                ):
                     return await self.async_step_calibration_close_instruction()
+                # Only reachable if a *different* flow's own capture somehow
+                # stayed genuinely active (never stale) for the entire wait
+                # in _claim_or_advance_capture() above - see that method's
+                # own docstring. Generic "unknown" rather than a dedicated
+                # string: honestly unexpected at this point, not worth a
+                # fourth-language string for a case this close to
+                # unreachable.
+                errors["base"] = "unknown"
             elif initial_state == "closed":
-                if not self._start_calibration_capture(phase="opening"):
-                    errors["base"] = "calibration_capture_busy"
-                else:
+                if await self._claim_or_advance_capture(
+                    lambda: self._start_calibration_capture(phase="opening")
+                ):
                     return await self.async_step_calibration_open_instruction()
+                errors["base"] = "unknown"
             else:
                 # Neither real option was chosen - see the schema comment
                 # below for why this is reachable even though the field is
@@ -382,8 +433,14 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        if not self._set_calibration_capture_phase("opening"):
-            errors["base"] = "calibration_capture_busy"
+        if not await self._claim_or_advance_capture(
+            lambda: self._set_calibration_capture_phase("opening")
+        ):
+            # See async_step_calibration_close()'s own comment on its
+            # identical fallback - near-unreachable once
+            # _claim_or_advance_capture() has already waited out any
+            # genuinely concurrent capture.
+            errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_open_instruction",
                 data_schema=vol.Schema({}),
@@ -492,8 +549,14 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        if not self._set_calibration_capture_phase("closing"):
-            errors["base"] = "calibration_capture_busy"
+        if not await self._claim_or_advance_capture(
+            lambda: self._set_calibration_capture_phase("closing")
+        ):
+            # See async_step_calibration_close()'s own comment on its
+            # identical fallback - near-unreachable once
+            # _claim_or_advance_capture() has already waited out any
+            # genuinely concurrent capture.
+            errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_close_instruction",
                 data_schema=vol.Schema({}),

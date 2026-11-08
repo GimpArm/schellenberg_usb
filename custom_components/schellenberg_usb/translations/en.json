@@ -215,8 +215,7 @@
         "invalid_status_identities": "Enter each additional status identity as device_ID/enum, separated by commas or new lines (for example F2B8D5/23).",
         "status_identity_incomplete": "Enter both primary status fields or leave both blank.",
         "status_discovery_unavailable": "The USB stick is not connected. Reconnect it and try again.",
-        "status_discovery_busy": "Another telegram recording is already running. Wait for it to complete and try again.",
-        "calibration_capture_busy": "Another shutter's telegram recording is already using the shared recording slot. Wait for it to finish and try again."
+        "status_discovery_busy": "Another telegram recording is already running. Wait for it to complete and try again."
       },
       "abort": {
         "pairing_timeout": "No device responded within 2 minutes. Please try again.",

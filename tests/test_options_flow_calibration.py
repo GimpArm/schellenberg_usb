@@ -1138,13 +1138,14 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     assert result["step_id"] == "calibration_close_instruction"
 
 
-async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
+async def test_calibration_close_waits_out_busy_capture_without_stealing_it(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard: starting a calibration capture must back off
-    with a clean error when another operation already holds the
-    hub-wide capture buffer, rather than stealing it.
+    """Regression guard: starting a calibration capture must never steal
+    the hub-wide capture buffer out from under another operation, even
+    after waiting out a genuinely still-busy one.
 
     _start_calibration_capture() used to catch start_status_frame_capture()'s
     RuntimeError and force its way in anyway - finishing and discarding
@@ -1153,15 +1154,32 @@ async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
     blinds' calibration/discovery flows against each other, so this is a
     realistic scenario, not a contrived one - and the steal silently
     corrupted whichever operation lost the buffer, with no error shown to
-    either side. This simulates a second operation (another blind's own
-    calibration, or a status-discovery flow) already holding the buffer and
-    checks that starting this blind's own capture now backs off with a
-    clean error instead of stealing it.
+    either side. _claim_or_advance_capture() (2026-11-08) replaced the
+    immediate "calibration_capture_busy" error this used to surface with a
+    bounded wait-and-retry instead, so this simulates a second operation
+    (another blind's own calibration, or a status-discovery flow) that
+    holds the buffer for the *entire* wait, and checks that this blind's
+    own capture still backs off with the generic "unknown" fallback once
+    that wait is exhausted, rather than stealing the buffer or hanging
+    forever. STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS and
+    CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS are both shrunk first so the wait
+    this forces is milliseconds, not the real ~120-ish-second deadline -
+    only this module's own copy of STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
+    though, never api.py's, so the other operation's capture still counts
+    as genuinely busy (not stale) to start_status_frame_capture() for the
+    whole, now much shorter, wait.
     """
+    monkeypatch.setattr(
+        calibration_module, "STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS", 0.02
+    )
+    monkeypatch.setattr(
+        calibration_module, "CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS", 0.01
+    )
     entry, blind = _build_hub_with_blind(hass, connected_api)
 
     # Simulate a second operation - another blind's own calibration, or a
-    # status-discovery flow - already holding the one hub-wide buffer.
+    # status-discovery flow - already holding the one hub-wide buffer, and
+    # never releasing it for the duration of this test.
     connected_api.start_status_frame_capture(phase="discovery")
 
     result = await _start_calibrate_flow(hass, entry, blind)
@@ -1171,7 +1189,7 @@ async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "calibration_close"
-    assert result["errors"] == {"base": "calibration_capture_busy"}
+    assert result["errors"] == {"base": "unknown"}
 
     # The other operation's capture must still be exactly as it was - not
     # finished, not replaced.
@@ -1179,7 +1197,7 @@ async def test_calibration_close_busy_error_does_not_steal_capture_buffer(
     assert connected_api._status_discovery_phase == "discovery"
 
 
-async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
+async def test_open_retry_waits_out_busy_capture_without_stealing_it(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -1193,11 +1211,22 @@ async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
     a *different* operation now holding the buffer - the gap between this
     leg's own timeout tearing its capture down and the user retrying is
     plenty of time for another blind's flow to grab it. The retry must
-    surface the same clean busy error as the fresh-start path above, not
-    silently wait for movement that can never be attributed to a capture
-    that was never actually reopened.
+    wait that out and then surface the same generic "unknown" fallback as
+    the fresh-start path above, not silently wait for movement that can
+    never be attributed to a capture that was never actually reopened.
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS and
+    CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS are shrunk the same way, and for
+    the same reason, as in
+    test_calibration_close_waits_out_busy_capture_without_stealing_it
+    above - see that test's own docstring.
     """
     monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    monkeypatch.setattr(
+        calibration_module, "STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS", 0.02
+    )
+    monkeypatch.setattr(
+        calibration_module, "CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS", 0.01
+    )
     entry, blind = _build_hub_with_blind(hass, connected_api)
     result = await _start_calibrate_flow(hass, entry, blind)
     result = await hass.config_entries.subentries.async_configure(
@@ -1214,7 +1243,8 @@ async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
     assert result["errors"] == {"base": "calibration_start_timeout"}
     assert connected_api._status_discovery_frames is None
 
-    # Before the retry, a different operation claims the now-free buffer.
+    # Before the retry, a different operation claims the now-free buffer,
+    # and holds it for the entire wait the retry below forces.
     connected_api.start_status_frame_capture(phase="discovery")
 
     result = await hass.config_entries.subentries.async_configure(
@@ -1223,9 +1253,68 @@ async def test_open_retry_busy_error_when_another_capture_took_the_buffer(
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "calibration_open_instruction"
-    assert result["errors"] == {"base": "calibration_capture_busy"}
+    assert result["errors"] == {"base": "unknown"}
     # The other operation's capture is still untouched.
     assert connected_api._status_discovery_phase == "discovery"
+
+
+async def test_calibration_close_proceeds_once_a_busy_capture_is_released(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The actual point of _claim_or_advance_capture(): once the other
+    operation that briefly held the hub-wide buffer finishes normally
+    partway through the wait, this blind's own claim must go on to
+    succeed transparently - advancing straight to calibration_open_
+    instruction - rather than surfacing any error for the person to
+    notice and manually retry. The two tests above only ever cover the
+    buffer staying busy for the entire wait; this is the "weitermachen"
+    half the fix was actually for (see STATUS_FRAME_CAPTURE_STALE_TIMEOUT_
+    SECONDS's own comment in const.py for the original report).
+
+    CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS is shrunk so polling is fast;
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS is left generously large
+    (relative to this test's own real-time sleep below) instead of
+    shrunk, so this exercises the other operation finishing normally -
+    the same way a real flow finishes or aborts - never the separate
+    staleness-reclaim path api.py's own tests cover on their own.
+    """
+    monkeypatch.setattr(
+        calibration_module, "CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS", 0.01
+    )
+    monkeypatch.setattr(
+        calibration_module, "STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS", 2.0
+    )
+    entry, blind = _build_hub_with_blind(hass, connected_api)
+
+    # Simulate a second operation holding the buffer when this blind's own
+    # calibration starts.
+    connected_api.start_status_frame_capture(phase="discovery")
+
+    result = await _start_calibrate_flow(hass, entry, blind)
+    task = asyncio.ensure_future(
+        hass.config_entries.subentries.async_configure(
+            result["flow_id"], user_input={"initial_state": "closed"}
+        )
+    )
+
+    # Let _claim_or_advance_capture() poll a few times (at a 0.01s interval)
+    # and find the buffer still busy, before the other operation finishes
+    # normally and frees it - well inside the 2.0s window above, so this
+    # is exercising the "claim succeeds after waiting", not a race against
+    # the deadline.
+    await asyncio.sleep(0.03)
+    connected_api.finish_status_frame_capture(end_reason="completed")
+
+    result = await asyncio.wait_for(task, timeout=5)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_open_instruction"
+    assert result.get("errors") in (None, {})
+    # This blind's own capture is the one now active.
+    assert connected_api._status_discovery_frames is not None
+    assert connected_api._status_discovery_phase == "opening"
 
 
 async def test_calibration_close_step_aborts_without_a_selected_device() -> None:

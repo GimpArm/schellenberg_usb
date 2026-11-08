@@ -18,12 +18,14 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.util import dt as dt_util
 
 import custom_components.schellenberg_usb.api as api_module
 from custom_components.schellenberg_usb.api import SchellenbergUsbApi, StopOutcome
@@ -38,6 +40,7 @@ from custom_components.schellenberg_usb.const import (
     PAIRING_DEVICE_ENUM_START,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_DEVICE_EVENT_CAPTURE,
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS,
 )
 from tests.conftest import FakeTransport, written
 
@@ -3341,6 +3344,84 @@ async def test_handle_message_caps_the_status_discovery_frame_list(
     assert len(connected_api._status_discovery_frames) == (
         api_module.MAX_STATUS_DISCOVERY_FRAMES
     )
+
+
+# ---------------------------------------------------------------------------
+# start_status_frame_capture(): claiming the one hub-wide capture buffer.
+# A fresh, still-open capture must keep blocking a second claimant (not be
+# stolen), but a capture whose owning flow never finished it (closed,
+# navigated away from, or otherwise abandoned between claiming the buffer
+# and its own next await) must stop blocking everyone forever once it is
+# older than STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS - see that
+# constant's own comment in const.py for the real-world report this fixes,
+# and CalibrationFlowHandler._claim_or_advance_capture() (options_flow_
+# calibration.py, exercised in tests/test_options_flow_calibration.py) for
+# the caller that waits out exactly this busy-vs-stale distinction instead
+# of surfacing an immediate dead-end error.
+# ---------------------------------------------------------------------------
+
+
+async def test_start_status_frame_capture_raises_while_another_capture_is_fresh(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Unchanged behavior for the common case: a capture opened moments
+    ago by a different operation must still block a second claimant
+    rather than being stolen - see _start_calibration_capture()'s own
+    docstring (options_flow_calibration.py) for why callers must not
+    force their way in on this RuntimeError.
+    """
+    connected_api.start_status_frame_capture(phase="discovery")
+
+    with pytest.raises(RuntimeError, match="already active"):
+        connected_api.start_status_frame_capture(phase="opening")
+
+    # Untouched - not stolen.
+    assert connected_api._status_discovery_phase == "discovery"
+    assert connected_api._status_discovery_frames == []
+
+
+async def test_start_status_frame_capture_treats_unparsable_started_at_as_busy(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Defensive fallback: start_status_frame_capture() always sets
+    _status_discovery_started_at together with _status_discovery_frames,
+    so this should not happen in practice - but nothing enforces that
+    invariant for whatever sets these two attributes, and if a capture's
+    age can't be determined at all (started_at missing or unparsable),
+    treating it as busy is the only safe default. Silently reclaiming a
+    capture of truly unknown age would be the same data-corrupting steal
+    this whole mechanism exists to prevent.
+    """
+    connected_api.start_status_frame_capture(phase="discovery")
+    connected_api._status_discovery_started_at = None
+
+    with pytest.raises(RuntimeError, match="already active"):
+        connected_api.start_status_frame_capture(phase="opening")
+
+    assert connected_api._status_discovery_phase == "discovery"
+
+
+async def test_start_status_frame_capture_reclaims_a_stale_capture(
+    connected_api: SchellenbergUsbApi,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The actual fix: once the open capture is older than
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS, a new claimant must
+    succeed - discarding the abandoned capture and starting its own,
+    with a warning logged - rather than being blocked by it forever.
+    """
+    caplog.set_level(logging.WARNING, logger="custom_components.schellenberg_usb.api")
+    connected_api.start_status_frame_capture(phase="discovery")
+    connected_api._status_discovery_started_at = (
+        dt_util.now()
+        - timedelta(seconds=STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS + 1)
+    ).isoformat()
+
+    connected_api.start_status_frame_capture(phase="opening")
+
+    assert connected_api._status_discovery_phase == "opening"
+    assert connected_api._status_discovery_frames == []
+    assert any("stale" in record.message.lower() for record in caplog.records)
 
 
 async def test_handle_message_rftu_resolves_verify_future_and_records_mode(
