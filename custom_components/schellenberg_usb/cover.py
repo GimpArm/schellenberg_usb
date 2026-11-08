@@ -1511,11 +1511,57 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         return time.monotonic() - self._move_start_time < travel_time
 
     def _confirm_full_travel_resync(self, direction: str, position: int) -> None:
-        """Record that reaching a travel limit has been confirmed by full transit."""
+        """Record that reaching a travel limit makes the position trustworthy.
+
+        Called from three places in _async_position_update_loop(): its two
+        plain-open/close branches (target_position is None) once they
+        reach 0/100 with that direction's own full-travel resync actually
+        pending, and its third, explicit-target branch when a
+        set_cover_position(0)/set_cover_position(100) call reaches that
+        exact same physical endstop instead - see that branch's own
+        comment for why it is treated identically.
+
+        self._position_confirmed_since_restart is set unconditionally now,
+        not only when self._full_travel_resync_direction == direction:
+        reaching a real endstop through a full, elapsed-time-tracked
+        transit is exactly as trustworthy a confirmation regardless of
+        whether *this* call's own direction happens to be the one
+        self._full_travel_resync_direction currently names. The set_
+        cover_position(0)/(100) call site never arms that attribute in
+        the first place - async_open_cover()'s/async_close_cover()'s own
+        ternary only ever does when self._target_position is None, which
+        a set_cover_position() leg's own _preserve_target=True never
+        leaves true - so gating the flag itself on a match here left it
+        permanently False for a device whose first interaction after a
+        restart was a set_cover_position(0)/(100) call (a dashboard's own
+        position slider dragged to an end, say) rather than a plain
+        open/close. Confirmed reaching that exact endstop never actually
+        set it, so the very next plain open_cover()/close_cover() - on
+        either side, both share this same ternary - treated position as
+        still unconfirmed all over again and sat out the *entire* nominal
+        travel time before admitting what this call had already shown to
+        be true, reporting "opening"/"closing" for that whole stretch
+        despite already sitting at the target the whole time. A plain
+        open/close reached after self._position_confirmed_since_restart
+        is already True is unaffected either way - the flag was already
+        True, so setting it again here is a no-op.
+
+        The resync-specific cleanup below - clearing self._full_travel_
+        resync_direction and recording the "estimated from full travel"
+        diagnostic - stays scoped to a genuinely matching, actively-
+        pending resync, same as before this fix: a mismatch is otherwise
+        never actually reachable for the two plain-open/close call sites
+        (self._full_travel_resync_direction and self._attr_is_opening/
+        self._attr_is_closing are always assigned together, by the same
+        ternary, in the same call, in whichever body method is running),
+        and is reachable for the set_cover_position(0)/(100) call site
+        only in the sense just explained above - nothing pending there to
+        clear or report in that case either.
+        """
+        self._position_confirmed_since_restart = True
         if self._full_travel_resync_direction != direction:
             return
         previous_position = self._move_start_position
-        self._position_confirmed_since_restart = True
         self._full_travel_resync_direction = None
         self._record_position_update(
             source=self._position_update_source,
@@ -1893,12 +1939,25 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             # (see the target_position-is-None branch below) -
                             # set_cover_position(0)/set_cover_position(100)
                             # reaching the exact same physical endstop through
-                            # this branch instead never did, leaving
-                            # _position_confirmed_since_restart stuck and the
-                            # diagnostics history missing its "estimated from
-                            # full travel" record for this transit, even
-                            # though the live position reported above is
-                            # identical either way.
+                            # this branch instead used to never do so in
+                            # practice, even once this call was added here:
+                            # self._full_travel_resync_direction is never
+                            # armed for this branch in the first place (see
+                            # async_open_cover()'s/async_close_cover()'s own
+                            # ternary, gated on self._target_position is
+                            # None), so this call's own direction could never
+                            # match it and _confirm_full_travel_resync()'s own
+                            # guard quietly no-opped every time - leaving
+                            # _position_confirmed_since_restart stuck False
+                            # after a restart whenever the first interaction
+                            # happened to be a set_cover_position(0)/(100)
+                            # call (e.g. a dashboard's position slider dragged
+                            # to an end) instead of a plain open/close, even
+                            # though the live position reported above was
+                            # identical either way. _confirm_full_travel_
+                            # resync() now sets that flag unconditionally -
+                            # see its own docstring - so this call finally
+                            # does what this comment always said it did.
                             self._confirm_full_travel_resync(
                                 "closing" if self._attr_is_closing else "opening",
                                 self._target_position,

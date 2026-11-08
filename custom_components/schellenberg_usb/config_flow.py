@@ -2331,8 +2331,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         The "retry" option on calibration_timeout_choice's own menu (Issue
         #77) - Home Assistant's menu machinery calls this directly by name,
-        the same way it already calls async_step_calibration_close/
-        manual_times for test_success's own menu options.
+        the same way it already calls async_step_test_motor()/async_step_
+        manual_times() for calibration_method_choice's own menu options (see
+        that method's own docstring for the full explanation of why a menu
+        needs this). Unlike async_step_test_success()'s own call into
+        async_step_calibration_close() - that is an ordinary Python call
+        this class makes from within one step's body, not Home Assistant
+        dispatching a menu option by name: test_success is a plain
+        confirmation form, not a menu, as its own docstring says.
         """
         handler = self._get_calibration_handler()
         return await self._await_subentry_result(

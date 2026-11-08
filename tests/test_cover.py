@@ -1992,6 +1992,111 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
     assert cover._attr_is_closing is False
 
 
+async def test_confirm_full_travel_resync_marks_confirmed_even_unarmed(
+    hass: HomeAssistant,
+) -> None:
+    """The real bug the test above's own hand-set _full_travel_resync_
+    direction masked: a set_cover_position(0)/(100) call never arms that
+    attribute in the first place (see async_close_cover's/async_open_
+    cover's own ternary, gated on self._target_position is None, which a
+    set_cover_position() leg's own _preserve_target=True never leaves
+    true) - so in real production code, reaching the endstop this way
+    always calls _confirm_full_travel_resync() with that attribute still
+    None, never "closing"/"opening". Before this fix, the mismatch made
+    the whole call a no-op, so self._position_confirmed_since_restart
+    stayed False forever if the first interaction after a restart
+    happened to be a set_cover_position() call instead of a plain
+    open/close - found and fixed at the project owner's own request
+    (2026-11-08), confirmed to be the same problem on both open and
+    close since async_open_cover()'s own ternary is the identical
+    mirror of async_close_cover()'s.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    assert cover._position_confirmed_since_restart is False
+    assert cover._full_travel_resync_direction is None
+    cover._move_start_position = 30
+
+    cover._confirm_full_travel_resync("closing", 0)
+
+    assert cover._position_confirmed_since_restart is True
+    # Nothing was actually pending, so there is nothing to clear and no
+    # special "estimated from full travel" diagnostic to record either -
+    # only the flag itself changes.
+    assert cover._full_travel_resync_direction is None
+    api.record_position_update.assert_not_called()
+
+
+async def test_confirm_full_travel_resync_leaves_a_different_pending_direction_alone(
+    hass: HomeAssistant,
+) -> None:
+    """Confirming one direction must still not cancel a genuinely
+    different, still-pending resync for the other direction - mirrors
+    test_waiting_for_full_travel_resync_is_false_for_the_other_direction's
+    own point, for this method instead of that one, now that this
+    method's own early return no longer gates the confirmed flag too.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._full_travel_resync_direction = "opening"
+    cover._move_start_position = 30
+
+    cover._confirm_full_travel_resync("closing", 0)
+
+    assert cover._position_confirmed_since_restart is True
+    assert cover._full_travel_resync_direction == "opening"
+    api.record_position_update.assert_not_called()
+
+
+async def test_set_cover_position_to_an_endstop_confirms_position_after_a_restart(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end version of the two tests above, through the real
+    async_set_cover_position()/_async_position_update_loop() wiring
+    rather than _confirm_full_travel_resync() called directly - proves
+    the fix against the actual bug report, not just the helper method:
+    a device whose first interaction after a restart is a
+    set_cover_position(0) call (e.g. a dashboard's own position slider
+    dragged all the way down, rather than the dedicated close button)
+    must come out of it with self._position_confirmed_since_restart set,
+    exactly as a plain close_cover() reaching the same endstop already
+    does.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    assert cover._position_confirmed_since_restart is False
+    cover._attr_current_cover_position = 30
+
+    await cover.async_set_cover_position(**{ATTR_POSITION: 0})
+
+    assert cover._target_position == 0
+    assert cover._attr_is_closing is True
+    # Never armed in the first place - see _confirm_full_travel_resync()'s
+    # own docstring for why that is exactly the gap this test closes.
+    assert cover._full_travel_resync_direction is None
+
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 0),
+    )
+    # _start_position_tracking() was mocked out above, exactly like the
+    # other async_set_cover_position() tests above - this call stands in
+    # for the real background task it would otherwise have spawned.
+    await cover._async_position_update_loop()
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._position_confirmed_since_restart is True
+    assert cover._attr_is_closing is False
+
+
 # ---------------------------------------------------------------------------
 # _update_position(): the elapsed-time position estimate itself.
 #
