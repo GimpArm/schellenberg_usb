@@ -1152,6 +1152,73 @@ async def test_async_stop_cover_falls_back_cleanly_when_no_motor_echo_arrives(
     )
 
 
+async def test_async_stop_cover_fallback_leaves_a_racing_retarget_untouched(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A racing same-direction retarget's own target must survive this fallback.
+
+    A third independent review (2026-11-08) of #226/#227 and its own two
+    follow-up fixes found that this general fallback - reached here via a
+    CONFIRMED stop whose own motor echo never arrives, same as the test
+    above - never touches self._target_position, unlike the FAILED and
+    backstop-exhaustion branches fixed elsewhere in this method. On its
+    face that looks like the same staleness hazard, but is deliberately
+    correct: a different, newer async_set_cover_position() call's own
+    synchronous write can land during control_blind_stop()'s own await
+    (simulated here exactly as test_async_stop_cover_fallback_does_not_
+    clobber_a_newer_move does for its own is_opening/is_closing case) and
+    leave self._target_position holding its own, live target - which
+    must come through this fallback's own cleanup completely untouched,
+    not reset to None, since _async_open_cover_body()'s/_async_close_
+    cover_body()'s own is_redundant_resend re-arm (or, on its own write
+    failing instead, its own _preserve_target handling) is what actually
+    resolves it, not this method.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover."
+        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
+        0.05,  # keep the test fast - the point is that nothing ever sets it
+    )
+
+    async def _confirmed_while_a_retarget_already_landed(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a different, newer async_set_cover_position()
+        # call's own first, synchronous write (self._target_position =
+        # target_position) landing while this stop's own control_blind_
+        # stop() is still suspended.
+        cover._target_position = 30
+        return StopOutcome.CONFIRMED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_confirmed_while_a_retarget_already_landed
+    )
+    cover = _build_cover(hass, api)
+    cover._travel_time_close = 50.0
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._move_start_position = 100
+    cover._move_start_time = time.monotonic()
+
+    await cover.async_stop_cover()
+
+    # The ordinary fallback still runs for this, still-same-direction
+    # move - is_closing clears exactly as the companion test above
+    # asserts...
+    assert cover._attr_is_closing is False
+    assert cover._position_source_kind == "HA command"
+    # ...but the racing retarget's own target must survive completely
+    # untouched, for that call's own logic to resolve.
+    assert cover._target_position == 30
+    assert any(
+        "a newer target already claimed" in record.message for record in caplog.records
+    )
+
+
 async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
     hass: HomeAssistant,
     monkeypatch: pytest.MonkeyPatch,

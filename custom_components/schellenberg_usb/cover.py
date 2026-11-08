@@ -2819,6 +2819,39 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._position_source_kind = "HA command" if confirmed else "unconfirmed stop"
         self._full_travel_resync_direction = None
         self._position_update_source = "Home Assistant stop command"
+        # Deliberately not touched here, either way: self._target_position
+        # was already cleared to None at the very top of this method,
+        # before any await, so if it is still None here nothing further is
+        # needed - consistent with is_opening/is_closing/tracking being
+        # cleared below for the same, unchanged move. If it is not None, a
+        # different, newer async_set_cover_position() call's own
+        # synchronous write already claimed this slot for its own,
+        # genuinely live target while the awaits above were in flight -
+        # the same class of race #226/#227 and the FAILED/backstop-
+        # exhaustion guards above close, just reached via this general
+        # fallback instead. Clearing it here anyway would be actively
+        # wrong, not merely redundant: that racing call's own post-await
+        # re-check (_async_open_cover_body()'s/_async_close_cover_body()'s
+        # own is_redundant_resend branch) already re-arms is_opening/
+        # is_closing/_move_start_time/_move_start_position and restarts
+        # tracking for its own target once it notices tracking gone - a
+        # restart _async_position_update_loop() needs this same
+        # self._target_position intact to auto-stop at, rather than
+        # running unbounded. If that racing call's own write fails
+        # instead, its own _preserve_target handling clears this same
+        # slot back to None itself. Logged rather than silently relying on
+        # either of those, so a future change on either side doesn't
+        # quietly reopen a staleness window a third independent review
+        # (2026-11-08) traced through but could not reach in the current
+        # code.
+        if self._target_position is not None:
+            _LOGGER.debug(
+                "Device %s: stop fallback running with a newer target "
+                "already claimed (%d%%) - leaving it for that call's own "
+                "logic to resolve",
+                self._device_name,
+                self._target_position,
+            )
         await self._async_cancel_position_tracking("Home Assistant stop command")
         self._update_position()
         self._attr_is_opening = False
