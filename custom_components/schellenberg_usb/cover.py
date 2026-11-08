@@ -1570,7 +1570,25 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
     async def _async_position_update_loop(self) -> None:
-        """Poll and estimate position every 0.2s while the cover is moving."""
+        """Poll and estimate position every 0.2s while the cover is moving.
+
+        The auto-stop-at-target branch below sends its own control_blind_
+        stop() once the elapsed-time estimate reaches an intermediate
+        target, then re-checks self._target_position against the value
+        it captured just before that same await
+        (target_when_stop_was_sent) once the write returns - on both
+        branches that can follow: a CONFIRMED outcome's own retarget
+        check, and the UNCONFIRMED/FAILED backstop-exhaustion cleanup's
+        matching check right next to it. Without that second check, a
+        same-direction retarget (a fresh set_cover_position() call,
+        typically piggybacking on this same task via async_open_cover()'s/
+        async_close_cover()'s own is_redundant_resend path) landing during
+        that one attempt's own await would have its brand new target
+        wiped out by whichever stale cleanup runs next - #226/#227's bug
+        class, same as async_stop_cover()'s own re-check protects
+        against, just reached here through this loop's own suspension
+        point instead of a manual stop racing a direction reversal.
+        """
         position_task = asyncio.current_task()
         # Captured once, here, rather than re-based on any later retarget -
         # see POSITION_UPDATE_LOOP_TIMEOUT_SECONDS's own comment in const.py
@@ -2617,6 +2635,19 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         exactly what reversing direction quickly enough to still be
         inside this grace period causes - clobbered that newer command's
         state once this wait finally gave up on it.
+
+        The StopOutcome.FAILED branch, just below, needed an analogous
+        re-check of its own: previous_target_position is a snapshot taken
+        before the same await above, and restoring it unconditionally
+        once FAILED is seen would repeat the #226/#227 mistake, just for
+        self._target_position instead of is_opening/is_closing. A
+        different, newer async_set_cover_position()/async_open_cover()/
+        async_close_cover() call's own first, synchronous write can land
+        inside this exact await and leave self._target_position holding
+        its own, genuinely live target by the time FAILED is seen - so
+        the restore below only happens while self._target_position is
+        still the None this method itself put there a few lines above;
+        otherwise that newer call's target is left alone instead.
         """
         # First, and before any other statement: if this device has a move
         # retry loop still running (control_blind_with_retry(), in flight
