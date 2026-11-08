@@ -2380,10 +2380,10 @@ async def test_a_fresh_call_is_unaffected_by_a_stale_cancellation(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
     )
     await _run_until(lambda: len(written(connected_api)) == 1)
-    connected_api._handle_message("t1")  # accepted - triggers the resend too
+    connected_api._handle_message("t1")  # accepted - triggers both resends too
 
     assert await asyncio.wait_for(task, timeout=1) is True
-    assert len(written(connected_api)) == 2  # primary write + its one resend
+    assert len(written(connected_api)) == 3  # primary write + its two resends
 
     # The sibling's own stale cancellation is untouched by any of this -
     # proving the fresh call's own success was not caused by its own
