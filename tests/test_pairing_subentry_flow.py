@@ -507,6 +507,25 @@ async def test_send_raw_command_transmit_failed(hass: HomeAssistant) -> None:
     assert result["errors"] == {"base": "transmit_failed"}
 
 
+# --- Status discovery choice (skip option) ----------------------------------
+
+
+async def test_status_discovery_choice_shows_a_menu(hass: HomeAssistant) -> None:
+    """The new choice step (2026-11-08, project owner's own request) is a
+    plain two-option menu, not a form - so a person without their original
+    remote to hand, or who doesn't want to run discovery right now, is
+    never forced through async_step_discover_status()'s own "Start
+    listening" screen just to get past it.
+    """
+    flow = make_flow(hass)
+
+    result = await flow.async_step_status_discovery_choice()
+
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
+    assert result["menu_options"] == ["discover_status", "skip_status_discovery"]
+
+
 # --- Discover status from the original remote ------------------------------
 
 

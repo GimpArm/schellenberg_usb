@@ -139,6 +139,13 @@
             "send_raw_command": "Enviar trama RF sin procesar al dispositivo"
           }
         },
+        "status_discovery_choice": {
+          "title": "¿Entrenar comandos de radio desde un mando a distancia?",
+          "menu_options": {
+            "discover_status": "Entrenar desde el mando a distancia original (recomendado)",
+            "skip_status_discovery": "Omitir - finalizar el emparejamiento sin esto"
+          }
+        },
         "discover_status": {
           "title": "Entrenar los comandos de radio de la persiana para esta persiana desde un mando a distancia para mejorar el reconocimiento de la transmisión de comandos de la persiana al pulsar el mando",
           "description": "Dispositivo seleccionado: {selected_blind}\nIdentidad de comando/transmisión: {command_identity}\n\nUtilice el mando a distancia original de Schellenberg para este canal de dispositivo después de pulsar Iniciar escucha: pulse ARRIBA, STOP, ABAJO, STOP. Home Assistant escucha durante 45 segundos y agrupa cada ID de dispositivo, valor enum, comando y marca de tiempo recibidos.",

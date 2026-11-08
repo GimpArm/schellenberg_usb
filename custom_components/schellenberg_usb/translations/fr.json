@@ -139,6 +139,13 @@
             "send_raw_command": "Envoyer une trame radio brute à l'appareil"
           }
         },
+        "status_discovery_choice": {
+          "title": "Apprendre les commandes radio depuis une télécommande ?",
+          "menu_options": {
+            "discover_status": "Apprendre depuis la télécommande d'origine (recommandé)",
+            "skip_status_discovery": "Ignorer - terminer le couplage sans cela"
+          }
+        },
         "discover_status": {
           "title": "Apprendre les commandes radio du volet pour ce volet à partir d'une télécommande pour une meilleure reconnaissance de la transmission des commandes du volet lors de l'appui sur la télécommande",
           "description": "Appareil sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_identity}\n\nAprès avoir appuyé sur Démarrer l'écoute, utilisez la télécommande Schellenberg d'origine pour ce canal d'appareil : appuyez sur HAUT, STOP, BAS, STOP. Home Assistant écoute pendant 45 secondes et regroupe chaque ID d'appareil, valeur d'énumération, commande et horodatage reçus.",

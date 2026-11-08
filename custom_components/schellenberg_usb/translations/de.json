@@ -139,6 +139,13 @@
             "send_raw_command": "Rohes Funktelegramm an das Gerät senden"
           }
         },
+        "status_discovery_choice": {
+          "title": "Funkbefehle von einer Fernbedienung anlernen?",
+          "menu_options": {
+            "discover_status": "Von der Original-Fernbedienung anlernen (empfohlen)",
+            "skip_status_discovery": "Überspringen - Kopplung ohne dies abschließen"
+          }
+        },
         "discover_status": {
           "title": "Die Rollladenfunkbefehle von diesem Rollladen von einer Fernbedienung trainieren für besseres Erkennen der Rollladenbefehlsübermittlung beim Drücken der Fernbedienung",
           "description": "Ausgewähltes Gerät: {selected_blind}\nBefehls-/Sendeidentität: {command_identity}\n\nVerwenden Sie nach dem Drücken auf Empfang starten die Original-Schellenberg-Fernbedienung für diesen Kanal des Geräts: Drücken Sie AUF, STOPP, ZU, STOPP. Home Assistant lauscht 45 Sekunden lang und gruppiert jede empfangene Geräte-ID, jeden Enum-Wert, Befehl und Zeitstempel.",

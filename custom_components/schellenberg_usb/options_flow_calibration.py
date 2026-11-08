@@ -697,9 +697,9 @@ class CalibrationFlowHandler:
                 if calibration_record := self._calibration_record():
                     data[CONF_LAST_CALIBRATION] = calibration_record
                 pairing_flow = cast("SchellenbergPairingSubentryFlow", self.flow)
-                # Route through a real status-identity discovery attempt
-                # before finishing, the same as async_step_manual_times()'s
-                # own pairing route already does (config_flow.py) - this
+                # Offer a real status-identity discovery attempt before
+                # finishing, the same as async_step_manual_times()'s own
+                # pairing route already does (config_flow.py) - this
                 # live-calibration route used to finish immediately here
                 # with no discovery attempted at all, so a freshly-paired
                 # blind's secondary (and, unless a person separately ran
@@ -707,9 +707,15 @@ class CalibrationFlowHandler:
                 # primary) status identity stayed permanently unset.
                 # `_pending_finish_data` carries this already-assembled
                 # `data` dict through that detour; see its own docstring
-                # in config_flow.py's __init__.
+                # in config_flow.py's __init__. Routed through async_step_
+                # status_discovery_choice() rather than straight into
+                # async_step_discover_status() itself (2026-11-08, project
+                # owner's own request) so a person without their original
+                # remote to hand - or who simply doesn't want to run this
+                # right now - can skip it instead of having to abandon
+                # this whole pairing attempt to get past it.
                 pairing_flow._pending_finish_data = data
-                return await pairing_flow.async_step_discover_status()
+                return await pairing_flow.async_step_status_discovery_choice()
 
             existing_data = self.flow._get_reconfigure_subentry().data
             existing_status_identity = normalize_status_identity(

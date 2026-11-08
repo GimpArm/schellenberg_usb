@@ -1402,7 +1402,7 @@ class SchellenbergUsbApi:
             raise ValueError("status discovery timeout must be positive")
 
         self.start_status_frame_capture(phase="remote_discovery")
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Status discovery started timeout=%.1fs; listening for original remote",
             capture_duration,
         )
@@ -1414,7 +1414,7 @@ class SchellenbergUsbApi:
         result = self.finish_status_frame_capture(end_reason="capture_timeout_complete")
 
         primary = result["primary"]
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Status discovery completed frames=%d groups=%d primary=%s "
             "secondary_count=%d position_tracking=%s",
             len(result["frames"]),

@@ -774,7 +774,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
                 self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
                 self._pending_initial_position = pending_initial_position
-                return await self.async_step_discover_status()
+                return await self.async_step_status_discovery_choice()
 
         recorded_open_time, recorded_close_time = (
             self._get_calibration_handler().recorded_leg_times()
@@ -1483,6 +1483,63 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             ),
             "frame_count": str(len(result.get("frames", []))),
         }
+
+    async def async_step_status_discovery_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to run guided remote-identity discovery, or skip it.
+
+        Project owner's own explicit request (2026-11-08): a person
+        without their original remote to hand, who doesn't need
+        secondary-identity capture, or who simply wants pairing to
+        finish faster, must be able to skip the guided-remote-press step
+        entirely - without first landing on async_step_discover_status()'s
+        own "Start listening" screen and only then having to abandon the
+        *whole* pairing flow via the top-level cancel to get out of it.
+
+        Reachable from both fresh-pairing routes - async_step_manual_
+        times() above, and CalibrationFlowHandler.async_step_calibration_
+        complete() (options_flow_calibration.py) for live calibration -
+        the single, now-unified pairing path under "Add device" (Issue
+        #78's own unification, see async_step_user()'s docstring). Not
+        inserted in front of async_step_discover_status() itself, so the
+        dedicated, already-configured-blind "Discover status" Developer
+        Tools entry point (DEVELOPER_TOOLS_MENU_OPTIONS above) keeps
+        going straight there unchanged - that one's whole purpose is
+        deliberately (re)running discovery, so offering to skip it there
+        would make no sense.
+
+        Needs its own step_id-matching method for the same reason
+        async_step_calibration_method_choice()'s own docstring gives:
+        Home Assistant's flow manager validates every result's step_id
+        against an async_step_<id> method, even for a menu result.
+        """
+        return self.async_show_menu(
+            step_id="status_discovery_choice",
+            menu_options=["discover_status", "skip_status_discovery"],
+        )
+
+    async def async_step_skip_status_discovery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Finish pairing with no status identity, same as a "nothing found" discovery.
+
+        Deliberately does not call async_discover_status_identities() or
+        touch any of the _pending_status_*/_pending_secondary_status_
+        identities attributes at all - they are already at their
+        freshly-reset defaults for this pairing attempt (_async_pair_
+        device()'s own reset block; STATUS_IDENTITY_SOURCE_UNKNOWN, None,
+        and an empty list respectively), which is exactly the same state
+        a real discovery attempt that found nothing usable would leave
+        behind. Delegating straight into async_step_confirm_status_
+        discovery()'s own already-tested "finish" branches (both the
+        live-calibration _pending_finish_data one and the manual-entry
+        _pending_data() one already handle an unknown/empty status
+        identity correctly, since that is also what a declined/not-yet-
+        run Developer Tools discovery leaves them at) avoids duplicating
+        that finishing logic a second time here.
+        """
+        return await self.async_step_confirm_status_discovery(user_input={})
 
     async def async_step_discover_status(
         self, user_input: dict[str, Any] | None = None

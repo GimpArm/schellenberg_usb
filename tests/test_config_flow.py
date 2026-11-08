@@ -608,6 +608,11 @@ async def test_pairing_calibration_choosing_closed_sets_initial_position_closed(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["step_id"] == "discover_status"
 
     result = await hass.config_entries.subentries.async_configure(
@@ -682,6 +687,11 @@ async def test_pairing_calibration_choosing_open_sets_initial_position_open(
 
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -767,6 +777,11 @@ async def test_live_calibration_pairing_captures_status_identity_via_discovery(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["step_id"] == "discover_status"
 
     result = await hass.config_entries.subentries.async_configure(
@@ -797,6 +812,76 @@ async def test_live_calibration_pairing_captures_status_identity_via_discovery(
     # CONF_LAST_CALIBRATION and the travel times calibration_complete()
     # itself assembled into the stashed data survive the discover_status
     # detour untouched.
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_LAST_CALIBRATION in result["data"]
+
+
+async def test_live_calibration_skip_status_discovery_creates_entry_directly(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Choosing "Skip" on status_discovery_choice must finish pairing at once.
+
+    Companion to test_live_calibration_pairing_captures_status_identity_via_
+    discovery above, for the new skip option (2026-11-08, project owner's
+    own request): a person without their original remote to hand must be
+    able to get past this choice without ever reaching async_step_discover_
+    status()'s own "Start listening" screen at all. Proves the live-
+    calibration route's own _pending_finish_data stash survives this path
+    too, not just the "ran discovery, found nothing" one the first test in
+    this section already covers - async_discover_status_identities() is
+    deliberately never mocked to return anything here, so a regression that
+    accidentally still called it would surface as an un-mocked-call error,
+    not a silently-passing assertion.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_DOWN,
+    )
+    assert result["step_id"] == "calibration_complete"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "skip_status_discovery"}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_DEVICE_ID] == DEVICE_ID
+    assert result["data"][CONF_DEVICE_ENUM] == DEVICE_ENUM
+    assert CONF_STATUS_DEVICE_ID not in result["data"]
+    assert CONF_STATUS_ENUM not in result["data"]
+    assert result["data"][CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_UNKNOWN
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
+    # The live-calibration route's own already-assembled data (travel
+    # times, CONF_LAST_CALIBRATION, the initial position this leg
+    # sequence confirmed) must still come through untouched, exactly as
+    # it does on the "ran discovery" path above.
     assert result["data"][CONF_INITIAL_POSITION] == 0
     assert CONF_LAST_CALIBRATION in result["data"]
 
@@ -865,6 +950,11 @@ async def test_manual_times_choice_creates_entry_directly(
             CONF_CLOSE_TIME_SECONDS: 14.0,
             "initial_state": "closed",
         },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -1034,6 +1124,11 @@ async def test_calibration_timeout_manual_choice_creates_entry(
             "initial_state": "open",
         },
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["step_id"] == "discover_status"
 
     result = await hass.config_entries.subentries.async_configure(
@@ -1143,6 +1238,11 @@ async def test_calibration_timeout_manual_choice_prefills_the_leg_already_measur
             CONF_CLOSE_TIME_SECONDS: 12.0,
             "initial_state": "open",
         },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -1494,6 +1594,12 @@ async def test_manual_times_leads_into_discover_status(
         },
     )
 
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "discover_status"
 
@@ -1559,6 +1665,11 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
             CONF_CLOSE_TIME_SECONDS: 28.0,
             "initial_state": "closed",
         },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -1652,6 +1763,11 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
             "initial_state": "open",
         },
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["step_id"] == "discover_status"
 
     result = await hass.config_entries.subentries.async_configure(
@@ -1665,6 +1781,63 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 100
+
+
+async def test_manual_times_skip_status_discovery_creates_entry_directly(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror of test_live_calibration_skip_status_discovery_creates_entry_
+    directly above, for the manual-entry pairing route's own _pending_data()
+    finish branch instead of the live-calibration route's _pending_
+    finish_data one - both branches in async_step_confirm_status_discovery()
+    need their own coverage for the skip path, the same way both already
+    have it for the "ran discovery" path above. async_discover_status_
+    identities() is deliberately never mocked here either, for the same
+    un-mocked-call-error reasoning as that test.
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _start_pairing_flow(hass, entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "closed",
+        },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "skip_status_discovery"}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "New Blind"
+    assert result["data"][CONF_OPEN_TIME] == 30.0
+    assert result["data"][CONF_CLOSE_TIME] == 28.0
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_STATUS_DEVICE_ID not in result["data"]
+    assert CONF_STATUS_ENUM not in result["data"]
+    assert result["data"][CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_UNKNOWN
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
+    assert len(entry.subentries) == 1
 
 
 async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
@@ -1725,8 +1898,8 @@ async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
         },
     )
 
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "discover_status"
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
 
 
 async def test_discover_status_unavailable_shows_an_error(

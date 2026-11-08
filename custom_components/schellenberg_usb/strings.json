@@ -139,6 +139,13 @@
             "send_raw_command": "Send raw RF telegram to the device"
           }
         },
+        "status_discovery_choice": {
+          "title": "Train radio commands from a remote control?",
+          "menu_options": {
+            "discover_status": "Train from the original remote control (recommended)",
+            "skip_status_discovery": "Skip - finish pairing without this"
+          }
+        },
         "discover_status": {
           "title": "Train the shutter radio commands for this shutter from a remote control for better recognition of shutter command transmission when pressing the remote",
           "description": "Selected device: {selected_blind}\nCommand/transmit identity: {command_identity}\n\nAfter pressing Start listening, use the original Schellenberg remote control for this device channel: Press UP, STOP, DOWN, STOP. Home Assistant listens for 45 seconds and groups every received device ID, enum value, command, and timestamp.",
