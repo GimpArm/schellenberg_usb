@@ -384,14 +384,24 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # set_cover_position() leg (a target only a few percent away) would have
 # its own auto-stop-at-target fire inside this resend's own delay window
 # below and get undone by it, making positions in roughly that range
-# unreachable. Traced in full and confirmed that specific case cannot
-# happen: control_blind_with_retry() does not return to its caller - and
-# async_open_cover()/async_close_cover() do not set self._move_start_time
-# or start the tracking loop that could ever observe "target reached" -
-# until *after* this whole resend loop below has already finished (it is
-# awaited inline, before this function's own `return True`). A move's own
-# resend therefore always completes before that same move's own auto-stop
-# could possibly fire; there is nothing yet running to race.
+# unreachable. Originally traced and confirmed that specific case could
+# not happen at all, because this resend loop used to run awaited inline
+# before this function's own `return True` - so async_open_cover()/
+# async_close_cover() never set self._move_start_time or started the
+# tracking loop that could observe "target reached" until the resend was
+# already done; there was nothing yet running to race.
+#
+# That inline timing is gone (2026-11-08 - see this constant's own next
+# comment below for since when and why): this resend loop is now a
+# detached background task, so a short enough leg's own tracking loop
+# can genuinely be running, and reach its own auto-stop, while this same
+# move's own resend is still pending. That no longer makes the race
+# impossible, only exactly as survivable as the cross-source race
+# described in the paragraph just below - cancel_pending_move() snapshots
+# every token this device_id currently has in flight (see its own
+# docstring in this module), this move's own included, so the auto-stop
+# path reaches this resend's own pre-write check the same way and with
+# the same accepted residual window either way.
 #
 # What this resend *can* still race is a stop for the same device_id
 # coming from a second, concurrent source: a brand new async_stop_cover()
@@ -436,13 +446,14 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # this resend exists to cover, the more frequent, better-evidenced risk of
 # the two.
 #
-# Also, together with MOVE_COMMAND_RESEND_DELAY_SECONDS below, this is the
-# other factor in stop_lead_percent's own uncontended baseline in cover.py's
-# _async_position_update_loop() (T_stamp - see that call site's own comment
-# for the full derivation): control_blind_with_retry()'s inline resend loop,
-# built from these same two constants, is what delays stamping
-# _move_start_time past the primary write in the first place. Changing
-# either constant changes that lead too, not just this resend's own timing.
+# Used to also be the other factor (together with
+# MOVE_COMMAND_RESEND_DELAY_SECONDS below) in stop_lead_percent's own
+# uncontended baseline in cover.py (T_stamp), back when this resend ran
+# inline and delayed stamping _move_start_time past the primary write.
+# That inline loop is now a detached background task (2026-11-08, see
+# cover.py's own stop_lead_percent comment), so _move_start_time is
+# stamped on the primary write's ack alone; that baseline is gone, and
+# neither constant here affects it any more.
 MOVE_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_with_retry() waits after its primary, acked move
@@ -459,8 +470,9 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # it has to; lengthening it would only widen that window for no offsetting
 # benefit, since the failure this resend targets (a single lost frame)
 # does not get any likelier to have happened the longer this waits.
-# Also stop_lead_percent's own baseline in cover.py together with
-# MOVE_COMMAND_EXTRA_RESENDS above - see that constant's own comment.
+# No longer also stop_lead_percent's own baseline in cover.py (together
+# with MOVE_COMMAND_EXTRA_RESENDS above) - see that constant's own
+# comment for why.
 MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
 
 # How close cover.py's own elapsed-time position estimate must already be

@@ -523,10 +523,15 @@ class SchellenbergUsbApi:
         # whatever this device_id's count happens to cover" - see
         # _move_cancel_requested's own comment below for the second,
         # narrower bug that distinction was needed to close. Each call adds
-        # its own token here on entry and discards (only) that same token
-        # in its own `finally`, popping the device_id entirely once its set
-        # empties, so this dict never holds a stale, empty entry for a
-        # device with nothing genuinely in flight.
+        # its own token here on entry and discards (only) that same
+        # token - in its own `finally`, or, for a move whose
+        # resend_task_spawned ends up True, in that same call's own
+        # detached _send_move_resends_and_cleanup() task's `finally`
+        # instead (see resend_task_spawned's own comment at its call
+        # site for why that one case defers it) - popping the device_id
+        # entirely once its set empties, so this dict never holds a
+        # stale, empty entry for a device with nothing genuinely in
+        # flight.
         self._moves_in_progress: dict[str, set[object]] = {}
         # Per device_id, the subset of that device's own _moves_in_progress
         # tokens (above) that cancel_pending_move() had already snapshotted
@@ -553,10 +558,20 @@ class SchellenbergUsbApi:
         # discarded - a cancellation is conceptually for the device, not
         # for one arbitrarily-chosen call among the several it was
         # snapshotted against), and cleared the same way as
-        # _moves_in_progress above: each call discards only its own token
-        # from its own device_id's entry in its own `finally`, popping the
+        # _moves_in_progress above - including that same resend_task_
+        # spawned exception to "its own `finally`" - each call discards
+        # only its own token from its own device_id's entry, popping the
         # device_id entirely once nothing remains for it in either
         # collection.
+        #
+        # Unlike _moves_in_progress, never discarded in bulk on a lost
+        # or intentional disconnect either: handle_connection_lost() and
+        # disconnect() snapshot every device's own still-active tokens
+        # in here first, the same way cancel_pending_move() does for one
+        # device, instead of clearing this dict alongside that one - see
+        # either method's own comment for why a cancellation recorded
+        # here has to outlive a disconnect that clears _moves_in_progress
+        # out from under it.
         self._move_cancel_requested: dict[str, set[object]] = {}
         # True only between a move's write and learning its outcome;
         # _handle_message's t1/tE branches only touch _move_ack_result/
@@ -1989,12 +2004,18 @@ class SchellenbergUsbApi:
         not preempted mid-wait, only picked up afterwards - in practice
         that wait almost always resolves within about 1.2s (one transmit
         cycle), not its full 5s budget, so the realistic worst case is
-        short. Checked a second time, after this same loop has already
-        succeeded, right before each of MOVE_COMMAND_EXTRA_RESENDS' own
-        best-effort resends below - see that constant's own comment in
-        const.py for why a resend fired on its fixed schedule regardless
-        would otherwise be able to silently undo a stop requested for
-        this device in the meantime. Scoped to whichever calls for this
+        short. Cancellation alone - not the overall timeout, which has no
+        remaining meaning once this method has already returned - is
+        checked a second time, after this same loop has already
+        succeeded and this method has returned True: no longer here, but
+        inside _send_move_resends_and_cleanup() (this same call's own
+        detached background task, spawned the moment the write is
+        accepted - see its own docstring), immediately before each of
+        MOVE_COMMAND_EXTRA_RESENDS' own best-effort resends there
+        instead. See that constant's own comment in const.py for why a
+        resend fired on its fixed schedule regardless would otherwise be
+        able to silently undo a stop requested for this device in the
+        meantime. Scoped to whichever calls for this
         device_id are genuinely in flight at the moment
         cancel_pending_move() is called, never to one that starts only
         afterwards - see _move_cancel_requested's own comment in __init__
@@ -2041,6 +2062,10 @@ class SchellenbergUsbApi:
         self._moves_in_progress.setdefault(device_id, set()).add(move_call_token)
         requested_at = time.monotonic()
         retry_deadline = requested_at + MOVE_RETRY_OVERALL_TIMEOUT
+        # Set just before the one `return True` below that spawns
+        # _send_move_resends_and_cleanup() - see this method's own
+        # `finally` for why it needs to know.
+        resend_task_spawned = False
         try:
             while True:
                 if move_call_token in self._move_cancel_requested.get(device_id, ()):
@@ -2139,42 +2164,24 @@ class SchellenbergUsbApi:
                         device_id or "unknown",
                         action,
                     )
-                    # Mirrors control_blind_stop()'s own extra resend
-                    # after its primary stop is accepted - see
-                    # MOVE_COMMAND_EXTRA_RESENDS's own comment in
-                    # const.py for why this exists.
-                    #
-                    # Unlike the stop side's own version of this loop,
-                    # this one cannot rely on its caller awaiting the
-                    # whole call before anything else touches this same
-                    # device_id: async_open_cover()/async_close_cover()
-                    # do, but a *different* task for the very same device
-                    # - the background auto-stop-at-target loop, or a
-                    # brand new async_stop_cover() from the UI/Alexa -
-                    # can run concurrently and legitimately end this move
-                    # while this loop is still only sleeping between
-                    # writes (see control_blind_stop()'s own comment at
-                    # its mirror of this point for why that concern does
-                    # not apply symmetrically on its side). Both of those
-                    # already call cancel_pending_move() for exactly this
-                    # device_id before doing anything else - previously
-                    # only ever consulted at the top of the retry loop
-                    # above, never here, so a resend already past that
-                    # point had no way to learn a stop had just been
-                    # requested for the same device and would fire anyway,
-                    # silently undoing it a moment later. Checked fresh
-                    # before each write below, peeked rather than
-                    # discarded - same reasoning, and the same change, as
-                    # the retry loop's own check above.
-                    for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
-                        await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
-                        if move_call_token in self._move_cancel_requested.get(
-                            device_id, ()
-                        ):
-                            break
-                        await self.control_blind(
-                            device_enum, action, device_id=device_id, source=source
-                        )
+                    # The MOVE_COMMAND_EXTRA_RESENDS resends that used to
+                    # run right here, inline, now run in a detached
+                    # background task instead - see
+                    # _send_move_resends_and_cleanup()'s own docstring for
+                    # what they do and why, and for why this call's own
+                    # `finally` below must not clean up move_call_token
+                    # when that task has been spawned.
+                    self.hass.async_create_task(
+                        self._send_move_resends_and_cleanup(
+                            device_id,
+                            move_call_token,
+                            device_enum,
+                            action,
+                            source,
+                        ),
+                        name="schellenberg-move-resend",
+                    )
+                    resend_task_spawned = True
                     return True
                 # False (busy) or None (no reply at all, treated the
                 # same way - see the docstring) - retry, after the same
@@ -2193,6 +2200,136 @@ class SchellenbergUsbApi:
             # cancellation for as long as it is itself still live, with no
             # regard for whether this call's own token happened to be
             # cancelled too.
+            #
+            # Skipped whenever resend_task_spawned is True: the detached
+            # _send_move_resends_and_cleanup() task spawned above owns
+            # this exact same cleanup for this exact same token in that
+            # case instead, deferred until its own resends are actually
+            # done - see its own docstring for why doing it here too,
+            # immediately, would let a stop requested in the gap between
+            # this method's own return and that task's first resend go
+            # unseen by its cancellation check. (Deliberately not a bare
+            # `return` to skip this block - a `return` inside `finally`
+            # would silently replace this method's own `return True`/
+            # `return False` with `return None`.)
+            if not resend_task_spawned:
+                still_in_progress = self._moves_in_progress.get(device_id)
+                if still_in_progress is not None:
+                    still_in_progress.discard(move_call_token)
+                    if not still_in_progress:
+                        self._moves_in_progress.pop(device_id, None)
+                still_cancelled = self._move_cancel_requested.get(device_id)
+                if still_cancelled is not None:
+                    still_cancelled.discard(move_call_token)
+                    if not still_cancelled:
+                        self._move_cancel_requested.pop(device_id, None)
+
+    async def _send_move_resends_and_cleanup(
+        self,
+        device_id: str,
+        move_call_token: object,
+        device_enum: str,
+        action: str,
+        source: str,
+    ) -> None:
+        """Fire a just-accepted move's MOVE_COMMAND_EXTRA_RESENDS, detached
+        from control_blind_with_retry()'s own return, and retire that
+        call's bookkeeping once they're done.
+
+        Mirrors control_blind_stop()'s own extra resend after its primary
+        stop is accepted - see MOVE_COMMAND_EXTRA_RESENDS's own comment in
+        const.py for why this exists at all: best-effort RF reliability,
+        nothing more.
+
+        Spawned with hass.async_create_task() from
+        control_blind_with_retry() right when its own primary write is
+        confirmed accepted, instead of running inline there as before
+        this fix. That inline version blocked control_blind_with_retry()
+        from returning True for an extra MOVE_COMMAND_EXTRA_RESENDS *
+        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s) after the
+        primary write's own ack - and async_open_cover()/
+        async_close_cover() only stamp _move_start_time and call
+        _start_position_tracking() once that call returns. Unlike the
+        equivalent wait on the stop side - a one-time final freeze, using
+        a fresh time.monotonic() read, so control_blind_stop()'s own
+        comment at its mirror of this point is right that waiting there
+        is harmless - this delay instead pushed back the very baseline
+        every _update_position() call for the *entire rest of the move*
+        measures its own elapsed time from. Two real-world reports traced
+        to exactly this: a full up/down run landing on 92%/4% instead of
+        100%/0%, and a dashboard that visibly takes longer to start
+        updating than before this resend feature existed - both from the
+        same ~0.5s now eating into the margin by which software's own
+        elapsed-time clock used to lead the real motor's own physical
+        start (see _async_position_update_loop()'s own stop_lead_percent
+        derivation comment for that margin, and this fix's own CHANGELOG
+        entry for the full chain). Restoring an immediate return on
+        accept - while still actually sending the same resends, just no
+        longer blocking anything on them - fixes both at once, since both
+        came from the same shifted baseline.
+
+        This call cannot rely on its own caller awaiting it before
+        anything else touches this same device_id, any more than the old
+        inline loop could: async_open_cover()/async_close_cover() do
+        await control_blind_with_retry() itself, but a *different* task
+        for the very same device - the background auto-stop-at-target
+        loop, or a brand new async_stop_cover() from the UI/Alexa - can
+        run concurrently and legitimately end this move while this task
+        is still only sleeping between writes. Both of those already call
+        cancel_pending_move() for exactly this device_id before doing
+        anything else, so the cancellation check below, re-checked fresh
+        before each resend and peeked rather than discarded (a
+        cancellation is conceptually for the device, not for one
+        arbitrarily-chosen call among the several it may have been
+        snapshotted against - see _move_cancel_requested's own comment in
+        __init__), is what keeps a resend from firing after a stop has
+        already gone out and silently undoing it a moment later.
+
+        That check only works for as long as move_call_token is still
+        registered in _moves_in_progress - which is why this method, not
+        control_blind_with_retry()'s own `finally`, now owns discarding it
+        (see resend_task_spawned there). Cleaning it up the instant
+        control_blind_with_retry() itself returns, before this task has
+        gotten far enough to check for a cancellation or send anything -
+        it has already started by then, per Home Assistant's own eager
+        task scheduling (see _retry_command_after_delay's own comment on
+        this same point), just not yet past its own first
+        asyncio.sleep() - would let a stop requested in that gap find
+        nothing to snapshot and so never reach _move_cancel_requested at
+        all - this task would then have no way to learn about it and
+        would resend anyway.
+
+        Needs no explicit cancellation of its own on disconnect, unlike
+        _connect_task/_stop_pairing_task: control_blind() below already
+        refuses to transmit once disconnected (see its own docstring) and
+        returns False rather than raising, so a resend that wakes up after
+        a disconnect simply no-ops on its next write: this task exits and
+        cleans up on its own very next iteration regardless, exactly as it
+        already did while this loop still ran inline, before this split.
+
+        The cancellation check below stays meaningful across a disconnect
+        too, not merely irrelevant: handle_connection_lost() and
+        disconnect() snapshot this device's own in-flight tokens into
+        _move_cancel_requested rather than clearing it blindly, so a
+        cancellation already recorded - or one that disconnect itself now
+        stands in for - is still seen here on the very next check, even
+        though _moves_in_progress itself does get cleared across that
+        same disconnect. Without that snapshot, a reconnect fast enough
+        to land while this loop is still sleeping could have read a wiped
+        dict as "not cancelled" and resent a stale command; not reachable
+        today given RECONNECT_DELAY against this loop's own total
+        lifetime above, but closed either way rather than left resting on
+        that margin alone.
+        """
+        try:
+            for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
+                await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
+                if move_call_token in self._move_cancel_requested.get(device_id, ()):
+                    break
+                await self.control_blind(
+                    device_enum, action, device_id=device_id, source=source
+                )
+        finally:
             still_in_progress = self._moves_in_progress.get(device_id)
             if still_in_progress is not None:
                 still_in_progress.discard(move_call_token)
@@ -2811,8 +2948,32 @@ class SchellenbergUsbApi:
         if self._move_awaiting_ack:
             self._move_ack_result = False
             self._move_ack_event.set()
+        # Snapshot every device's own currently in-flight tokens into
+        # _move_cancel_requested before discarding _moves_in_progress,
+        # rather than a blind .clear() of both - the same snapshot
+        # cancel_pending_move() above already takes for one device,
+        # applied here to every device at once, since a lost connection
+        # cancels every move still in flight. A blind .clear() here
+        # would silently revoke a cancellation already recorded moments
+        # earlier, and would leave a call whose
+        # _send_move_resends_and_cleanup() task is still sleeping
+        # through its own detached resend loop - unlike a call still
+        # waiting on _move_ack_event above, nothing wakes that task for
+        # this - with no way to ever learn it should be treated as
+        # cancelled: on an eventual reconnect it would then read a
+        # wiped dict as "not cancelled" and resend a stale open/close
+        # that should have stayed cancelled. Not reachable today - see
+        # _send_move_resends_and_cleanup()'s own docstring for why that
+        # task always already exited, on its own, before a reconnect
+        # could complete - but kept closed anyway rather than left
+        # standing on that timing margin alone. Each token snapshotted
+        # here is still removed from _move_cancel_requested exactly as
+        # always, by its own owning call's `finally` (see
+        # resend_task_spawned there for which one that is), so nothing
+        # added here outlives the call it was snapshotted for.
+        for device_id, active in self._moves_in_progress.items():
+            self._move_cancel_requested.setdefault(device_id, set()).update(active)
         self._moves_in_progress.clear()
-        self._move_cancel_requested.clear()
 
         error = ConnectionError(f"serial connection lost: {exc}")
         for future in (
@@ -3025,8 +3186,13 @@ class SchellenbergUsbApi:
         if self._move_awaiting_ack:
             self._move_ack_result = False
             self._move_ack_event.set()
+        # Same reasoning as handle_connection_lost()'s own identical
+        # block: snapshot every device's in-flight tokens into
+        # _move_cancel_requested before discarding _moves_in_progress,
+        # instead of a blind .clear() of both.
+        for device_id, active in self._moves_in_progress.items():
+            self._move_cancel_requested.setdefault(device_id, set()).update(active)
         self._moves_in_progress.clear()
-        self._move_cancel_requested.clear()
         stop_task = self._stop_pairing_task
         self._stop_pairing_task = None
         if (

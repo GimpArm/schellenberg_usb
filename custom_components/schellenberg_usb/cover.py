@@ -50,8 +50,6 @@ from .const import (
     EVENT_STOPPED,
     MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS,
     MAX_STOP_LEAD_PERCENT,
-    MOVE_COMMAND_EXTRA_RESENDS,
-    MOVE_COMMAND_RESEND_DELAY_SECONDS,
     NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
@@ -1649,10 +1647,15 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     #   open/close write - that takes roughly STOP_COMMAND_
                     #   LATENCY_SECONDS (see its own comment in const.py).
                     # - T_stamp: _move_start_time, though, is stamped only
-                    #   once control_blind_with_retry()'s own inline resend
-                    #   loop returns - MOVE_COMMAND_EXTRA_RESENDS *
-                    #   MOVE_COMMAND_RESEND_DELAY_SECONDS (~0.5s) after
-                    #   that same write, not at the write itself.
+                    #   once control_blind_with_retry() (api.py) returns -
+                    #   now effectively 0, immediately on the primary
+                    #   write's own ack. Used to be MOVE_COMMAND_EXTRA_
+                    #   RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS (~0.5s)
+                    #   after that same write instead, back when that
+                    #   method's own resend loop still ran inline, before
+                    #   its own return - see MOVE_COMMAND_EXTRA_RESENDS's
+                    #   own comment in const.py for why and since when that
+                    #   changed.
                     # - D_stop: once the stop command below is actually
                     #   issued, the real motor doesn't stop instantly
                     #   either - transmitting and acting on it takes
@@ -1675,7 +1678,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     # completely, leaving only T_stamp itself (software's
                     # own resend-loop bookkeeping delay, nothing to do
                     # with hardware transmit latency) for this lead to
-                    # compensate for.
+                    # compensate for - which, T_stamp now being ~0, is
+                    # itself ~0: an uncontended intermediate stop needs no
+                    # lead at all any more.
                     #
                     # An earlier version of this lead (Issue #78,
                     # 2026-11-07) used 2x STOP_COMMAND_LATENCY_SECONDS as
@@ -1694,6 +1699,23 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     # blind's travel time of either end stop unreachable -
                     # the earliest a stop could physically land was
                     # already past it.
+                    #
+                    # T_stamp's own ~0.5s baseline above (2026-11-07
+                    # through 2026-11-08) was later found to be the same
+                    # root cause behind a separate, unrelated-looking real-
+                    # world report: a full open/close (needs_stop_command
+                    # False below, so this whole branch never even runs
+                    # for it) landing on 92%/4% instead of 100%/0%, plus a
+                    # separately-reported sluggish dashboard - both from
+                    # control_blind_with_retry()'s own resend loop delaying
+                    # _move_start_time's own stamp on *that* path too,
+                    # eating into a different margin entirely (see
+                    # MOVE_COMMAND_EXTRA_RESENDS's own comment in
+                    # const.py). Fixing that by detaching the resends into
+                    # a background task zeroes T_stamp here as well, which
+                    # is why this baseline is gone outright below rather
+                    # than merely recomputed to some other, still-nonzero
+                    # value.
                     needs_stop_command = self._target_position not in (0, 100)
                     stop_lead_percent = 0.0
                     if needs_stop_command:
@@ -1704,15 +1726,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             0.1,
                         )
                         # Baseline is T_stamp alone (see the derivation
-                        # above) - deliberately not STOP_COMMAND_LATENCY_
-                        # SECONDS in any form: uncontended, that
-                        # constant's two appearances (D_start, D_stop)
-                        # cancel out of this baseline exactly, since
-                        # they're equal.
-                        stop_latency_seconds = (
-                            MOVE_COMMAND_EXTRA_RESENDS
-                            * MOVE_COMMAND_RESEND_DELAY_SECONDS
-                        )
+                        # above), and T_stamp is ~0 now - so there is
+                        # deliberately no uncontended term here at all any
+                        # more. STOP_COMMAND_LATENCY_SECONDS alone still
+                        # isn't it either: uncontended, that constant's two
+                        # appearances (D_start, D_stop) still cancel out of
+                        # this baseline exactly, since they're still equal.
+                        stop_latency_seconds = 0.0
                         # When the shared lock is held by some *other*
                         # blind's own move or stop right now, this blind's
                         # own stop - though served ahead of anyone merely

@@ -575,7 +575,8 @@ async def test_handle_connection_lost_also_unblocks_a_waiting_move_retry(
     which test_control_blind_with_retry_wakes_promptly_on_connection_lost
     below exercises end-to-end through a real task.
     """
-    connected_api._moves_in_progress["ABCDEF"] = {object()}
+    token = object()
+    connected_api._moves_in_progress["ABCDEF"] = {token}
     connected_api._move_awaiting_ack = True
     connected_api._move_ack_result = None
 
@@ -587,7 +588,12 @@ async def test_handle_connection_lost_also_unblocks_a_waiting_move_retry(
     assert connected_api._move_ack_event.is_set() is True
     assert connected_api._move_ack_result is False
     assert connected_api._moves_in_progress == {}
-    assert connected_api._move_cancel_requested == {}
+    # Not {} any more - see handle_connection_lost()'s own comment at its
+    # _move_cancel_requested snapshot: a token still in _moves_in_progress
+    # at disconnect time is now treated as cancelled, the same as every
+    # other device's own in-flight tokens, instead of this dict being
+    # blindly wiped alongside _moves_in_progress.
+    assert connected_api._move_cancel_requested == {"ABCDEF": {token}}
     connected_api._cancel_scheduled_reconnect()
 
 
@@ -595,7 +601,8 @@ async def test_disconnect_also_unblocks_a_waiting_move_retry(
     connected_api: SchellenbergUsbApi,
 ) -> None:
     """disconnect()'s own copy of the same cleanup as the test above."""
-    connected_api._moves_in_progress["ABCDEF"] = {object()}
+    token = object()
+    connected_api._moves_in_progress["ABCDEF"] = {token}
     connected_api._move_awaiting_ack = True
     connected_api._move_ack_result = None
 
@@ -604,7 +611,9 @@ async def test_disconnect_also_unblocks_a_waiting_move_retry(
     assert connected_api._move_ack_event.is_set() is True
     assert connected_api._move_ack_result is False
     assert connected_api._moves_in_progress == {}
-    assert connected_api._move_cancel_requested == {}
+    # See the sibling handle_connection_lost() test above for why this is
+    # no longer {}.
+    assert connected_api._move_cancel_requested == {"ABCDEF": {token}}
 
 
 def test_handle_connection_lost_clears_the_last_received_message_cache(
@@ -693,8 +702,17 @@ async def test_control_blind_with_retry_rejects_a_non_move_action(
 
 
 async def test_control_blind_with_retry_succeeds_on_first_accept(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Resend disabled: this test is only about the first-accept return
+    value, not the resend mechanism - leaving it enabled would spawn its
+    detached background task (see _send_move_resends_and_cleanup()) on a
+    real, unpatched MOVE_COMMAND_RESEND_DELAY_SECONDS with nothing in this
+    test ever awaiting it, which would outlive the test as a lingering
+    timer.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
+
     task = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
     )
@@ -719,6 +737,17 @@ async def test_control_blind_with_retry_sends_two_extra_resends_after_being_acce
     open/close), the one way it is not quite as unconditionally safe as
     that side's version, and why the count is two rather than the original
     one (raised 2026-11-07, project owner's own direct decision).
+
+    These two resends now fire from a detached background task spawned
+    the moment the primary write is accepted (see
+    _send_move_resends_and_cleanup()), rather than inline before
+    control_blind_with_retry() itself returns - see
+    test_control_blind_with_retry_returns_before_its_own_resends_finish
+    right below for that part of the fix in isolation. task
+    resolving True here is therefore no longer proof the resends have
+    already gone out too; this test now explicitly waits for that
+    separate background task via hass.async_block_till_done() before
+    counting the writes.
     """
     real_sleep = asyncio.sleep
 
@@ -743,10 +772,66 @@ async def test_control_blind_with_retry_sends_two_extra_resends_after_being_acce
     connected_api._handle_message("t1")  # the primary move write is accepted
 
     assert await asyncio.wait_for(task, timeout=1) is True
+    # The resends now run in their own detached task (see this test's own
+    # docstring) - wait for it the idiomatic hass way rather than assuming
+    # it already ran just because the call above returned.
+    await connected_api.hass.async_block_till_done()
     # The primary move write plus two extra, best-effort resends - all
     # three plain CMD_UP writes for the same device, since control_blind()
     # itself never waits for or reacts to a reply (see its own docstring).
     assert len(written(connected_api)) == 3
+
+
+async def test_control_blind_with_retry_returns_before_its_own_resends_finish(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (reported 2026-11-08): control_blind_with_retry() must
+    return True the moment its primary write is accepted, not only after
+    MOVE_COMMAND_EXTRA_RESENDS' own resends as well.
+
+    Real-world report: a blind driven fully open then fully closed landed
+    on 92%/4% instead of 100%/0%, and the dashboard was separately
+    reported as less responsive than before MOVE_COMMAND_EXTRA_RESENDS
+    existed. Traced to control_blind_with_retry() previously blocking its
+    own return for an extra MOVE_COMMAND_EXTRA_RESENDS *
+    MOVE_COMMAND_RESEND_DELAY_SECONDS seconds after the primary write was
+    already accepted - and async_open_cover()/async_close_cover() (cover.py)
+    only stamp _move_start_time and start position tracking once this call
+    returns, so that extra wait pushed back the very baseline the whole
+    move's own elapsed-time tracking measures from, confirmed by diffing
+    against v1.2.0 (from before this resend feature existed), where this
+    same call returned immediately on accept. See this fix's own
+    CHANGELOG entry for the full chain.
+
+    Uses a real (small) MOVE_COMMAND_RESEND_DELAY_SECONDS rather than the
+    sibling tests' own asyncio.sleep monkeypatch, specifically so elapsed
+    wall-clock time can tell "returned before the resends" apart from
+    "returned after them" - a sleep patched to instant cannot, since it
+    would make the old, blocking behavior look just as fast as this fix.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_RESEND_DELAY_SECONDS", 0.2)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    accepted_at = time.monotonic()
+    connected_api._handle_message("t1")  # the primary move write is accepted
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    elapsed = time.monotonic() - accepted_at
+    # The full resend budget is MOVE_COMMAND_EXTRA_RESENDS (2) *
+    # MOVE_COMMAND_RESEND_DELAY_SECONDS (0.2) = 0.4s - returning in well
+    # under that (a generous but still tight bound) proves this did not
+    # wait out even one resend's own delay, let alone both.
+    assert elapsed < 0.1
+
+    # Let the detached resend task actually finish before the test ends,
+    # rather than leaving its own (now real, if short) delay pending past
+    # this test - same reasoning as every other test here that touches
+    # hass.async_block_till_done().
+    await connected_api.hass.async_block_till_done()
 
 
 async def test_control_blind_with_retry_logs_the_transmitter_wait_before_writing(
@@ -863,9 +948,11 @@ async def test_control_blind_with_retry_skips_the_resend_once_a_stop_is_requeste
     """A stop requested for this device_id during the resend's own delay
     must suppress it, not fire it anyway a moment later and undo it.
 
-    See the cancellation check inside control_blind_with_retry()'s own
-    resend loop, and MOVE_COMMAND_EXTRA_RESENDS's own comment in const.py,
-    for the real case this protects: a brand new async_stop_cover() call
+    See the cancellation check inside _send_move_resends_and_cleanup()'s
+    own resend loop (control_blind_with_retry()'s detached background
+    task - see its own docstring), and MOVE_COMMAND_EXTRA_RESENDS's own
+    comment in const.py, for the real case this protects: a brand new
+    async_stop_cover() call
     (UI/automation/Alexa), or the auto-stop-at-target branch of an
     *earlier*, still-live move this call's own write was only ever a
     redundant piggyback onto, both call cancel_pending_move() for this
@@ -893,8 +980,94 @@ async def test_control_blind_with_retry_skips_the_resend_once_a_stop_is_requeste
     connected_api.cancel_pending_move("ABCDEF")
 
     assert await asyncio.wait_for(task, timeout=1) is True
+    # The resend loop itself now runs inside a detached task (see
+    # _send_move_resends_and_cleanup()) rather than inline before this
+    # same return - let it actually run far enough to observe (or skip)
+    # its own cancellation check, rather than asserting before it has even
+    # had a chance to.
+    await connected_api.hass.async_block_till_done()
     # Only the primary write - the resend was skipped, not merely delayed.
     assert len(written(connected_api)) == 1
+
+
+async def test_control_blind_with_retry_still_cancellable_after_its_own_return(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop requested only *after* control_blind_with_retry() has
+    already returned must still suppress whichever of the detached
+    resend task's own resends have not fired yet.
+
+    The sibling test above only ever requests its cancellation before
+    control_blind_with_retry() itself has even resumed from the ack, so
+    move_call_token's own continued registration in _moves_in_progress
+    across that method's own return is never genuinely exercised there.
+    This test instead lets control_blind_with_retry() run all the way to
+    its own `return True` first - proving, by that return actually
+    happening, that the resend_task_spawned branch was taken, which defers
+    move_call_token's own cleanup to _send_move_resends_and_cleanup()
+    rather than control_blind_with_retry()'s own `finally` - and only then
+    calls cancel_pending_move().
+
+    Regression (caught by an independent review's own standalone asyncio
+    reproduction, then independently re-confirmed the same way rather
+    than taken on trust - real Event/wait_for/eager Task primitives, no
+    pytest involved): by the time this test coroutine can observe
+    control_blind_with_retry() having returned at all - *anything*
+    awaiting that same task, wait_for() here or even a bare `await task`,
+    needs its own extra event-loop hop beyond what the detached resend
+    task's own eager start already used to reach its own first
+    asyncio.sleep() and resume from it once (see
+    _retry_command_after_delay's own comment in api.py for the eager
+    start itself) - that resend task has therefore already had its own
+    first chance to check for a cancellation (finding none yet) and send
+    its first resend, by the same margin, every single time. A
+    cancellation requested only once this test can observe the return can
+    therefore still reach the *second* resend, never the first - this
+    still is a genuine, non-vacuous proof that a cancellation landing
+    anywhere in this gap keeps being honored on every later check, just
+    not the stronger "no resend escapes at all" this docstring claimed
+    before that reproduction. move_call_token staying in
+    _moves_in_progress for exactly this gap is what cancel_pending_move()
+    here needs in order to find anything to snapshot in the first place -
+    cleaning it up immediately on return, the way
+    control_blind_with_retry()'s own `finally` used to unconditionally,
+    would have made this cancellation silently no-op instead of merely
+    one resend too late.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+    # The gap this test is about is real: control_blind_with_retry() has
+    # already returned, yet its own token has not been cleaned up yet -
+    # deferred to the detached resend task instead.
+    assert len(connected_api._moves_in_progress.get("ABCDEF", ())) == 1
+    # The resend task's own first resend has, by this exact point,
+    # already fired too - see this test's own docstring for why nothing
+    # that waits for control_blind_with_retry()'s return can ever observe
+    # an earlier point than that.
+    assert len(written(connected_api)) == 2
+
+    connected_api.cancel_pending_move("ABCDEF")
+
+    await connected_api.hass.async_block_till_done()
+    # The primary write plus the one resend that had already fired
+    # before this cancellation could possibly land - the *second* resend
+    # was still suppressed, even though the cancellation itself landed
+    # only after control_blind_with_retry() had already returned.
+    assert len(written(connected_api)) == 2
+    assert connected_api._moves_in_progress == {}
+    assert connected_api._move_cancel_requested == {}
 
 
 async def test_control_blind_with_retry_retries_on_busy_with_no_attempt_limit(
@@ -913,6 +1086,11 @@ async def test_control_blind_with_retry_retries_on_busy_with_no_attempt_limit(
     patched-instant asyncio.sleep below only skips real delay, never
     advances time.monotonic(), so MOVE_RETRY_OVERALL_TIMEOUT is never in
     reach here however many attempts run.
+
+    Resend disabled: this test is about the busy-retry attempt count, not
+    the resend mechanism - leaving it enabled would spawn its own detached
+    background task (see _send_move_resends_and_cleanup()) on the one
+    eventual accept below, with nothing here ever awaiting it.
     """
     real_sleep = asyncio.sleep
 
@@ -928,6 +1106,7 @@ async def test_control_blind_with_retry_retries_on_busy_with_no_attempt_limit(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
 
     def written_count_reached(expected: int) -> Callable[[], bool]:
         # A plain `lambda: len(written(connected_api)) == 1 + attempt`
@@ -1064,8 +1243,14 @@ async def test_control_blind_with_retry_treats_a_silent_ack_timeout_like_busy(
     loop.call_later, independent of asyncio.sleep), so patching
     asyncio.sleep alone - as the other retry tests above do - would not be
     enough on its own to make this one fast.
+
+    Resend disabled: this test is about the ack-timeout retry, not the
+    resend mechanism - leaving it enabled would spawn its own detached
+    background task (see _send_move_resends_and_cleanup()) on the one
+    eventual accept below, with nothing here ever awaiting it.
     """
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     real_sleep = asyncio.sleep
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -1198,6 +1383,89 @@ async def test_control_blind_with_retry_wakes_promptly_on_connection_lost(
     # got through is `task` resolving to False above: control_blind()
     # rejects on the disconnected-state check at the top of its own next
     # loop iteration, not by timing out.
+    connected_api._cancel_scheduled_reconnect()
+
+
+async def test_handle_connection_lost_cancels_a_still_sleeping_resend_task(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resend task already started - Home Assistant's own eager task
+    scheduling (see _retry_command_after_delay's own comment in api.py) -
+    and, by the time this test can observe control_blind_with_retry()'s
+    own return, already past its own first resend too (see
+    test_control_blind_with_retry_still_cancellable_after_its_own_
+    return's own docstring for exactly why an earlier point can never be
+    observed this way) - but still sleeping before its *second* resend
+    when the connection is lost - must still see itself as cancelled
+    once it wakes from that second sleep, rather than read a
+    blindly-wiped _move_cancel_requested as "not cancelled" and attempt
+    that resend anyway.
+
+    Companion to test_control_blind_with_retry_wakes_promptly_on_connection_
+    lost above, for the detached resend task rather than a call still
+    waiting on _move_ack_event, and end-to-end (a real resend task whose
+    own cancellation check actually runs) for
+    test_handle_connection_lost_also_unblocks_a_waiting_move_retry's own
+    hand-set-up version of this same snapshot.
+
+    written() cannot tell a resend correctly suppressed by this check
+    apart from one control_blind() itself merely refused once
+    disconnected (see its own docstring) - both leave the transport
+    untouched once handle_connection_lost() has already set it to None
+    (see written()'s own docstring). Wrapping control_blind() instead
+    proves the narrower claim this test is actually about: the resend
+    loop's own cancellation check took its `break` before its second
+    resend, so control_blind() is never called a third time at all,
+    rather than being called and only then declining to transmit.
+    """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    control_blind_spy = AsyncMock(wraps=connected_api.control_blind)
+    monkeypatch.setattr(connected_api, "control_blind", control_blind_spy)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    assert await asyncio.wait_for(task, timeout=1) is True
+    # Primary write plus the resend task's own first resend - already
+    # fired by this exact point, same as this test's own docstring and
+    # test_control_blind_with_retry_still_cancellable_after_its_own_
+    # return's docstring both explain.
+    assert control_blind_spy.call_count == 2
+    # The detached resend task has not yet reached its own second
+    # cancellation check - this test coroutine has not itself yielded
+    # since the line above, and instant_sleep needs one real event-loop
+    # tick to resolve.
+    assert len(connected_api._moves_in_progress.get("ABCDEF", ())) == 1
+
+    connected_api.handle_connection_lost(
+        connected_api._protocol,
+        Exception("gone"),
+    )
+
+    # Snapshotted into _move_cancel_requested, not wiped alongside
+    # _moves_in_progress - see handle_connection_lost()'s own comment.
+    assert connected_api._moves_in_progress == {}
+    assert len(connected_api._move_cancel_requested.get("ABCDEF", ())) == 1
+
+    # Let the resend task's own second sleep resolve and its loop
+    # actually check again.
+    await connected_api.hass.async_block_till_done()
+
+    # Still exactly two calls, never three - the resend loop saw its own
+    # token already cancelled on this second check and broke out before
+    # calling control_blind() again, rather than calling it a third time
+    # only for it to decline.
+    assert control_blind_spy.call_count == 2
+    assert connected_api._moves_in_progress == {}
+    assert connected_api._move_cancel_requested == {}
     connected_api._cancel_scheduled_reconnect()
 
 
@@ -2084,9 +2352,17 @@ async def test_cancel_pending_move_ends_a_waiting_retry_loop_for_that_device(
 
 
 async def test_cancel_pending_move_does_not_affect_a_different_devices_move(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stop for blind Y must never cancel blind X's own in-flight move."""
+    """A stop for blind Y must never cancel blind X's own in-flight move.
+
+    Resend disabled: this test is only about cancellation targeting the
+    right device_id, not the resend mechanism - leaving it enabled would
+    spawn its own detached background task (see
+    _send_move_resends_and_cleanup()) on a real, unpatched
+    MOVE_COMMAND_RESEND_DELAY_SECONDS with nothing here ever awaiting it.
+    """
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
     task = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
     )
@@ -2136,6 +2412,13 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
     cancel_pending_move("AAAAAA") would find nothing to cancel and this
     would collapse into the always-a-no-op case the test named above
     already covers, proving nothing about the overwrite at all.
+
+    B's own resend disabled: B (unlike A) does reach ack-success below,
+    which would otherwise spawn B's own detached resend task (see
+    _send_move_resends_and_cleanup()) - irrelevant to what this test is
+    about (the per-device bookkeeping surviving a concurrent second call)
+    and a needless source of interleaved writes this test would otherwise
+    have to account for.
     """
     real_sleep = asyncio.sleep
 
@@ -2145,6 +2428,7 @@ async def test_cancel_pending_move_is_not_clobbered_by_a_concurrent_second_move(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
 
     task_a = asyncio.ensure_future(
         connected_api.control_blind_with_retry("10", CMD_UP, device_id="AAAAAA")
@@ -2266,9 +2550,17 @@ async def test_cancel_pending_move_reaches_a_still_running_call_after_a_sibling_
     needs no further ack - see control_blind()'s own docstring - so
     nothing beyond the one "t1" below is needed to let it run to
     completion), and the test asserts the stand-in's own token is still
-    there, on its own, once this call's own `finally` has run - proving
+    there, on its own, once this call's own cleanup has run - proving
     this call's own exit discarded only its own token rather than wiping
     out a sibling's still-live claim (or the whole entry) with it.
+
+    That cleanup is no longer control_blind_with_retry()'s own `finally`
+    for this accept-and-resend path - it is now
+    _send_move_resends_and_cleanup()'s own `finally`, run once its
+    detached task actually finishes (see resend_task_spawned in
+    control_blind_with_retry() itself) - so this test waits for that task
+    via hass.async_block_till_done() before checking the cleanup below,
+    rather than assuming task resolving True already means it happened.
     """
     real_sleep = asyncio.sleep
 
@@ -2296,6 +2588,10 @@ async def test_cancel_pending_move_reaches_a_still_running_call_after_a_sibling_
     connected_api._handle_message("t1")  # accepted - triggers the resend too
 
     assert await asyncio.wait_for(task, timeout=1) is True
+    # This call's own token is cleaned up by the detached resend task
+    # spawned above, not by control_blind_with_retry()'s own `finally` any
+    # more - see this test's own docstring.
+    await connected_api.hass.async_block_till_done()
     assert connected_api._moves_in_progress == {"ABCDEF": {sibling_token}}
     assert "ABCDEF" not in connected_api._move_cancel_requested
 
@@ -2383,6 +2679,10 @@ async def test_a_fresh_call_is_unaffected_by_a_stale_cancellation(
     connected_api._handle_message("t1")  # accepted - triggers both resends too
 
     assert await asyncio.wait_for(task, timeout=1) is True
+    # The two resends now run in their own detached task (see
+    # _send_move_resends_and_cleanup()) rather than inline before this
+    # same return - wait for it before counting writes.
+    await connected_api.hass.async_block_till_done()
     assert len(written(connected_api)) == 3  # primary write + its two resends
 
     # The sibling's own stale cancellation is untouched by any of this -

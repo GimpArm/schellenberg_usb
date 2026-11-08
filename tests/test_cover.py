@@ -1635,28 +1635,66 @@ async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
     assert cover._move_start_position is not None
 
 
-async def test_position_loop_stops_early_to_compensate_stop_latency(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fast blind's stop must fire before the literal target, not at it.
+class _LoopKeptRunning(Exception):
+    """Marks that the position loop survived a pass without stopping.
 
-    Companion to test_position_loop_stops_at_a_partial_target above: that
-    test's default 60s travel time makes the latency-compensation lead
-    (MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS /
-    travel_time * 100, ~0.8 points - see stop_lead_percent's own comment
-    in _async_position_update_loop() for the derivation) too small to
-    tell apart from the uncompensated boundary by itself. Here a short,
-    5s close travel time makes the lead a much larger (proportionally)
-    ~10 points, so a position estimate that has only reached 25% (still
-    well short of the literal 20% target) is enough to trigger the stop -
-    proving the comparison is actually against `target + lead`, not
-    `target`.
+    Used by test_position_loop_does_not_stop_early_on_a_short_uncontended_leg
+    and test_position_loop_does_not_stop_before_the_compensated_lead below
+    to end the loop once it has proven the point, instead of letting it
+    spin forever. Deliberately not asyncio.CancelledError and deliberately
+    not delivered through a real task.cancel(): both of those were tried
+    here first and both crashed the pytest-xdist worker running this test
+    in real CI - first as an "ERROR at teardown ... CancelledError", and
+    after switching to a genuine task.cancel() on a real
+    asyncio.ensure_future() task, as an unrecoverable "[gw3] node down:
+    Not properly terminated" with no traceback at all. Either way,
+    something about asyncio's own cancellation machinery interacting
+    with a real, long asyncio.sleep() and this suite's thread-based
+    pytest-timeout does not survive cleanly in that environment. An
+    ordinary exception type sidesteps all of that: the loop's own
+    `except asyncio.CancelledError` does not catch it, there is no Task
+    object to cancel or reap, and no real sleep ever happens, so nothing
+    is left for asyncio, Home Assistant's task bookkeeping, or the test
+    timeout watchdog to mishandle.
     """
 
-    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
-        return None
 
-    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+async def test_position_loop_does_not_stop_early_on_a_short_uncontended_leg(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short leg's own travel time must no longer inflate the lead.
+
+    Replaces this test's own former self (named ..._stops_early_to_
+    compensate_stop_latency), which proved the opposite: that a short,
+    5s close travel time turned the old ~0.5s uncontended baseline
+    (MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS) into
+    a disproportionately large ~10-point lead, large enough that a
+    position estimate of 25% - still 5 points short of the literal 20%
+    target - satisfied the compensated threshold and fired the stop
+    early. That was the same mechanism as the separately-reported
+    Küchenrolladen 92%/4%-undershoot/dashboard-sluggishness bug, just on
+    the intermediate-target side of it instead of the full-travel side -
+    see stop_lead_percent's own comment in _async_position_update_loop()
+    for the shared root cause and why the uncontended baseline is now
+    zeroed outright rather than merely recomputed. Uncontended, the lead
+    is now exactly 0 regardless of how short the travel time is, so this
+    same 25% estimate must no longer satisfy "<=20": the loop has to
+    keep waiting for the estimate to actually reach the literal target
+    instead, proving short legs no longer get an inflated lead at all.
+    """
+
+    sleep_calls = 0
+
+    async def counting_sleep(*_args: object, **_kwargs: object) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            # See _LoopKeptRunning's own docstring above for why this is
+            # how this suite ends a loop proven not to stop, rather than
+            # a real cancellation.
+            raise _LoopKeptRunning
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 5.0})
@@ -1669,42 +1707,12 @@ async def test_position_loop_stops_early_to_compensate_stop_latency(
     cover._attr_current_cover_position = 30
     cover._target_position = 20
 
-    await cover._async_position_update_loop()
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
 
-    # Same reasoning as test_position_loop_stops_at_a_partial_target above.
-    api.cancel_pending_move.assert_called_once_with(cover._command_device_id)
-    api.control_blind_stop.assert_awaited_once_with(
-        cover._command_enum, device_id=cover._command_device_id
-    )
-    # The entity still reports having reached the *requested* target, not
-    # the earlier point the stop was actually sent at - compensation is
-    # about when the stop command goes out, not what position is recorded.
-    assert cover._attr_current_cover_position == 20
-    assert cover._target_position is None
-    assert cover._attr_is_closing is False
-
-
-class _LoopKeptRunning(Exception):
-    """Marks that the position loop survived a pass without stopping.
-
-    Used by test_position_loop_does_not_stop_before_the_compensated_lead
-    below to end the loop once it has proven the point, instead of
-    letting it spin forever. Deliberately not asyncio.CancelledError and
-    deliberately not delivered through a real task.cancel(): both of
-    those were tried here first and both crashed the pytest-xdist worker
-    running this test in real CI - first as an "ERROR at teardown ...
-    CancelledError", and after switching to a genuine task.cancel() on a
-    real asyncio.ensure_future() task, as an unrecoverable "[gw3] node
-    down: Not properly terminated" with no traceback at all. Either way,
-    something about asyncio's own cancellation machinery interacting
-    with a real, long asyncio.sleep() and this suite's thread-based
-    pytest-timeout does not survive cleanly in that environment. An
-    ordinary exception type sidesteps all of that: the loop's own
-    `except asyncio.CancelledError` does not catch it, there is no Task
-    object to cancel or reap, and no real sleep ever happens, so nothing
-    is left for asyncio, Home Assistant's task bookkeeping, or the test
-    timeout watchdog to mishandle.
-    """
+    api.control_blind_stop.assert_not_awaited()
+    api.cancel_pending_move.assert_not_called()
+    assert cover._target_position == 20
 
 
 async def test_position_loop_does_not_stop_before_the_compensated_lead(
@@ -1712,16 +1720,16 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
 ) -> None:
     """The early trigger must not fire any earlier than the compensated lead.
 
-    10s close travel time, uncontended: the lead (MOVE_COMMAND_EXTRA_
-    RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS / travel_time * 100 -
-    see stop_lead_percent's own comment in _async_position_update_loop()
-    for the derivation) is 0.5/10*100 = 5 points, putting the threshold
-    at target(20) + 5 = 25. The estimate (30%) is still outside that -
-    above it, since this is a close - so the loop must keep waiting
-    rather than stopping prematurely. Same fixture as test_position_
-    loop_widens_the_stop_lead_when_the_move_lock_is_busy below,
-    uncontended, to show the contrast: there, the same 30% estimate
-    *does* satisfy that test's own widened, contended threshold.
+    10s close travel time, uncontended: the lead (stop_latency_seconds /
+    travel_time * 100 - see stop_lead_percent's own comment in
+    _async_position_update_loop() for the derivation) is 0.0/10*100 = 0,
+    putting the threshold at the literal target(20) alone. The estimate
+    (30%) is still outside that - above it, since this is a close - so
+    the loop must keep waiting rather than stopping prematurely. Same
+    fixture as test_position_loop_widens_the_stop_lead_when_the_move_
+    lock_is_busy below, uncontended, to show the contrast: there, the
+    same 30% estimate *does* satisfy that test's own widened, contended
+    threshold.
     """
 
     sleep_calls = 0
@@ -1775,15 +1783,15 @@ async def test_position_loop_widens_the_stop_lead_when_the_move_lock_is_busy(
     Exact same fixture as test_position_loop_does_not_stop_before_the_
     compensated_lead above - 10s close travel, estimate stuck at 30%,
     target 20 - which that test used to prove the plain, uncontended
-    lead (5 points, threshold 25) does *not* yet cover 30. The only
-    difference here is api.move_lock_busy=True: the lead widens to
-    include one more STOP_COMMAND_LATENCY_SECONDS on top of the same
-    baseline (0.5 + 1.2 = 1.7s), to 1.7/10*100 = 17 points (threshold
-    target(20) + 17 = 37), which 30 *does* satisfy - proving the loop
-    actually reads move_lock_busy and widens the lead for it, rather
-    than ignoring it or always capping at MAX_STOP_LEAD_PERCENT
-    regardless. Real-log motivation: see move_lock_busy's own comment in
-    api.py.
+    lead (now 0, threshold the literal target(20) alone) does *not* yet
+    cover 30. The only difference here is api.move_lock_busy=True: the
+    lead widens to include one STOP_COMMAND_LATENCY_SECONDS on top of
+    that same, now-zeroed uncontended baseline (0.0 + 1.2 = 1.2s), to
+    1.2/10*100 = 12 points (threshold target(20) + 12 = 32), which 30
+    *does* satisfy - proving the loop actually reads move_lock_busy and
+    widens the lead for it, rather than ignoring it or always capping at
+    MAX_STOP_LEAD_PERCENT regardless. Real-log motivation: see
+    move_lock_busy's own comment in api.py.
     """
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
@@ -1818,16 +1826,21 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
     (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
     - but unlike that calculation, whose final position *is* clamped to
     [0, 100], stop_lead_percent itself used to carry no matching ceiling.
+    Exercised here with api.move_lock_busy=True: the uncontended baseline
+    is now zeroed outright (see stop_lead_percent's own comment in
+    _async_position_update_loop()), so it can no longer produce a lead
+    needing capping however short travel_time_for_lead is - only the
+    contended term (STOP_COMMAND_LATENCY_SECONDS) can still do that now.
     A 0.2s close time - clearly outside anything a real shutter reports,
     but exactly the kind of corrupt/legacy config value that floor exists
-    for - makes the raw lead (MOVE_COMMAND_EXTRA_RESENDS *
-    MOVE_COMMAND_RESEND_DELAY_SECONDS / 0.2 * 100) = 250 points: more
-    than the entire 0-100 range. Uncapped, target(30) + 250 = 280 is
-    satisfied by any position at all, so the loop used to fire its stop
-    the instant it was entered, however far from 30 the blind actually
-    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane
-    80: a position of 85 - the blind has barely started closing from 100
-    - must not satisfy "85 <= 80" and must not stop yet.
+    for - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 0.2 * 100)
+    = 600 points: far more than the entire 0-100 range. Uncapped,
+    target(30) + 600 = 630 is satisfied by any position at all, so the
+    loop would fire its stop the instant it was entered, however far
+    from 30 the blind actually was. Capped at MAX_STOP_LEAD_PERCENT (50),
+    the threshold is a sane 80: a position of 85 - the blind has barely
+    started closing from 100 - must not satisfy "85 <= 80" and must not
+    stop yet.
     """
 
     sleep_calls = 0
@@ -1844,6 +1857,7 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
     api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
+    api.move_lock_busy = True
     cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 0.2})
     monkeypatch.setattr(
         cover,
