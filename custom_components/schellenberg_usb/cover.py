@@ -48,7 +48,6 @@ from .const import (
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
-    MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS,
     MAX_STOP_LEAD_PERCENT,
     NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
@@ -548,22 +547,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # for - see its own comment immediately above for why this
         # exists. None exactly when self._pending_auto_stop_since is.
         self._pending_auto_stop_target: int | None = None
-        # Set to a fresh asyncio.Event() by async_stop_cover() right
-        # before it calls control_blind_stop(), and back to None once
-        # that method is done waiting on it (either way: motor-confirmed
-        # or timed out) - see MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_
-        # SECONDS's own comment in const.py for what this closes and
-        # why it is scoped to the stop side only. _handle_event()'s own
-        # EVENT_STOPPED branch sets it, unconditionally, whenever this
-        # entity's primary status identity reports a stop - from *any*
-        # cause, not only a manual one - which is fine: by the time
-        # async_stop_cover() is the one awaiting it, a stop frame for
-        # this same device arriving for some other reason still means
-        # the motor is now genuinely stopped, which is exactly the fact
-        # being confirmed. None the rest of the time, so that branch has
-        # nothing to do with the ordinary auto-stop/remote-press cases
-        # where nothing is waiting on it.
-        self._pending_manual_stop_confirmation: asyncio.Event | None = None
 
     @property
     def available(self) -> bool:
@@ -1135,15 +1118,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # control_blind_exclusive() instead), so this adds nothing to
             # that flow beyond a guaranteed no-op check.
             self._api.cancel_pending_move(self._command_device_id)
-            # Also unconditional, same reasoning as cancel_pending_move()
-            # immediately above: whoever (if anyone) is awaiting this
-            # entity's own stop confirmation - only ever async_stop_
-            # cover(), see self._pending_manual_stop_confirmation's own
-            # comment in __init__ - learns about it from *whatever*
-            # caused this STOPPED echo, not only a manual stop. A no-op
-            # the rest of the time, when nothing is waiting (None).
-            if self._pending_manual_stop_confirmation is not None:
-                self._pending_manual_stop_confirmation.set()
             previous_position = self._attr_current_cover_position
             self._position_source_kind = "primary status"
             self._position_confirmed_since_restart = True
@@ -2606,35 +2580,32 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         CONFIRMED only ever meant the stick accepted the write - motor_
         result stays unknown either way, same gap STOP_COMMAND_EXTRA_
-        RESENDS's own comment in const.py already describes. On top of
-        that, this now additionally waits - briefly, see MANUAL_STOP_
-        MOTOR_CONFIRMATION_GRACE_SECONDS's own comment in const.py - for
-        this same blind's own primary-identity SS status-frame to echo
-        the stop back through _handle_event()'s EVENT_STOPPED branch,
-        which sets self._pending_manual_stop_confirmation the instant it
-        runs. When that frame arrives in time, _handle_event() has by
-        then already done the complete, more-authoritative update itself
-        (position_source_kind, _update_position(), tracking torn down,
-        its own _record_position_update(status="confirmed")) - so this
-        method does nothing further for that case beyond publishing state
-        and logging which path was taken. On timeout - no frame, most
-        plausibly real RF interference rather than any genuine failure -
-        this falls through to the stick-ack-only handling below that
-        existed before this wait did, so a dropped motor echo can never
-        hang or skip a command, only cost this one extra piece of
-        confidence - except that it first re-checks, the same way
-        async_open_cover()/async_close_cover() already re-check their own
-        snapshots after their own awaits (see _has_live_tracking_in_
-        direction()'s docstring), whether a newer open/close call has
-        already taken this device over in the meantime (see was_opening_
-        before_stop/was_closing_before_stop below and the fallback
-        branch's own comment) - real RF interference is not the only way
-        this wait can time out, and the two are indistinguishable from
-        inside it. #226/#227: without that re-check, a stop whose own
-        echo lost the shared radio to a newer command's retransmissions -
-        exactly what reversing direction quickly enough to still be
-        inside this grace period causes - clobbered that newer command's
-        state once this wait finally gave up on it.
+        RESENDS's own comment in const.py already describes. Between
+        2026-11-07 and 2026-11-08 this additionally waited - briefly -
+        for this same blind's own primary-identity SS status-frame to
+        independently echo the stop back, on top of the stick's own
+        accept. Reverted at the project owner's own explicit request: in
+        real-world use that extra wait was not reliable enough to be
+        worth the race window it opened (the same window was_opening_
+        before_stop/was_closing_before_stop below, and the #226/#227
+        fallback re-check that reads them, were added to guard) -
+        control_blind_stop()'s own CONFIRMED/UNCONFIRMED/FAILED
+        distinction is unaffected by this revert and still reports
+        exactly as honestly as it did while the extra wait existed; only
+        the independent motor-echo wait itself, and the matching skip-
+        remaining-resends check in control_blind_stop()'s own resend loop
+        (api.py), are gone.
+
+        was_opening_before_stop/was_closing_before_stop, and the fallback
+        branch's own re-check against them a little further down, stay in
+        place even without that extra wait: control_blind_stop() above is
+        still itself a genuine suspension point - its own lock/transmitter-
+        idle/ack waits, see that method's own docstring in api.py - during
+        which a different, newer async_open_cover()/async_close_cover()
+        call can still start for this same device and claim it before this
+        call resumes. Narrower than the window the removed wait used to
+        leave open, but not a zero one, so the #226/#227 guard (below)
+        keeps its job.
 
         The StopOutcome.FAILED branch, just below, needed an analogous
         re-check of its own: previous_target_position is a snapshot taken
@@ -2665,20 +2636,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
         previous_target_position = self._target_position
         self._target_position = None
-        # Created before control_blind_stop() is even called, not after -
-        # that call's own internal waits (lock, transmitter-idle, ack) are
-        # genuine suspension points this task can yield across, during
-        # which the real serial read loop is free to receive and dispatch
-        # this same blind's own STOPPED echo. Creating this any later could
-        # miss exactly that race and wait out the full grace period below
-        # for a frame that, in truth, already arrived.
-        self._pending_manual_stop_confirmation = asyncio.Event()
         # Snapshot which direction (if any) this device was already
-        # reporting before the write and wait below - taken at this same
-        # "before any await" point as self._pending_manual_stop_
-        # confirmation just above, and for the same reason. The fallback
-        # branch near the end of this method (see its own comment there)
-        # compares against this afterwards to recognise when a different,
+        # reporting before the write below - taken at this same "before
+        # any await" point for the same reason as previous_target_
+        # position just above. The fallback branch near the end of this
+        # method (see its own comment there) compares against this
+        # afterwards to recognise when a different,
         # newer async_open_cover()/async_close_cover() call has already
         # taken over this device while this call was suspended below -
         # that newer call sets self._attr_is_opening/self._attr_is_closing
@@ -2713,7 +2676,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # there - restoring previous_target_position on top of it would
             # clobber that newer call's own legitimate target with this
             # stale, now-irrelevant one instead.
-            self._pending_manual_stop_confirmation = None
             if self._target_position is None:
                 self._target_position = previous_target_position
             else:
@@ -2736,58 +2698,17 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 )
             )
 
-        motor_confirmed = False
-        if stop_outcome is StopOutcome.CONFIRMED:
-            # UNCONFIRMED deliberately skips this wait entirely - see this
-            # method's own docstring above for why staying responsive
-            # matters more there than any extra confidence this could add
-            # on top of a stick that never even confirmed the write.
-            wait_started = time.monotonic()
-            try:
-                await asyncio.wait_for(
-                    self._pending_manual_stop_confirmation.wait(),
-                    timeout=MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS,
-                )
-                motor_confirmed = True
-                _LOGGER.debug(
-                    "Device %s: stop additionally confirmed by its own "
-                    "motor status frame after %.3fs",
-                    self._device_name,
-                    time.monotonic() - wait_started,
-                )
-            except TimeoutError:
-                _LOGGER.debug(
-                    "Device %s: no motor status frame confirmed this stop "
-                    "within %.1fs (likely RF interference) - falling back "
-                    "to the stick's own acceptance of the write",
-                    self._device_name,
-                    MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS,
-                )
-        self._pending_manual_stop_confirmation = None
-        if motor_confirmed:
-            # _handle_event()'s own EVENT_STOPPED branch already did the
-            # complete, more-authoritative update by the time the wait
-            # above resolved - see this method's own docstring. Nothing
-            # left to do here except publish whatever state that branch
-            # already set.
-            self.async_write_ha_state()
-            return
-
         if (
             self._attr_is_opening != was_opening_before_stop
             or self._attr_is_closing != was_closing_before_stop
         ):
-            # Regression guard for #226/#227: a different, newer
-            # async_open_cover()/async_close_cover() call already started
-            # for this same device while this call was suspended above
-            # waiting out MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS for
-            # an echo that never came - confirmed from a real debug log
-            # where the user reversed direction (tapped open again)
-            # within that same window, which is also exactly what starved
-            # this stop's own echo of a clear RF channel in the first
-            # place (the newer move's own retransmissions were going out
-            # on the same shared radio at that moment). That newer call
-            # has already set up its own is_opening/is_closing,
+            # Regression guard, originally for #226/#227: a different,
+            # newer async_open_cover()/async_close_cover() call already
+            # started for this same device while this call was still
+            # suspended inside control_blind_stop() above (its own
+            # lock/transmitter-idle/ack waits are genuine suspension
+            # points - see that method's own docstring in api.py). That
+            # newer call has already set up its own is_opening/is_closing,
             # _move_start_time/_move_start_position and tracking task for
             # itself, and - if it has itself already completed - may also
             # already have torn all of that back down again correctly on
@@ -2802,10 +2723,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # Nothing left for this call to do - the newer move already
             # is, or will be, publishing its own correct state.
             _LOGGER.debug(
-                "Device %s: stop confirmation timed out, but a newer "
-                "move already started for this device in the meantime - "
-                "leaving its state alone instead of overwriting it with "
-                "this now-stale stop's own fallback cleanup",
+                "Device %s: a newer move already started for this device "
+                "while this stop command was still in flight - leaving "
+                "its state alone instead of overwriting it with this "
+                "now-stale stop's own fallback cleanup",
                 self._device_name,
             )
             return

@@ -740,22 +740,9 @@ async def test_async_stop_cover_sends_stop_via_control_blind_stop(
     own docstring and test_api.py's tests for control_blind_stop() itself.
     control_blind() must not be called from here any more at all.
     """
-
-    async def _confirmed_with_motor_echo(
-        *_args: object, **_kwargs: object
-    ) -> StopOutcome:
-        # Fires this blind's own motor-echo confirmation immediately, the
-        # common-case real-world timing MANUAL_STOP_MOTOR_CONFIRMATION_
-        # GRACE_SECONDS (const.py) is built around - otherwise this test
-        # would needlessly wait out that real grace period for a frame
-        # nothing here would ever send.
-        assert cover._pending_manual_stop_confirmation is not None
-        cover._pending_manual_stop_confirmation.set()
-        return StopOutcome.CONFIRMED
-
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
-    api.control_blind_stop = AsyncMock(side_effect=_confirmed_with_motor_echo)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
 
     await cover.async_stop_cover()
@@ -784,11 +771,6 @@ async def test_async_stop_cover_cancels_a_pending_move_for_this_device_first(
 
     async def _record_stop(*_args: object, **_kwargs: object) -> StopOutcome:
         call_order.append("stop")
-        # See _confirmed_with_motor_echo's own comment in the test right
-        # above for why this fires the motor echo immediately rather than
-        # leaving this test to wait out the real grace period.
-        assert cover._pending_manual_stop_confirmation is not None
-        cover._pending_manual_stop_confirmation.set()
         return StopOutcome.CONFIRMED
 
     api = MagicMock()
@@ -819,18 +801,8 @@ async def test_async_stop_cover_does_not_itself_wait_for_transmitter_idle(
     fail loudly with a TypeError, not silently pass, if it ever were
     awaited from here.
     """
-
-    async def _confirmed_with_motor_echo(
-        *_args: object, **_kwargs: object
-    ) -> StopOutcome:
-        # See the same helper's own comment in test_async_stop_cover_
-        # sends_stop_via_control_blind_stop above.
-        assert cover._pending_manual_stop_confirmation is not None
-        cover._pending_manual_stop_confirmation.set()
-        return StopOutcome.CONFIRMED
-
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(side_effect=_confirmed_with_motor_echo)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.wait_for_transmitter_idle = AsyncMock(return_value=True)
     cover = _build_cover(hass, api)
 
@@ -934,10 +906,6 @@ async def test_async_stop_cover_clears_target_before_awaiting_control_blind_stop
 
     async def _record_target(*_args: object, **_kwargs: object) -> StopOutcome:
         seen_target_during_call.append(cover._target_position)
-        # See _confirmed_with_motor_echo's own comment in test_async_stop_
-        # cover_sends_stop_via_control_blind_stop above for why.
-        assert cover._pending_manual_stop_confirmation is not None
-        cover._pending_manual_stop_confirmation.set()
         return StopOutcome.CONFIRMED
 
     api = MagicMock()
@@ -952,7 +920,6 @@ async def test_async_stop_cover_clears_target_before_awaiting_control_blind_stop
 
 async def test_async_stop_cover_does_not_cancel_tracking_before_stop_succeeds(
     hass: HomeAssistant,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Tracking must stay live for as long as control_blind_stop() is in flight.
 
@@ -961,20 +928,7 @@ async def test_async_stop_cover_does_not_cancel_tracking_before_stop_succeeds(
     happened reads a stale position under contention - see the test right
     after this one, and async_stop_cover()'s own docstring, for the
     real-hardware numbers this came from.
-
-    Deliberately does not fire this blind's own motor-echo confirmation -
-    see test_async_stop_cover_freezes_position_from_elapsed_time_after_
-    stop_returns's own docstring below for why: the assertions here (tracking
-    actually cancelled, task actually awaited) are exactly the post-await
-    tail behavior the new motor_confirmed early-return path would skip. The
-    grace period is shortened to 0.0 instead, for the same reason as that
-    other test.
     """
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover."
-        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
-        0.0,
-    )
     task = asyncio.ensure_future(asyncio.sleep(100))
     still_live_when_called = False
 
@@ -1016,25 +970,9 @@ async def test_async_stop_cover_freezes_position_from_elapsed_time_after_stop_re
     control_blind_stop()'s own await, before it returns, reproduces that
     gap deterministically: the frozen position must reflect the clock
     *after* the advance, not before it.
-
-    Deliberately does not fire this blind's own motor-echo confirmation
-    (unlike the other CONFIRMED-outcome tests above) - that would take
-    async_stop_cover()'s new motor_confirmed early-return path instead
-    (see its own docstring), skipping the exact post-await _update_
-    position() call this test exists to verify. The grace period itself
-    is shortened to 0.0 instead, via the module-level constant async_
-    stop_cover() reads it from, so the real (not fake-clocked) asyncio.
-    wait_for() for a frame nothing here sends resolves at once rather
-    than genuinely waiting out MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_
-    SECONDS in real wall-clock time.
     """
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover."
-        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
-        0.0,
-    )
 
     async def _delayed_stop(*_args: object, **_kwargs: object) -> StopOutcome:
         # Stands in for a real transmit queued behind another blind's own
@@ -1062,126 +1000,29 @@ async def test_async_stop_cover_freezes_position_from_elapsed_time_after_stop_re
     assert cover._move_start_time is None
 
 
-async def test_async_stop_cover_treats_a_prompt_motor_echo_as_more_authoritative(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A real EVENT_STOPPED echo arriving during control_blind_stop() wins.
-
-    End-to-end test for MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS (see
-    its own comment in const.py): when this blind's own motor genuinely
-    echoes the stop back - here by calling _handle_event(EVENT_STOPPED)
-    for real from inside control_blind_stop()'s own side effect, exactly
-    the path a real "ss...cmd=00" status frame drives in production,
-    not a raw Event.set() shortcut - the resulting position comes from
-    that handler's own, more-authoritative _update_position() call, with
-    status="confirmed" (see _handle_event()'s own _record_position_update
-    call), not from async_stop_cover()'s own fallback read.
-    """
-    clock = _FakeClock(1_000.0)
-    monkeypatch.setattr(time, "monotonic", clock)
-
-    async def _stop_with_real_motor_echo(
-        *_args: object, **_kwargs: object
-    ) -> StopOutcome:
-        # A touch of real RF/processing latency before the motor's own
-        # status frame arrives - comfortably inside MANUAL_STOP_MOTOR_
-        # CONFIRMATION_GRACE_SECONDS' default 2.0s.
-        clock.advance(1.0)
-        cover._handle_event(EVENT_STOPPED)
-        return StopOutcome.CONFIRMED
-
-    api = MagicMock()
-    api.control_blind_stop = AsyncMock(side_effect=_stop_with_real_motor_echo)
-    cover = _build_cover(hass, api)
-    cover._travel_time_close = 50.0
-    cover._attr_is_closing = True
-    cover._attr_current_cover_position = 100
-    cover._move_start_position = 100
-    cover._move_start_time = clock()
-
-    await cover.async_stop_cover()
-
-    # 1.0s elapsed at 50s full travel = 2 percentage points, so 98 - and
-    # specifically from _handle_event()'s own calculation, not a second,
-    # redundant one from async_stop_cover() itself (see its own early
-    # return for the motor-confirmed case).
-    assert cover._attr_current_cover_position == 98
-    assert cover._position_source_kind == "primary status"
-    assert cover._attr_is_closing is False
-    assert cover._pending_manual_stop_confirmation is None
-
-
-async def test_async_stop_cover_falls_back_cleanly_when_no_motor_echo_arrives(
-    hass: HomeAssistant,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """RF interference dropping the motor's own echo must never hang or regress.
-
-    Companion to the test above: control_blind_stop() returns CONFIRMED
-    (the stick accepted the write) but no _handle_event(EVENT_STOPPED)
-    ever follows - standing in for the real-world RF-interference case
-    MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS's own comment in const.py
-    describes. The command must still be fully processed, nothing must
-    hang, and the resulting state must be exactly the stick-ack-only
-    behavior that existed before this feature did.
-    """
-    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover."
-        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
-        0.05,  # keep the test fast - the point is that nothing ever sets it
-    )
-    api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
-    cover = _build_cover(hass, api)
-    cover._travel_time_close = 50.0
-    cover._attr_is_closing = True
-    cover._attr_current_cover_position = 100
-    cover._move_start_position = 100
-    cover._move_start_time = time.monotonic()
-
-    await cover.async_stop_cover()
-
-    assert cover._attr_is_closing is False
-    assert cover._position_source_kind == "HA command"
-    assert cover._pending_manual_stop_confirmation is None
-    assert any(
-        "no motor status frame confirmed this stop" in record.message
-        for record in caplog.records
-    )
-
-
 async def test_async_stop_cover_fallback_leaves_a_racing_retarget_untouched(
     hass: HomeAssistant,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A racing same-direction retarget's own target must survive this fallback.
 
     A third independent review (2026-11-08) of #226/#227 and its own two
-    follow-up fixes found that this general fallback - reached here via a
-    CONFIRMED stop whose own motor echo never arrives, same as the test
-    above - never touches self._target_position, unlike the FAILED and
-    backstop-exhaustion branches fixed elsewhere in this method. On its
-    face that looks like the same staleness hazard, but is deliberately
-    correct: a different, newer async_set_cover_position() call's own
-    synchronous write can land during control_blind_stop()'s own await
-    (simulated here exactly as test_async_stop_cover_fallback_does_not_
-    clobber_a_newer_move does for its own is_opening/is_closing case) and
-    leave self._target_position holding its own, live target - which
-    must come through this fallback's own cleanup completely untouched,
-    not reset to None, since _async_open_cover_body()'s/_async_close_
-    cover_body()'s own is_redundant_resend re-arm (or, on its own write
-    failing instead, its own _preserve_target handling) is what actually
-    resolves it, not this method.
+    follow-up fixes found that this general fallback - reached here via an
+    ordinary CONFIRMED stop - never touches self._target_position, unlike
+    the FAILED and backstop-exhaustion branches fixed elsewhere in this
+    method. On its face that looks like the same staleness hazard, but is
+    deliberately correct: a different, newer async_set_cover_position()
+    call's own synchronous write can land during control_blind_stop()'s
+    own await (simulated here exactly as test_async_stop_cover_fallback_
+    does_not_clobber_a_newer_move does for its own is_opening/is_closing
+    case) and leave self._target_position holding its own, live target -
+    which must come through this fallback's own cleanup completely
+    untouched, not reset to None, since _async_open_cover_body()'s/_async_
+    close_cover_body()'s own is_redundant_resend re-arm (or, on its own
+    write failing instead, its own _preserve_target handling) is what
+    actually resolves it, not this method.
     """
     caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover."
-        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
-        0.05,  # keep the test fast - the point is that nothing ever sets it
-    )
 
     async def _confirmed_while_a_retarget_already_landed(
         *_args: object, **_kwargs: object
@@ -1221,31 +1062,25 @@ async def test_async_stop_cover_fallback_leaves_a_racing_retarget_untouched(
 
 async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
     hass: HomeAssistant,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Regression guard for #226/#227.
 
-    A stop whose own motor echo never arrives - here because, standing in
-    for the real debug log that root-caused this, a different, newer
-    async_open_cover() call for this same device already set its own
-    is_opening/is_closing (its own very first line, no await of its own
-    first) while this call was still suspended waiting out MANUAL_STOP_
-    MOTOR_CONFIRMATION_GRACE_SECONDS - must not fall through to the
-    ordinary stick-ack-only cleanup below once that wait times out: doing
-    so clobbered the newer move's own is_opening/is_closing, move_start_*
-    and tracking task with state meant for the move this stop actually
-    targeted, freezing the dashboard until the next command. The newer
-    move's state (simulated here exactly as test_async_close_cover_skips_
-    reset_for_redundant_resend above does for its own already-in-progress
-    case) must come through this call completely untouched.
+    A stop whose own control_blind_stop() call is still suspended - here
+    because, standing in for the real debug log that root-caused this, a
+    different, newer async_open_cover() call for this same device already
+    set its own is_opening/is_closing (its own very first line, no await
+    of its own first) while this call's own await of control_blind_stop()
+    was still pending - must not fall through to the ordinary stick-ack-
+    only cleanup once that await resolves: doing so clobbered the newer
+    move's own is_opening/is_closing, move_start_* and tracking task with
+    state meant for the move this stop actually targeted, freezing the
+    dashboard until the next command. The newer move's state (simulated
+    here exactly as test_async_close_cover_skips_reset_for_redundant_
+    resend above does for its own already-in-progress case) must come
+    through this call completely untouched.
     """
     caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover."
-        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
-        0.05,  # keep the test fast - the point is that nothing ever sets it
-    )
 
     async def _stop_while_a_newer_open_already_took_over(
         *_args: object, **_kwargs: object
@@ -2849,48 +2684,6 @@ async def test_handle_event_stopped_after_backstop_exhaustion_does_not_error(
     # remote), so the commanded target was never actually reached.
     assert cover._target_position is None
     cover._stop_position_tracking.assert_called_once_with()
-
-
-async def test_handle_event_stopped_sets_the_pending_manual_stop_confirmation(
-    hass: HomeAssistant,
-) -> None:
-    """EVENT_STOPPED must wake up a pending async_stop_cover() wait, if any.
-
-    Unit test for the one line this feature added to this handler - see
-    self._pending_manual_stop_confirmation's own comment in __init__ and
-    MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS's own comment in
-    const.py. async_stop_cover() itself is covered end-to-end elsewhere
-    (test_async_stop_cover_treats_a_prompt_motor_echo_as_more_authoritative
-    in test_cover.py); this isolates just the handler's own side of that
-    wiring.
-    """
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
-    cover._pending_manual_stop_confirmation = asyncio.Event()
-
-    cover._handle_event(EVENT_STOPPED)
-
-    assert cover._pending_manual_stop_confirmation.is_set()
-
-
-async def test_handle_event_stopped_with_no_pending_confirmation_does_not_error(
-    hass: HomeAssistant,
-) -> None:
-    """The ordinary case - nobody waiting - must stay a plain no-op.
-
-    Companion to the test above: an auto-stop-at-target or a remote/
-    Gurtwickler-triggered STOPPED - the overwhelming majority of real
-    STOPPED events - leaves self._pending_manual_stop_confirmation at its
-    default None. Must not raise just because nothing is listening.
-    """
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
-
-    cover._handle_event(EVENT_STOPPED)  # must not raise
-
-    assert cover._pending_manual_stop_confirmation is None
 
 
 async def test_handle_event_stopped_cancels_any_pending_move_for_this_device(
