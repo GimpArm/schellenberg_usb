@@ -2667,3 +2667,46 @@ def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None
         "Die aktuell erfasste Position"
         in _load_step("de", "set_position_manual")["description"]
     )
+
+
+def test_set_position_manual_position_hint_points_to_the_field_above_it() -> None:
+    """Reported from a screenshot (2026-11-08): the data_description added
+    by test_set_position_manual_names_the_selected_blind_by_the_field_too
+    above ("The position shown below is for {selected_blind}.") called the
+    position field "shown below" in every language, but Home Assistant
+    renders a field's own data_description as a caption underneath that
+    field, not above it - visible directly in the reported screenshot,
+    where the Position input (prefilled "47") appears first and this
+    caption right after it. From the caption's own place in that layout,
+    the field it is naming is therefore the one above it, not below -
+    "below" had the direction backwards in all four languages from the day
+    this string was introduced, not just German.
+
+    Corrected "below"/"unten"/"a continuación"/"ci-dessous" to
+    "above"/"oben"/"arriba"/"ci-dessus" - the same directional antonym
+    swapped in every language, with no other wording touched (both
+    "a continuación" and "ci-dessous" remain correct, unrelated, uses
+    elsewhere in es.json/fr.json - e.g. the pairing step's own "press the
+    Pair button below" - so this asserts against the position field's own
+    data_description string specifically, not the file as a whole).
+    """
+    expected_present = {
+        "strings": "shown above",
+        "en": "shown above",
+        "de": "oben angezeigte",
+        "es": "mostrada arriba",
+        "fr": "ci-dessus",
+    }
+    expected_absent = {
+        "strings": "shown below",
+        "en": "shown below",
+        "de": "unten angezeigte",
+        "es": "a continuación",
+        "fr": "ci-dessous",
+    }
+    for language in ("strings", "en", "de", "es", "fr"):
+        position_hint = _load_step(language, "set_position_manual")["data_description"][
+            "position"
+        ]
+        assert expected_present[language] in position_hint, language
+        assert expected_absent[language] not in position_hint, language

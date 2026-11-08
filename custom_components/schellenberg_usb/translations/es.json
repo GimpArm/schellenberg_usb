@@ -156,7 +156,7 @@
             "position": "Posición"
           },
           "data_description": {
-            "position": "La posición mostrada a continuación es para {selected_blind}."
+            "position": "La posición mostrada arriba es para {selected_blind}."
           },
           "submit": "Confirmar posición"
         },
