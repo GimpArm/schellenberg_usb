@@ -42,8 +42,10 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_NAME,
     CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
@@ -54,6 +56,7 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STOPPED,
     SIGNAL_DEVICE_EVENT,
     STATUS_IDENTITY_SOURCE_MANUAL,
+    STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
 )
@@ -547,12 +550,36 @@ async def test_pairing_calibration_choosing_closed_sets_initial_position_closed(
     anywhere in this file - every existing pairing test stops at
     reaching the calibration_close form without submitting it, see
     test_pairing_workflow_names_device_then_starts_calibration above.
+
+    Since the fix routing live calibration through a real status-identity
+    discovery attempt (see async_step_calibration_complete's own comment,
+    options_flow_calibration.py), calibration_complete no longer finishes
+    pairing directly - it now reaches discover_status/confirm_status_
+    discovery first, the same chain test_manual_times_choice_creates_
+    entry_directly already drives for the manual-entry pairing route. Here
+    discovery finds nothing, proving that path still reaches CREATE_ENTRY
+    with everything this test already checked; the positive-discovery case
+    is covered separately by test_live_calibration_pairing_captures_
+    status_identity_via_discovery below.
     """
     entry = _build_hub_entry(hass, connected_api)
     monkeypatch.setattr(
         connected_api,
         "pair_device_and_wait",
         AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": None,
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [],
+            }
+        ),
     )
     result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
     wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
@@ -581,9 +608,20 @@ async def test_pairing_calibration_choosing_closed_sets_initial_position_closed(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
 
 
 async def test_pairing_calibration_choosing_open_sets_initial_position_open(
@@ -595,13 +633,28 @@ async def test_pairing_calibration_choosing_open_sets_initial_position_open(
 
     The open leg now runs last, so the fresh subentry's data should carry
     CONF_INITIAL_POSITION == 100 (fully open) instead of the "closed"
-    choice's 0.
+    choice's 0. Also drives through the new discover_status/confirm_
+    status_discovery detour - see the sibling test's own comment on why
+    that is now part of this path.
     """
     entry = _build_hub_entry(hass, connected_api)
     monkeypatch.setattr(
         connected_api,
         "pair_device_and_wait",
         AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": None,
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [],
+            }
+        ),
     )
     result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
     wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
@@ -630,9 +683,122 @@ async def test_pairing_calibration_choosing_open_sets_initial_position_open(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 100
+
+
+async def test_live_calibration_pairing_captures_status_identity_via_discovery(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a live-calibration pairing must get a real chance at a
+    primary/secondary status identity, same as the manual-entry route
+    already does.
+
+    Before this fix, async_step_calibration_complete() (options_flow_
+    calibration.py) finished a fresh pairing immediately on reaching this
+    step, never once calling async_discover_status_identities() - so every
+    blind paired through live calibration (the "test_motor" -> calibrate
+    route, the one calibration_method_choice's own default/first option
+    leads to) ended up with CONF_SECONDARY_STATUS_IDENTITIES permanently
+    empty and no CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM override at all -
+    reported live, comparing a freshly-paired blind's empty "Zusätzliche
+    Statusidentitäten" field against an older blind's populated one. The
+    two tests above already prove the "discovery finds nothing" case still
+    reaches CREATE_ENTRY correctly; this one is the actual positive case -
+    a real primary and secondary identity, captured and persisted.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": "E3D0A5",
+                    "enum": "08",
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [{"device_id": "7953A7", "enum": "53"}],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_DOWN,
+    )
+    assert result["step_id"] == "calibration_complete"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The command identity (used to send move/stop commands) is unaffected -
+    # still the device/enum pair pair_device_and_wait() returned.
+    assert result["data"][CONF_DEVICE_ID] == DEVICE_ID
+    assert result["data"][CONF_DEVICE_ENUM] == DEVICE_ENUM
+    # The actual point of this fix: a real primary/secondary status
+    # identity, discovered and persisted, instead of staying unset.
+    assert result["data"][CONF_STATUS_DEVICE_ID] == "E3D0A5"
+    assert result["data"][CONF_STATUS_ENUM] == "08"
+    assert (
+        result["data"][CONF_STATUS_IDENTITY_SOURCE]
+        == STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY
+    )
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "7953A7", "enum": "53"}
+    ]
+    # CONF_LAST_CALIBRATION and the travel times calibration_complete()
+    # itself assembled into the stashed data survive the discover_status
+    # detour untouched.
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_LAST_CALIBRATION in result["data"]
 
 
 # ---------------------------------------------------------------------------

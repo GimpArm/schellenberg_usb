@@ -336,6 +336,23 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         # see that constant's own comment in cover.py.
         self._pending_initial_position: int | None = None
         self._pending_invert_direction = False
+        # Set only by CalibrationFlowHandler.async_step_calibration_complete()
+        # (options_flow_calibration.py), for a fresh pairing that went
+        # through *live* calibration rather than async_step_manual_times().
+        # That branch already has every field a finished subentry needs
+        # (open/close time, ending position, CONF_LAST_CALIBRATION, ...)
+        # assembled into its own `data` dict - this fully-built dict is
+        # stashed here rather than rebuilt from this flow's own
+        # `_pending_open_time`/`_pending_close_time`/`_pending_initial_
+        # position` (never populated on *this* object for that route; see
+        # `_pending_data()`'s own assertions) - so it can route through
+        # async_step_discover_status()/async_step_confirm_status_discovery()
+        # for a chance at a real primary/secondary status identity before
+        # finishing, the same as the manual-times route already does,
+        # instead of finishing pairing immediately with no identity
+        # discovery attempted at all. Consumed and reset to None the
+        # moment confirm_status_discovery() uses it.
+        self._pending_finish_data: dict[str, Any] | None = None
         self._pairing_workflow = "pairing"
         # The direction chosen on the test_motor form (see
         # async_step_test_motor()) - "open" or "close" - remembered only so
@@ -434,6 +451,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
         self._pending_secondary_status_identities = []
         self._pending_device_name = None
+        self._pending_finish_data = None
         return await self.async_step_name_device()
 
     @staticmethod
@@ -1574,6 +1592,36 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 data.pop(CONF_STATUS_DEVICE_ID, None)
                 data.pop(CONF_STATUS_ENUM, None)
             return self.async_update_and_abort(entry, subentry, data=data)
+
+        if self._pending_finish_data is not None:
+            # The live-calibration pairing route (CalibrationFlowHandler.
+            # async_step_calibration_complete(), options_flow_calibration.py)
+            # already assembled a complete subentry `data` dict of its own
+            # before routing through here for an identity-discovery
+            # attempt - see `_pending_finish_data`'s own docstring in
+            # __init__. Layer whatever this discovery round found on top
+            # of it (same fields _pending_data() itself would set), rather
+            # than rebuilding `data` from this flow's own
+            # `_pending_open_time`/`_pending_close_time`/`_pending_
+            # initial_position`, which that route never populates.
+            if not self._pending_device_name:
+                return self.async_abort(reason="device_not_found")
+            data = self._pending_finish_data
+            self._pending_finish_data = None
+            data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+            data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                self._pending_secondary_status_identities
+            )
+            if (
+                self._pending_status_device_id is not None
+                and self._pending_status_enum is not None
+            ):
+                data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
+                data[CONF_STATUS_ENUM] = self._pending_status_enum
+            else:
+                data.pop(CONF_STATUS_DEVICE_ID, None)
+                data.pop(CONF_STATUS_ENUM, None)
+            return self._finish_pairing(title=self._pending_device_name, data=data)
 
         if (
             not self._pending_device_name
