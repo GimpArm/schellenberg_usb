@@ -151,12 +151,9 @@
         },
         "set_position_manual": {
           "title": "Establecer posición de la persiana manualmente",
-          "description": "Establezca la posición actual para {selected_blind} sin mover la persiana. Posición registrada actualmente: {current_position}.",
+          "description": "Establezca la posición actual para {selected_blind} sin mover la persiana. Posición registrada actualmente: {current_position}. La posición mostrada a continuación es para {selected_blind}.",
           "data": {
             "position": "Posición"
-          },
-          "data_description": {
-            "position": "La posición mostrada arriba es para {selected_blind}."
           },
           "submit": "Confirmar posición"
         },

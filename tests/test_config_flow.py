@@ -2646,67 +2646,64 @@ def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None
     """Reported from a screenshot: on a hub with several blinds, the
     position field's own pre-filled value gave no hint by itself which
     blind it belonged to - only the step's top-level description said so,
-    and that line is easy to have already scrolled past. A new
-    data_description under the "position" field repeats that same
-    {selected_blind} name right next to the field itself, in every
-    language - reusing the placeholder async_step_set_position_manual()
-    already fills via its existing description_placeholders, so no
-    config_flow.py change was needed for this to update per blind at
-    render time.
+    and that line is easy to have already scrolled past. Three fixes, all
+    from the same day, settled this string's final shape:
+
+    First, a data_description was added under the "position" field,
+    repeating that same {selected_blind} name right next to the field
+    itself, in every language, worded "The position shown below is for
+    {selected_blind}." (and each language's own equivalent) - reusing the
+    placeholder async_step_set_position_manual() already fills via its
+    existing description_placeholders.
+
+    Second, a follow-up screenshot showed that wording had the direction
+    backwards in every language: Home Assistant renders a field's own
+    data_description as a caption *underneath* that field, not above it,
+    so "shown below" should have read "shown above" from the start.
+    Corrected to "shown above"/"oben angezeigte"/"mostrada arriba"/
+    "ci-dessus" - briefly, before the third fix below reverted it again.
+
+    Third, rather than keep fighting the above/below wording against a
+    caption position neither of the first two fixes actually controlled,
+    the sentence itself was moved to *before* the field instead - the one
+    place in this form that already renders above it, the step's own
+    top-level `description`, which already uses this same {selected_blind}
+    placeholder successfully for its own first sentence. The sentence was
+    re-reverted to its original "below"/"unten"/"a continuación"/
+    "ci-dessous" wording (correct again now that it precedes the field)
+    and appended as `description`'s own final sentence; `data_description`
+    was removed for this step entirely, rather than left behind holding an
+    empty object once "position" was its only key. Being the very last
+    thing read before the field itself, immediately adjacent to it exactly
+    as the original real-world report asked for, no caption below the
+    field is needed any more either - and no config_flow.py change was
+    needed for any of the three fixes, since description_placeholders
+    already reaches both `description` and `data_description` alike (the
+    second screenshot incidentally confirmed this for `data_description`
+    too, rendering {selected_blind} as the real device name
+    "Badezimmerrolladen" rather than a literal, unsubstituted placeholder -
+    moot for this field's own final shape, which no longer uses
+    data_description at all, but settled for any future use of it
+    elsewhere in this integration).
 
     The German description text separately dropped its leading article on
     the second sentence ("Aktuell erfasste Position" instead of "Die
-    aktuell erfasste Position") - also from that screenshot, and also
+    aktuell erfasste Position") - also from the first screenshot, and also
     fixed here; "en"/"es"/"fr" already read naturally without one.
     """
+    expected_final_sentence = {
+        "strings": "The position shown below is for {selected_blind}.",
+        "en": "The position shown below is for {selected_blind}.",
+        "de": "Die unten angezeigte Position ist für {selected_blind}.",
+        "es": "La posición mostrada a continuación es para {selected_blind}.",
+        "fr": "La position indiquée ci-dessous concerne {selected_blind}.",
+    }
     for language in ("strings", "en", "de", "es", "fr"):
         step = _load_step(language, "set_position_manual")
-        assert "{selected_blind}" in step["data_description"]["position"], language
+        assert step["description"].endswith(expected_final_sentence[language]), language
+        assert "data_description" not in step, language
 
     assert (
         "Die aktuell erfasste Position"
         in _load_step("de", "set_position_manual")["description"]
     )
-
-
-def test_set_position_manual_position_hint_points_to_the_field_above_it() -> None:
-    """Reported from a screenshot (2026-11-08): the data_description added
-    by test_set_position_manual_names_the_selected_blind_by_the_field_too
-    above ("The position shown below is for {selected_blind}.") called the
-    position field "shown below" in every language, but Home Assistant
-    renders a field's own data_description as a caption underneath that
-    field, not above it - visible directly in the reported screenshot,
-    where the Position input (prefilled "47") appears first and this
-    caption right after it. From the caption's own place in that layout,
-    the field it is naming is therefore the one above it, not below -
-    "below" had the direction backwards in all four languages from the day
-    this string was introduced, not just German.
-
-    Corrected "below"/"unten"/"a continuación"/"ci-dessous" to
-    "above"/"oben"/"arriba"/"ci-dessus" - the same directional antonym
-    swapped in every language, with no other wording touched (both
-    "a continuación" and "ci-dessous" remain correct, unrelated, uses
-    elsewhere in es.json/fr.json - e.g. the pairing step's own "press the
-    Pair button below" - so this asserts against the position field's own
-    data_description string specifically, not the file as a whole).
-    """
-    expected_present = {
-        "strings": "shown above",
-        "en": "shown above",
-        "de": "oben angezeigte",
-        "es": "mostrada arriba",
-        "fr": "ci-dessus",
-    }
-    expected_absent = {
-        "strings": "shown below",
-        "en": "shown below",
-        "de": "unten angezeigte",
-        "es": "a continuación",
-        "fr": "ci-dessous",
-    }
-    for language in ("strings", "en", "de", "es", "fr"):
-        position_hint = _load_step(language, "set_position_manual")["data_description"][
-            "position"
-        ]
-        assert expected_present[language] in position_hint, language
-        assert expected_absent[language] not in position_hint, language

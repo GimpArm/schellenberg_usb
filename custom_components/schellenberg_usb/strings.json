@@ -151,12 +151,9 @@
         },
         "set_position_manual": {
           "title": "Set shutter position manually",
-          "description": "Set the current position for {selected_blind} without moving the shutter. Currently recorded position: {current_position}.",
+          "description": "Set the current position for {selected_blind} without moving the shutter. Currently recorded position: {current_position}. The position shown below is for {selected_blind}.",
           "data": {
             "position": "Position"
-          },
-          "data_description": {
-            "position": "The position shown above is for {selected_blind}."
           },
           "submit": "Confirm position"
         },

@@ -151,12 +151,9 @@
         },
         "set_position_manual": {
           "title": "Définir la position du volet manuellement",
-          "description": "Définissez la position actuelle pour {selected_blind} sans déplacer le volet. Position actuellement enregistrée : {current_position}.",
+          "description": "Définissez la position actuelle pour {selected_blind} sans déplacer le volet. Position actuellement enregistrée : {current_position}. La position indiquée ci-dessous concerne {selected_blind}.",
           "data": {
             "position": "Position"
-          },
-          "data_description": {
-            "position": "La position indiquée ci-dessus concerne {selected_blind}."
           },
           "submit": "Confirmer la position"
         },
