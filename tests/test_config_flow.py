@@ -885,6 +885,120 @@ async def test_calibration_timeout_manual_choice_creates_entry(
     assert result["data"][CONF_CLOSE_TIME] == 18.0
 
 
+async def test_calibration_timeout_manual_choice_prefills_the_leg_already_measured(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike test_calibration_timeout_manual_choice_creates_entry above
+    (a start-timeout, before either leg ever measures anything),
+    this drives the open leg to a real completion first, then times out
+    the close leg's own start and escapes to manual entry - the scenario
+    CalibrationFlowHandler.recorded_leg_times() (options_flow_
+    calibration.py) exists for: async_step_manual_times() (config_flow.py)
+    must pre-fill the open leg's own already-measured time instead of
+    asking the person to re-enter or guess a number Home Assistant
+    already knows precisely. Proven here by omitting CONF_OPEN_TIME_
+    SECONDS from the submitted user_input entirely - exactly how a real
+    flow manager receives a numeric field nobody touched - and relying on
+    the schema's own default to fill it in: before this fix, this exact
+    omission would have been rejected (that field had no default at all,
+    so voluptuous would re-show this same form with a validation error
+    instead of proceeding).
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": DEVICE_ID,
+                    "enum": DEVICE_ENUM,
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    # Drive the open leg to a real, measured completion - see
+    # _drive_calibration_leg's own docstring. _open_time ends up floored
+    # at 0.1s (CalibrationFlowHandler's own max(elapsed, 0.1), mirroring
+    # test_full_open_and_close_legs_reach_the_summary_with_measured_times'
+    # own reasoning for not asserting a tighter bound than that floor on
+    # a real, unmocked elapsed-time measurement).
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    assert result["step_id"] == "calibration_close_instruction"
+
+    # Now the close leg's own start-timeout - escape to manual entry
+    # instead of retrying.
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_timeout_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    assert result["step_id"] == "manual_times"
+
+    # CONF_OPEN_TIME_SECONDS deliberately omitted - the whole point being
+    # tested - alongside a required field that was never auto-filled
+    # (CONF_CLOSE_TIME_SECONDS, since the close leg never ran) and the
+    # blind's current position (now open, having just finished the open
+    # leg - not the "closed" answer given at calibration_close above,
+    # which only ever described the state *before* this run started).
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_CLOSE_TIME_SECONDS: 12.0,
+            "initial_state": "open",
+        },
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INITIAL_POSITION] == 100
+    assert result["data"][CONF_CLOSE_TIME] == 12.0
+    # The pre-filled default, not a missing-field error and not some
+    # unrelated placeholder - the real, measured open leg's own time,
+    # floored at 0.1s like any other real elapsed-time measurement.
+    assert result["data"][CONF_OPEN_TIME] >= 0.1
+    assert result["data"][CONF_OPEN_TIME] < 1.0
+
+
 async def test_choosing_test_motor_runs_motor_test_sequence_before_calibration_close(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,

@@ -1246,3 +1246,24 @@ async def test_calibration_complete_step_aborts_without_recorded_times() -> None
     await handler.async_step_calibration_complete(None)
 
     flow.async_abort.assert_called_once_with(reason="device_not_found")
+
+
+def test_recorded_leg_times_reflects_whichever_leg_has_actually_completed() -> None:
+    """recorded_leg_times() is what async_step_manual_times() (config_flow.py)
+    calls to pre-fill whichever leg already has a real, measured value
+    when the person abandons a live calibration for manual entry after
+    the *other* leg's own timeout (2026-11-08, found and fixed once the
+    calibration_timeout_choice fix made that path reachable for the
+    first time - see that method's own docstring). Covers both legs,
+    not just open, since either can be the one already measured
+    depending on which initial_state choice ran it first.
+    """
+    handler = CalibrationFlowHandler(MagicMock())
+    assert handler.recorded_leg_times() == (None, None)
+
+    handler._open_time = 8.45
+    assert handler.recorded_leg_times() == (8.45, None)
+
+    handler._open_time = None
+    handler._close_time = 8.90
+    assert handler.recorded_leg_times() == (None, 8.90)

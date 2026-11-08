@@ -726,6 +726,20 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         pairing with this field just silently defaulted to "closed" would
         be exactly the kind of unverified, possibly-wrong position this
         whole CONF_INITIAL_POSITION fallback exists to avoid.
+
+        Reachable two ways: fresh, via calibration_method_choice, before
+        any live attempt has run - neither leg has a recorded time yet;
+        or mid-calibration, via calibration_timeout_choice, after one leg
+        already completed for real and only the *other* one timed out.
+        In that second case, whichever leg CalibrationFlowHandler.
+        recorded_leg_times() shows as already measured pre-fills that
+        field below instead of making the person re-enter or guess a
+        number Home Assistant already knows precisely - found and fixed
+        at the project owner's own request (2026-11-08), after the
+        calibration_timeout_choice fix above made this path reachable
+        for the first time. Each field stays fully editable regardless -
+        a real measured leg is still just a default, not forced, in case
+        the person has reason to distrust that particular run.
         """
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -744,11 +758,25 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 self._pending_initial_position = pending_initial_position
                 return await self.async_step_discover_status()
 
+        recorded_open_time, recorded_close_time = (
+            self._get_calibration_handler().recorded_leg_times()
+        )
+        open_time_key: vol.Marker = (
+            vol.Required(CONF_OPEN_TIME_SECONDS, default=round(recorded_open_time, 2))
+            if recorded_open_time is not None
+            else vol.Required(CONF_OPEN_TIME_SECONDS)
+        )
+        close_time_key: vol.Marker = (
+            vol.Required(CONF_CLOSE_TIME_SECONDS, default=round(recorded_close_time, 2))
+            if recorded_close_time is not None
+            else vol.Required(CONF_CLOSE_TIME_SECONDS)
+        )
+
         return self.async_show_form(
             step_id="manual_times",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_OPEN_TIME_SECONDS): selector.NumberSelector(
+                    open_time_key: selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,
                             step=0.1,
@@ -756,7 +784,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),
-                    vol.Required(CONF_CLOSE_TIME_SECONDS): selector.NumberSelector(
+                    close_time_key: selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,
                             step=0.1,

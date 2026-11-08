@@ -285,6 +285,21 @@ class CalibrationFlowHandler:
     def set_selected_device(self, device: dict[str, Any]) -> None:
         self._selected_device = device
 
+    def recorded_leg_times(self) -> tuple[float | None, float | None]:
+        """Return (open_time, close_time) as actually measured so far.
+
+        Used by async_step_manual_times() (config_flow.py) to pre-fill
+        whichever leg already has a real, measured value when the person
+        abandons a live calibration for manual entry after the *other*
+        leg's own timeout, instead of asking them to re-enter or guess a
+        number Home Assistant already knows precisely - see that
+        method's own docstring. At most one of the two is ever non-None
+        here: both becoming set means the live run already completed and
+        moved on to async_step_calibration_complete() instead of ever
+        offering manual entry again.
+        """
+        return self._open_time, self._close_time
+
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
