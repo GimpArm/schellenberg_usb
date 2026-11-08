@@ -151,7 +151,7 @@
         },
         "set_position_manual": {
           "title": "Die Rollladenposition manuell setzen",
-          "description": "Die aktuelle Position für {selected_blind} festlegen, ohne den Rollladen zu bewegen. Die aktuell erfasste Position: {current_position}. Die unten angezeigte Position ist für {selected_blind}.",
+          "description": "Die aktuelle Position für {selected_blind} festlegen, ohne den Rollladen zu bewegen. Die aktuell erfasste Position: {current_position}. Die unten angezeigte Position ist für {selected_blind}.",
           "data": {
             "position": "Position"
           },

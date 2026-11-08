@@ -2690,11 +2690,33 @@ def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None
     the second sentence ("Aktuell erfasste Position" instead of "Die
     aktuell erfasste Position") - also from the first screenshot, and also
     fixed here; "en"/"es"/"fr" already read naturally without one.
+
+    Fourth (2026-11-08, a later real-world report, same final sentence):
+    with a long enough {selected_blind} name and/or a narrow enough dialog,
+    the German final sentence's own leading "Die unten" wrapped across two
+    lines on its own - "Die" ending one line, "unten angezeigte Position
+    ist für <name>." starting the next - reading as if "Die" belonged to
+    the sentence above it rather than to "unten" right after it. Joined
+    with U+00A0 (a non-breaking space) between exactly those two words, so
+    a browser can still wrap the rest of the sentence normally but can no
+    longer split this specific pair - the same narrow, surgical fix the
+    report's own wording asked for ("die zwei Wörter 'Die unten' sollen
+    nur eine Zeile runter zu den anderen Wörtern"), without reopening the
+    sentence-boundary/caption-position questions the first three fixes
+    above already settled. "en"/"es"/"fr" start their own final sentence
+    differently ("The position"/"La posición"/"La position", not a bare
+    two-word adverbial lead-in) and were never reported to have this
+    problem, so none of the three were touched.
     """
     expected_final_sentence = {
         "strings": "The position shown below is for {selected_blind}.",
         "en": "The position shown below is for {selected_blind}.",
-        "de": "Die unten angezeigte Position ist für {selected_blind}.",
+        # The space between "Die" and "unten" below is U+00A0 (a
+        # non-breaking space), matching the production string exactly -
+        # see the fourth fix in this test's own docstring above. RUF001
+        # flags it as visually ambiguous against a plain space, which is
+        # exactly why it needs this comment, but it is not a mistake.
+        "de": "Die unten angezeigte Position ist für {selected_blind}.",  # noqa: RUF001
         "es": "La posición mostrada a continuación es para {selected_blind}.",
         "fr": "La position indiquée ci-dessous concerne {selected_blind}.",
     }
