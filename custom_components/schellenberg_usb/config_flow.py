@@ -841,21 +841,39 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             status_identity_source=self._pending_status_identity_source,
             invert_direction=self._pending_invert_direction,
         )
-        # Every fresh pairing reaches the same choice now (Issue #78
-        # discussion, 2026-11-07 - see async_step_user()'s own docstring
-        # for why the old "legacy"/"hybrid" branch that used to live here
-        # is gone): calibrate live - which, via the "test_motor" option
-        # below, now also runs the same motor-test confirmation that only
-        # the old "Add device from remote" workflow used to require
-        # before calibrating - or enter travel times directly, with
-        # nothing sent to the motor at all. Offering this choice *before*
-        # committing to a live calibration also keeps Issue #77's own
-        # fix meaningful here: that live calibration can still time out
-        # (CALIBRATION_TIMEOUT, see its own comment in const.py) if the
-        # person doesn't operate the shutter in time, and this upfront
-        # alternative is the first of the two escapes calibration_timeout_
-        # choice's own menu (options_flow_calibration.py) offers if it
-        # does.
+        return await self.async_step_calibration_method_choice()
+
+    async def async_step_calibration_method_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to calibrate live or enter travel times manually.
+
+        Every fresh pairing reaches the same choice now (Issue #78
+        discussion, 2026-11-07 - see async_step_user()'s own docstring
+        for why the old "legacy"/"hybrid" branch that used to live here
+        is gone): calibrate live - which, via the "test_motor" option
+        below, now also runs the same motor-test confirmation that only
+        the old "Add device from remote" workflow used to require
+        before calibrating - or enter travel times directly, with
+        nothing sent to the motor at all. Offering this choice *before*
+        committing to a live calibration also keeps Issue #77's own fix
+        meaningful here: that live calibration can still time out
+        (CALIBRATION_TIMEOUT, see its own comment in const.py) if the
+        person doesn't operate the shutter in time, and this upfront
+        alternative is the first of the two escapes calibration_timeout_
+        choice's own menu (options_flow_calibration.py) offers if it
+        does.
+
+        This needs its own step_id-matching method - unlike a plain
+        delegation target that only ever shows a form - because Home
+        Assistant's flow manager validates every result's step_id
+        against an async_step_<id> method on the handler, even for a
+        menu result; async_step_reconfigure()/async_step_developer_
+        tools() just below rely on the same self-referential pattern.
+        Delegated into from async_step_name_device() once a device has
+        just been named, and shown again unchanged if the flow is ever
+        resumed on this step.
+        """
         return self.async_show_menu(
             step_id="calibration_method_choice",
             menu_options=["test_motor", "manual_times"],
