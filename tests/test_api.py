@@ -1446,7 +1446,7 @@ async def test_handle_connection_lost_cancels_a_still_sleeping_resend_task(
     assert len(connected_api._moves_in_progress.get("ABCDEF", ())) == 1
 
     connected_api.handle_connection_lost(
-        connected_api._protocol,
+        connected_api._protocol,  # type: ignore[arg-type]
         Exception("gone"),
     )
 
