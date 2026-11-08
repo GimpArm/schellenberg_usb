@@ -2097,6 +2097,55 @@ async def test_set_cover_position_to_an_endstop_confirms_position_after_a_restar
     assert cover._attr_is_closing is False
 
 
+async def test_set_cover_position_to_an_endstop_also_confirms_when_opening(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the test above, for the opening side.
+
+    Added on the project owner's own direct follow-up question of whether
+    both directions were truly verified, not just argued to be identical
+    by reading async_open_cover()'s ternary alongside async_close_cover()'s
+    (see _confirm_full_travel_resync()'s own docstring) - that argument is
+    correct (the two ternaries differ only in the "opening"/"closing"
+    string literal, see cover.py directly), but is a code-reading argument,
+    not a test. This gives the opening side the same direct, end-to-end
+    proof the test above already gives the closing side, rather than
+    leaving it resting on the symmetry argument alone.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    assert cover._position_confirmed_since_restart is False
+    cover._attr_current_cover_position = 70
+
+    await cover.async_set_cover_position(**{ATTR_POSITION: 100})
+
+    assert cover._target_position == 100
+    assert cover._attr_is_opening is True
+    # Never armed in the first place - same reason as the closing-side
+    # test above, mirrored: async_open_cover()'s own ternary is gated on
+    # self._target_position is None exactly like async_close_cover()'s,
+    # and async_set_cover_position() already set it to 100 beforehand.
+    assert cover._full_travel_resync_direction is None
+
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 100),
+    )
+    await cover._async_position_update_loop()
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._position_confirmed_since_restart is True
+    assert cover._attr_is_opening is False
+
+
 # ---------------------------------------------------------------------------
 # _update_position(): the elapsed-time position estimate itself.
 #
