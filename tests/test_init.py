@@ -92,8 +92,8 @@ async def test_service_uses_the_single_loaded_entry_when_others_are_unloaded(
 ) -> None:
     """The loop must survive an unloaded entry and still find the loaded one."""
     # No stick reply is ever fed, so without this, control_blind_exclusive()'s
-    # own ack-wait (added for audit finding 7) would block for the real
-    # MOVE_ACK_TIMEOUT - see test_config_flow.py's test_add_shutter_from_
+    # own ack-wait would block for the real MOVE_ACK_TIMEOUT - see
+    # test_config_flow.py's test_add_shutter_from_
     # remote_runs_test_motor_before_calibration_choice for the same caveat.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     not_loaded_entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -191,7 +191,7 @@ async def test_async_unload_entry_disconnects_the_api(
 async def test_async_setup_entry_disconnects_the_api_on_hass_stop(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression for audit finding 22: no HA-stop listener at the hub level.
+    """Regression test: no HA-stop listener at the hub level.
 
     async_unload_entry() above already disconnects the stick on an
     ordinary reload/remove/disable, but Home Assistant does not call

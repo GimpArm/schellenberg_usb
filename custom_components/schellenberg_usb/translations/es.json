@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Añadir un dispositivo",
-          "description": "Elija cómo desea configurar este dispositivo. Compatible con persianas enrollables, enrolladores de cinta/correa electrónicos, motores de toldo y otros motores compatibles con Schellenberg.",
-          "menu_options": {
-            "pair_device": "Emparejar y calibrar",
-            "add_shutter_from_remote": "Añadir dispositivo desde mando a distancia (recomendado)"
-          }
-        },
-        "pair_device": {
-          "title": "Emparejar dispositivo y calibrar",
-          "description": "Pulse el botón o los botones de emparejamiento de su dispositivo en un plazo de 2 minutos.",
-          "submit": "Emparejar"
-        },
-        "add_shutter_from_remote": {
-          "title": "Añadir dispositivo desde mando a distancia",
-          "description": "Este método de emparejamiento se recomienda para cualquier dispositivo Schellenberg compatible por radiofrecuencia, ya sea un motor de persiana, un enrollador de cinta/correa electrónico o un motor de toldo. Después de pulsar Emparejar, utilice un mando a distancia original ya emparejado en un plazo de 2 minutos y seleccione el canal del dispositivo. Pulse el botón de programación de su mando a distancia hasta que el LED del canal parpadee y, a continuación, pulse Stop. Home Assistant detectará la trama y enviará el comando de aprendizaje 60, seguido del comando de finalización 40 en el mismo valor enum. Una confirmación ACK de la memoria USB no demuestra que el dispositivo haya aprendido el transmisor. A continuación se realiza una breve prueba. Después, confirme si la persiana se movió realmente.",
+          "title": "Emparejar dispositivo",
+          "description": "Pulse el botón Emparejar a continuación y, después, pulse el botón de emparejamiento del dispositivo O BIEN pulse el botón de programación de su mando a distancia ya emparejado y, a continuación, envíe un comando de parada desde ese mando a distancia ya emparejado al motor que desea emparejar.",
           "submit": "Emparejar"
         },
         "name_device": {
@@ -55,6 +42,13 @@
           "description": "Se detectó un candidato de emparejamiento y se transmitió el comando de aprendizaje de la memoria USB para el ID de dispositivo {device_id}. El ACK de la memoria no demuestra que el dispositivo lo haya autorizado. Nombre el dispositivo y compruebe a continuación el movimiento real de la persiana.",
           "data": {
             "device_name": "Nombre del dispositivo"
+          }
+        },
+        "calibration_method_choice": {
+          "title": "Establecer tiempos de recorrido",
+          "menu_options": {
+            "test_motor": "Calibrar moviendo la persiana",
+            "manual_times": "Introducir los tiempos de recorrido manualmente"
           }
         },
         "calibration_close": {
@@ -74,6 +68,14 @@
           "title": "Cerrar la persiana",
           "description": "Ahora mediremos cuánto tiempo tarda en cerrarse {device_name}. Pulse Iniciar **y luego** el botón de cierre en el control para iniciar la calibración. La calibración solo comienza cuando Home Assistant recibe un mensaje de movimiento descendente de la persiana y este es procesado por Home Assistant.",
           "submit": "Iniciar"
+        },
+        "calibration_timeout_choice": {
+          "title": "Sin respuesta de la persiana",
+          "description": "Home Assistant no detectó el movimiento esperado a tiempo. Vuelva a intentarlo o introduzca los tiempos de recorrido manualmente.",
+          "menu_options": {
+            "calibration_retry": "Volver a intentarlo",
+            "manual_times": "Introducir los tiempos de recorrido manualmente"
+          }
         },
         "calibration_complete": {
           "title": "Calibración completada",
@@ -98,10 +100,8 @@
         },
         "test_success": {
           "title": "Prueba de comando exitosa",
-          "menu_options": {
-            "calibration_close": "Continuar a la calibración",
-            "manual_times": "Introducir datos del dispositivo manualmente en el siguiente menú"
-          }
+          "description": "La prueba del motor confirmó que la persiana se mueve. Continúe para medir sus tiempos de recorrido.",
+          "submit": "Continuar"
         },
         "manual_times": {
           "title": "Introducir tiempos de recorrido",
@@ -139,6 +139,13 @@
             "send_raw_command": "Enviar trama RF sin procesar al dispositivo"
           }
         },
+        "status_discovery_choice": {
+          "title": "¿Entrenar comandos de radio desde un mando a distancia?",
+          "menu_options": {
+            "discover_status": "Entrenar desde el mando a distancia original (recomendado)",
+            "skip_status_discovery": "Omitir - finalizar el emparejamiento sin esto"
+          }
+        },
         "discover_status": {
           "title": "Entrenar los comandos de radio de la persiana para esta persiana desde un mando a distancia para mejorar el reconocimiento de la transmisión de comandos de la persiana al pulsar el mando",
           "description": "Dispositivo seleccionado: {selected_blind}\nIdentidad de comando/transmisión: {command_identity}\n\nUtilice el mando a distancia original de Schellenberg para este canal de dispositivo después de pulsar Iniciar escucha: pulse ARRIBA, STOP, ABAJO, STOP. Home Assistant escucha durante 45 segundos y agrupa cada ID de dispositivo, valor enum, comando y marca de tiempo recibidos.",
@@ -151,7 +158,7 @@
         },
         "set_position_manual": {
           "title": "Establecer posición de la persiana manualmente",
-          "description": "Establezca la posición actual para {selected_blind} sin mover la persiana. Posición registrada actualmente: {current_position}.",
+          "description": "Establezca la posición actual para {selected_blind} sin mover la persiana. Posición registrada actualmente: {current_position}. La posición mostrada a continuación es para {selected_blind}.",
           "data": {
             "position": "Posición"
           },
@@ -206,7 +213,7 @@
         "already_configured": "Este dispositivo ya está configurado.",
         "initial_state_required": "Seleccione si la persiana está actualmente totalmente abierta o totalmente cerrada antes de continuar.",
         "test_direction_required": "Seleccione qué dirección de movimiento de la persiana se debe probar antes de continuar.",
-        "calibration_timeout": "El temporizador de calibración ha caducado. La persiana tardó más de 5 minutos en realizar el movimiento. Compruebe el dispositivo e inténtelo de nuevo.",
+        "calibration_timeout": "El temporizador de calibración ha caducado. La persiana tardó más de 2 minutos en realizar el movimiento. Compruebe el dispositivo e inténtelo de nuevo.",
         "calibration_start_timeout": "Tiempo de espera agotado esperando a que la persiana se mueva. Asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
         "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
         "command_failed": "No se pudo encolar el comando serie. Compruebe la conexión USB y los registros.",
@@ -215,8 +222,7 @@
         "invalid_status_identities": "Introduzca cada identidad de estado adicional como ID_dispositivo/enum, separada por comas o líneas nuevas (por ejemplo F2B8D5/23).",
         "status_identity_incomplete": "Introduzca ambos campos de estado principal o déjelos ambos en blanco.",
         "status_discovery_unavailable": "La memoria USB no está conectada. Vuelva a conectarla e inténtelo de nuevo.",
-        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo.",
-        "calibration_capture_busy": "Otra persiana ya está utilizando la grabación de tramas compartida. Espere a que finalice e inténtelo de nuevo."
+        "status_discovery_busy": "Ya hay otra grabación de tramas en curso. Espere a que finalice e inténtelo de nuevo."
       },
       "abort": {
         "pairing_timeout": "Ningún dispositivo respondió en 2 minutos. Por favor, inténtelo de nuevo.",

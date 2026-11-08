@@ -42,8 +42,10 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_NAME,
     CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_OPEN_TIME_SECONDS,
+    CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
     CONF_STATUS_ENUM,
@@ -54,6 +56,7 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STOPPED,
     SIGNAL_DEVICE_EVENT,
     STATUS_IDENTITY_SOURCE_MANUAL,
+    STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
     SUBENTRY_TYPE_BLIND,
 )
@@ -273,7 +276,7 @@ def _add_existing_blind(hass: HomeAssistant, entry: MockConfigEntry) -> ConfigSu
 async def _start_pairing_flow(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> SubentryFlowResult:
-    """Reach the blind subentry's initial pairing-choice menu.
+    """Reach the blind subentry's initial pairing form.
 
     Real Home Assistant starts a *new* subentry flow with
     context={"source": "user"} (see this integration's strings.json:
@@ -282,22 +285,18 @@ async def _start_pairing_flow(
     (entry_id, subentry_type) handler tuple, not via the context source, so
     async_step_user() is the correct, real entry point regardless of type.
 
-    "add_shutter_from_remote" is the recommended entry point: it pairs a
-    *new* blind from an unknown remote channel (api.pair_device_and_wait())
-    and, after a successful test, offers a choice between full calibration
-    and manual travel-time entry (see async_step_test_success() in
-    config_flow.py).
+    Since the Issue #78 pairing-flow unification (2026-11-07), this *is*
+    the pairing step itself (step_id "user") - no menu precedes it any
+    more; see async_step_user()'s own docstring in config_flow.py. A
+    caller submits an empty user_input against the returned flow_id to
+    actually pair (api.pair_device_and_wait()) and reach name_device.
     """
     result = await hass.config_entries.subentries.async_init(
         (entry.entry_id, SUBENTRY_TYPE_BLIND),
         context={"source": "user"},
     )
-    assert result["type"] is FlowResultType.MENU
+    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
-    assert set(cast(Iterable[str], result["menu_options"])) == {
-        "pair_device",
-        "add_shutter_from_remote",
-    }
     return result
 
 
@@ -325,7 +324,7 @@ async def _start_reconfigure_flow(
 # ---------------------------------------------------------------------------
 
 
-async def test_pair_device_workflow_names_device_then_starts_calibration(
+async def test_pairing_workflow_names_device_then_starts_calibration(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,12 +337,10 @@ async def test_pair_device_workflow_names_device_then_starts_calibration(
     )
     result = await _start_pairing_flow(hass, entry)
 
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "pair_device"}
-    )
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "pair_device"
-
+    # Since the Issue #78 pairing-flow unification (2026-11-07), the
+    # pairing form itself *is* step_id "user" - no intermediate
+    # "pair_device" step precedes it any more (see async_step_user()'s
+    # own docstring in config_flow.py).
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
@@ -354,12 +351,31 @@ async def test_pair_device_workflow_names_device_then_starts_calibration(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Kitchen Blind"}
     )
 
-    # pair_device's own workflow goes straight into calibration after naming.
+    # Every fresh pairing offers this same choice after naming (Issue
+    # #77, 2026-11-07) rather than going straight into calibration the
+    # way the old "legacy" workflow used to - see async_step_name_
+    # device()'s own comment on this branch.
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_method_choice"
+    assert set(cast(Iterable[str], result["menu_options"])) == {
+        "test_motor",
+        "manual_times",
+    }
+
+    # Choosing to calibrate now also runs the motor-test confirmation
+    # that, before the unification, only the old "Add device from
+    # remote" workflow required (Issue #78 discussion) - see
+    # test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close below for the rest of that same sequence through
+    # to a real calibration_close form.
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "test_motor"}
+    )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "calibration_close"
+    assert result["step_id"] == "test_motor"
 
 
-async def test_pair_device_timeout_aborts_with_pairing_timeout(
+async def test_pairing_timeout_aborts_with_pairing_timeout(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,9 +387,6 @@ async def test_pair_device_timeout_aborts_with_pairing_timeout(
     result = await _start_pairing_flow(hass, entry)
 
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "pair_device"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
 
@@ -381,7 +394,7 @@ async def test_pair_device_timeout_aborts_with_pairing_timeout(
     assert result["reason"] == "pairing_timeout"
 
 
-async def test_pair_device_disconnect_during_wait_aborts_with_distinct_reason(
+async def test_disconnect_during_pairing_wait_aborts_with_distinct_reason(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -403,9 +416,6 @@ async def test_pair_device_disconnect_during_wait_aborts_with_distinct_reason(
     connected_api._pairing_interrupted_by_disconnect = True
     result = await _start_pairing_flow(hass, entry)
 
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "pair_device"}
-    )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
@@ -461,7 +471,7 @@ async def _drive_calibration_leg(
 ) -> SubentryFlowResult:
     """Submit the current instruction form and drive it to completion.
 
-    Shared by both pair_device calibration tests below, for whichever leg
+    Shared by both pairing-calibration tests below, for whichever leg
     (open or close) is currently showing its instruction form - the
     EVENT_STARTED_MOVING_UP/DOWN constant passed in as start_event decides
     which.
@@ -477,14 +487,27 @@ async def _drive_calibration_leg(
     return await task
 
 
-async def _pair_device_up_to_calibration_close(
-    hass: HomeAssistant, entry: MockConfigEntry
+async def _drive_pairing_to_calibration_close(
+    hass: HomeAssistant, entry: MockConfigEntry, monkeypatch: pytest.MonkeyPatch
 ) -> SubentryFlowResult:
-    """Drive pair_device through naming and reach the calibration_close form."""
+    """Drive pairing through naming and reach the calibration_close form.
+
+    Since Issue #77 (2026-11-07), naming no longer leads straight into
+    calibration_close - it shows calibration_method_choice first (see
+    async_step_name_device()'s own comment) - so this helper submits that
+    choice too. Since the Issue #78 pairing-flow unification (2026-11-07),
+    choosing to calibrate ("test_motor") also runs the same motor-test
+    confirmation (test_motor/did_motor_move/test_success) every fresh
+    pairing now gets before reaching a real calibration_close - this
+    helper drives through that too, with its own asyncio.sleep/
+    MOVE_ACK_TIMEOUT mocks (see test_choosing_test_motor_runs_motor_test_
+    sequence_before_calibration_close's own comment on why both are
+    needed), so every test built on top of it (which only care about what
+    happens from calibration_close onward) stays unaffected.
+    """
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     result = await _start_pairing_flow(hass, entry)
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "pair_device"}
-    )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
@@ -492,25 +515,52 @@ async def _pair_device_up_to_calibration_close(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Kitchen Blind"}
     )
+    assert result["step_id"] == "calibration_method_choice"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "test_motor"}
+    )
+    assert result["step_id"] == "test_motor"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"test_direction": "open"}
+    )
+    assert result["step_id"] == "did_motor_move"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"motor_moved": True}
+    )
+    assert result["step_id"] == "test_success"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
     assert result["step_id"] == "calibration_close"
     return result
 
 
-async def test_pair_device_calibration_choosing_closed_sets_initial_position_closed(
+async def test_pairing_calibration_choosing_closed_sets_initial_position_closed(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pair_device's own calibration, driven all the way to CREATE_ENTRY.
+    """Live calibration driven all the way to CREATE_ENTRY.
 
     Choosing initial_state="closed" runs the open leg first and the close
     leg last, so the close leg's own end stop - 0%, fully closed - is the
     position the fresh subentry's data should carry under
     CONF_INITIAL_POSITION. Neither this path nor CONF_INITIAL_POSITION
     being present in the created entry's data were previously exercised
-    anywhere in this file - every existing pair_device test stops at
+    anywhere in this file - every existing pairing test stops at
     reaching the calibration_close form without submitting it, see
-    test_pair_device_workflow_names_device_then_starts_calibration above.
+    test_pairing_workflow_names_device_then_starts_calibration above.
+
+    Since the fix routing live calibration through a real status-identity
+    discovery attempt (see async_step_calibration_complete's own comment,
+    options_flow_calibration.py), calibration_complete no longer finishes
+    pairing directly - it now reaches discover_status/confirm_status_
+    discovery first, the same chain test_manual_times_choice_creates_
+    entry_directly already drives for the manual-entry pairing route. Here
+    discovery finds nothing, proving that path still reaches CREATE_ENTRY
+    with everything this test already checked; the positive-discovery case
+    is covered separately by test_live_calibration_pairing_captures_
+    status_identity_via_discovery below.
     """
     entry = _build_hub_entry(hass, connected_api)
     monkeypatch.setattr(
@@ -518,7 +568,20 @@ async def test_pair_device_calibration_choosing_closed_sets_initial_position_clo
         "pair_device_and_wait",
         AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
     )
-    result = await _pair_device_up_to_calibration_close(hass, entry)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": None,
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [],
+            }
+        ),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
     wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
 
     result = await hass.config_entries.subentries.async_configure(
@@ -545,12 +608,28 @@ async def test_pair_device_calibration_choosing_closed_sets_initial_position_clo
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
 
 
-async def test_pair_device_calibration_choosing_open_sets_initial_position_open(
+async def test_pairing_calibration_choosing_open_sets_initial_position_open(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -559,7 +638,9 @@ async def test_pair_device_calibration_choosing_open_sets_initial_position_open(
 
     The open leg now runs last, so the fresh subentry's data should carry
     CONF_INITIAL_POSITION == 100 (fully open) instead of the "closed"
-    choice's 0.
+    choice's 0. Also drives through the new discover_status/confirm_
+    status_discovery detour - see the sibling test's own comment on why
+    that is now part of this path.
     """
     entry = _build_hub_entry(hass, connected_api)
     monkeypatch.setattr(
@@ -567,7 +648,20 @@ async def test_pair_device_calibration_choosing_open_sets_initial_position_open(
         "pair_device_and_wait",
         AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
     )
-    result = await _pair_device_up_to_calibration_close(hass, entry)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": None,
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [],
+            }
+        ),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
     wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
 
     result = await hass.config_entries.subentries.async_configure(
@@ -594,12 +688,584 @@ async def test_pair_device_calibration_choosing_open_sets_initial_position_open(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 100
 
 
-async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice(
+async def test_live_calibration_pairing_captures_status_identity_via_discovery(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a live-calibration pairing must get a real chance at a
+    primary/secondary status identity, same as the manual-entry route
+    already does.
+
+    Before this fix, async_step_calibration_complete() (options_flow_
+    calibration.py) finished a fresh pairing immediately on reaching this
+    step, never once calling async_discover_status_identities() - so every
+    blind paired through live calibration (the "test_motor" -> calibrate
+    route, the one calibration_method_choice's own default/first option
+    leads to) ended up with CONF_SECONDARY_STATUS_IDENTITIES permanently
+    empty and no CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM override at all -
+    reported live, comparing a freshly-paired blind's empty "Zusätzliche
+    Statusidentitäten" field against an older blind's populated one. The
+    two tests above already prove the "discovery finds nothing" case still
+    reaches CREATE_ENTRY correctly; this one is the actual positive case -
+    a real primary and secondary identity, captured and persisted.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": "E3D0A5",
+                    "enum": "08",
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [{"device_id": "7953A7", "enum": "53"}],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_DOWN,
+    )
+    assert result["step_id"] == "calibration_complete"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The command identity (used to send move/stop commands) is unaffected -
+    # still the device/enum pair pair_device_and_wait() returned.
+    assert result["data"][CONF_DEVICE_ID] == DEVICE_ID
+    assert result["data"][CONF_DEVICE_ENUM] == DEVICE_ENUM
+    # The actual point of this fix: a real primary/secondary status
+    # identity, discovered and persisted, instead of staying unset.
+    assert result["data"][CONF_STATUS_DEVICE_ID] == "E3D0A5"
+    assert result["data"][CONF_STATUS_ENUM] == "08"
+    assert (
+        result["data"][CONF_STATUS_IDENTITY_SOURCE]
+        == STATUS_IDENTITY_SOURCE_REMOTE_DISCOVERY
+    )
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "7953A7", "enum": "53"}
+    ]
+    # CONF_LAST_CALIBRATION and the travel times calibration_complete()
+    # itself assembled into the stashed data survive the discover_status
+    # detour untouched.
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_LAST_CALIBRATION in result["data"]
+
+
+async def test_live_calibration_skip_status_discovery_creates_entry_directly(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Choosing "Skip" on status_discovery_choice must finish pairing at once.
+
+    Companion to test_live_calibration_pairing_captures_status_identity_via_
+    discovery above, for the new skip option (2026-11-08, project owner's
+    own request): a person without their original remote to hand must be
+    able to get past this choice without ever reaching async_step_discover_
+    status()'s own "Start listening" screen at all. Proves the live-
+    calibration route's own _pending_finish_data stash survives this path
+    too, not just the "ran discovery, found nothing" one the first test in
+    this section already covers - async_discover_status_identities() is
+    deliberately never mocked to return anything here, so a regression that
+    accidentally still called it would surface as an un-mocked-call error,
+    not a silently-passing assertion.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_DOWN,
+    )
+    assert result["step_id"] == "calibration_complete"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "skip_status_discovery"}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_DEVICE_ID] == DEVICE_ID
+    assert result["data"][CONF_DEVICE_ENUM] == DEVICE_ENUM
+    assert CONF_STATUS_DEVICE_ID not in result["data"]
+    assert CONF_STATUS_ENUM not in result["data"]
+    assert result["data"][CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_UNKNOWN
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
+    # The live-calibration route's own already-assembled data (travel
+    # times, CONF_LAST_CALIBRATION, the initial position this leg
+    # sequence confirmed) must still come through untouched, exactly as
+    # it does on the "ran discovery" path above.
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_LAST_CALIBRATION in result["data"]
+
+
+# ---------------------------------------------------------------------------
+# Subentry flow: pairing's manual-entry and timeout escape hatches
+# (Issue #77, 2026-11-07 - see async_step_name_device()'s and async_step_
+# calibration_open_instruction()'s own comments)
+# ---------------------------------------------------------------------------
+
+
+async def test_manual_times_choice_creates_entry_directly(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual entry straight from calibration_method_choice, with no motor
+    test involved at all. Mirrors test_manual_times_to_discover_status_
+    creates_entry_directly, proving the same manual_times/discover_status/
+    confirm_status_discovery chain reaches a real CREATE_ENTRY from this
+    entry point too.
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": DEVICE_ID,
+                    "enum": DEVICE_ENUM,
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _start_pairing_flow(hass, entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={CONF_DEVICE_NAME: "Manual Blind"}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_method_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    assert result["step_id"] == "manual_times"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 15.0,
+            CONF_CLOSE_TIME_SECONDS: 14.0,
+            "initial_state": "closed",
+        },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Manual Blind"
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert result["data"][CONF_OPEN_TIME] == 15.0
+    assert result["data"][CONF_CLOSE_TIME] == 14.0
+
+
+async def test_calibration_timeout_retry_targets_the_pending_leg(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh pairing's own calibration timeout offers an explicit choice
+    (calibration_timeout_choice) instead of only an on-screen error - see
+    async_step_calibration_open_instruction's own comment on its first
+    timeout branch in options_flow_calibration.py. Contrast with
+    test_open_instruction_movement_start_timeout_shows_error_and_reshows_
+    form in test_options_flow_calibration.py, which proves recalibrating an
+    *existing* blind still gets the old, unchanged error-and-resubmit
+    behavior - the two are deliberately different, scoped by
+    CalibrationFlowHandler._create_subentry_after_calibration.
+
+    Exercises "retry" for both legs in one run, proving async_step_
+    calibration_retry() targets whichever leg actually timed out rather
+    than a hardcoded one: the open leg's own start-timeout is retried
+    first (trivial on its own, since self._open_time is still None at that
+    point regardless), then that leg is driven to a real completion, and
+    the close leg's own start-timeout is retried too - only meaningful if
+    the dispatch is state-aware, since a hardcoded "always open_instruction"
+    would wrongly pass the first retry and only fail the second.
+    """
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_timeout_choice"
+    assert set(cast(Iterable[str], result["menu_options"])) == {
+        "calibration_retry",
+        "manual_times",
+    }
+
+    # "Try again" re-shows the same, still-pending open leg's own
+    # instruction form - fresh, not the live wait itself (same as
+    # submitting this form with user_input=None always does; the person
+    # still has to press Start again).
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "calibration_retry"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_open_instruction"
+    assert not result.get("errors")
+
+    # Drive the open leg to a real completion before exercising the close
+    # leg's own timeout - restoring a real budget first so this genuine
+    # start-to-stop run does not itself get cut short by the shrunk one.
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 5.0)
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    assert result["step_id"] == "calibration_close_instruction"
+
+    # Close leg's own start-timeout - retry must now land on the close leg,
+    # not back on the already-finished open one.
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_timeout_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "calibration_retry"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_close_instruction"
+
+
+async def test_calibration_timeout_manual_choice_creates_entry(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of calibration_timeout_choice: choosing manual entry
+    instead of retrying must still reach a real CREATE_ENTRY, proving the
+    hand-off to manual_times works from mid-calibration (abandoning a
+    timed-out live attempt), not just from calibration_method_choice before
+    any live wait ever started (already covered by
+    test_manual_times_choice_creates_entry_directly above).
+    """
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    entry = _build_hub_entry(hass, connected_api)
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": DEVICE_ID,
+                    "enum": DEVICE_ENUM,
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "calibration_timeout_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    assert result["step_id"] == "manual_times"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 20.0,
+            CONF_CLOSE_TIME_SECONDS: 18.0,
+            "initial_state": "open",
+        },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INITIAL_POSITION] == 100
+    assert result["data"][CONF_OPEN_TIME] == 20.0
+    assert result["data"][CONF_CLOSE_TIME] == 18.0
+
+
+async def test_calibration_timeout_manual_choice_prefills_the_leg_already_measured(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike test_calibration_timeout_manual_choice_creates_entry above
+    (a start-timeout, before either leg ever measures anything),
+    this drives the open leg to a real completion first, then times out
+    the close leg's own start and escapes to manual entry - the scenario
+    CalibrationFlowHandler.recorded_leg_times() (options_flow_
+    calibration.py) exists for: async_step_manual_times() (config_flow.py)
+    must pre-fill the open leg's own already-measured time instead of
+    asking the person to re-enter or guess a number Home Assistant
+    already knows precisely. Proven here by omitting CONF_OPEN_TIME_
+    SECONDS from the submitted user_input entirely - exactly how a real
+    flow manager receives a numeric field nobody touched - and relying on
+    the schema's own default to fill it in: before this fix, this exact
+    omission would have been rejected (that field had no default at all,
+    so voluptuous would re-show this same form with a validation error
+    instead of proceeding).
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(
+            return_value={
+                "primary": {
+                    "device_id": DEVICE_ID,
+                    "enum": DEVICE_ENUM,
+                    "commands": ["00", "01"],
+                    "timestamps": ["10:00:00"],
+                },
+                "secondary": [],
+                "unknown_commands": [],
+                "frames": [{}],
+            }
+        ),
+    )
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _drive_pairing_to_calibration_close(hass, entry, monkeypatch)
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"initial_state": "closed"}
+    )
+    assert result["step_id"] == "calibration_open_instruction"
+
+    # Drive the open leg to a real, measured completion - see
+    # _drive_calibration_leg's own docstring. _open_time ends up floored
+    # at 0.1s (CalibrationFlowHandler's own max(elapsed, 0.1), mirroring
+    # test_full_open_and_close_legs_reach_the_summary_with_measured_times'
+    # own reasoning for not asserting a tighter bound than that floor on
+    # a real, unmocked elapsed-time measurement).
+    wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
+    result = await _drive_calibration_leg(
+        hass,
+        result["flow_id"],
+        wait_for_registration,
+        start_event=EVENT_STARTED_MOVING_UP,
+    )
+    assert result["step_id"] == "calibration_close_instruction"
+
+    # Now the close leg's own start-timeout - escape to manual entry
+    # instead of retrying.
+    monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_timeout_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    assert result["step_id"] == "manual_times"
+
+    # CONF_OPEN_TIME_SECONDS deliberately omitted - the whole point being
+    # tested - alongside a required field that was never auto-filled
+    # (CONF_CLOSE_TIME_SECONDS, since the close leg never ran) and the
+    # blind's current position (now open, having just finished the open
+    # leg - not the "closed" answer given at calibration_close above,
+    # which only ever described the state *before* this run started).
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_CLOSE_TIME_SECONDS: 12.0,
+            "initial_state": "open",
+        },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+    assert result["step_id"] == "discover_status"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INITIAL_POSITION] == 100
+    assert result["data"][CONF_CLOSE_TIME] == 12.0
+    # The pre-filled default, not a missing-field error and not some
+    # unrelated placeholder - the real, measured open leg's own time,
+    # floored at 0.1s like any other real elapsed-time measurement.
+    assert result["data"][CONF_OPEN_TIME] >= 0.1
+    assert result["data"][CONF_OPEN_TIME] < 1.0
+
+
+async def test_choosing_test_motor_runs_motor_test_sequence_before_calibration_close(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -612,8 +1278,8 @@ async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice
     )
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     # No stick reply is ever fed to either write below, so without this,
-    # control_blind_exclusive()'s own ack-wait (added for audit finding 7)
-    # would block for the real MOVE_ACK_TIMEOUT on each one - mocking
+    # control_blind_exclusive()'s own ack-wait would block for the real
+    # MOVE_ACK_TIMEOUT on each one - mocking
     # asyncio.sleep above does not cover this, since asyncio.wait_for's own
     # timeout path needs genuinely elapsed time regardless (see
     # test_control_blind_with_retry_treats_a_silent_ack_timeout_like_busy
@@ -622,9 +1288,6 @@ async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice
     result = await _start_pairing_flow(hass, entry)
 
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     assert result["step_id"] == "name_device"
@@ -632,10 +1295,19 @@ async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
     )
-    # Hybrid workflow tests the motor before offering the calibration choice.
-    # This is the confirmation gate: the form is shown and nothing has been
-    # sent to the stick yet - the person must choose a direction explicitly,
-    # there is no default and no position-based suggestion.
+    # Since the Issue #78 pairing-flow unification (2026-11-07), every
+    # fresh pairing is offered this choice, and "test_motor" is how it
+    # reaches the motor test that only the old "Add device from remote"
+    # workflow used to require (see async_step_name_device()'s own
+    # comment).
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "calibration_method_choice"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "test_motor"}
+    )
+    # This is the confirmation gate: the form is shown and nothing has
+    # been sent to the stick yet - the person must choose a direction
+    # explicitly, there is no default and no position-based suggestion.
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "test_motor"
     assert written(connected_api) == []
@@ -661,12 +1333,18 @@ async def test_add_shutter_from_remote_runs_test_motor_before_calibration_choice
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"motor_moved": True}
     )
-    assert result["type"] is FlowResultType.MENU
+    # test_success is a plain confirmation now, not a choice (Issue #78
+    # pairing-flow unification) - "Enter travel times manually" moved
+    # earlier, to calibration_method_choice, before the motor test ever
+    # runs.
+    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "test_success"
-    assert set(cast(Iterable[str], result["menu_options"])) == {
-        "calibration_close",
-        "manual_times",
-    }
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "calibration_close"
 
 
 async def test_test_motor_rejects_submitting_without_a_real_choice(
@@ -735,13 +1413,14 @@ async def test_did_motor_move_no_shows_retry_notice_and_lets_person_choose_again
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
+    )
+    assert result["step_id"] == "calibration_method_choice"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "test_motor"}
     )
     assert not result["description_placeholders"]["retry_notice"]  # type: ignore[index]
     result = await hass.config_entries.subentries.async_configure(
@@ -824,7 +1503,8 @@ async def test_did_motor_move_false_then_true_on_retry_reaches_test_success(
     """The opposite-direction retry succeeding (common case: the blind was
     simply already fully open) reaches test_success exactly like an
     ordinary first-try success - see
-    test_add_shutter_from_remote_runs_test_motor_before_calibration_choice.
+    test_choosing_test_motor_runs_motor_test_sequence_before_calibration_
+    close.
     """
     entry = _build_hub_entry(hass, connected_api)
     monkeypatch.setattr(
@@ -835,13 +1515,14 @@ async def test_did_motor_move_false_then_true_on_retry_reaches_test_success(
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
+    )
+    assert result["step_id"] == "calibration_method_choice"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "test_motor"}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"test_direction": "open"}
@@ -862,12 +1543,12 @@ async def test_did_motor_move_false_then_true_on_retry_reaches_test_success(
         result["flow_id"], user_input={"motor_moved": True}
     )
 
-    assert result["type"] is FlowResultType.MENU
+    # test_success is a plain confirmation now, not a choice (Issue #78
+    # pairing-flow unification) - see
+    # test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close above.
+    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "test_success"
-    assert set(cast(Iterable[str], result["menu_options"])) == {
-        "calibration_close",
-        "manual_times",
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -889,20 +1570,16 @@ async def test_manual_times_leads_into_discover_status(
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
     )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"test_direction": "open"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"motor_moved": True}
-    )
+    # Since the Issue #78 pairing-flow unification (2026-11-07),
+    # "manual_times" is offered by calibration_method_choice, right
+    # after naming - no motor test needed first (see async_step_name_
+    # device()'s own comment).
+    assert result["step_id"] == "calibration_method_choice"
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"next_step_id": "manual_times"}
     )
@@ -917,6 +1594,12 @@ async def test_manual_times_leads_into_discover_status(
         },
     )
 
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "discover_status"
 
@@ -926,8 +1609,8 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The hybrid workflow's "manual_times" branch must reach a real
-    CREATE_ENTRY, the same way its "calibration_close" sibling does.
+    """The "manual_times" branch must reach a real CREATE_ENTRY, the same
+    way its "calibration_close" sibling does.
 
     test_manual_times_leads_into_discover_status above only checks that the
     discover_status form is reached; it never confirms that submitting it
@@ -963,20 +1646,15 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     entry = _build_hub_entry(hass, connected_api)
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"test_direction": "open"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"motor_moved": True}
-    )
+    # Since the Issue #78 pairing-flow unification (2026-11-07),
+    # "manual_times" is offered by calibration_method_choice, right
+    # after naming - no motor test needed first (see async_step_name_
+    # device()'s own comment).
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"next_step_id": "manual_times"}
     )
@@ -987,6 +1665,11 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
             CONF_CLOSE_TIME_SECONDS: 28.0,
             "initial_state": "closed",
         },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -1002,7 +1685,7 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     # The hybrid workflow's manual_times branch had no way at all to reach
     # CONF_INITIAL_POSITION before this fix - unlike its calibration_close
-    # sibling (test_pair_device_calibration_choosing_closed_sets_initial_
+    # sibling (test_pairing_calibration_choosing_closed_sets_initial_
     # position_closed and its "open" counterpart), nothing here ever drove
     # the blind through a real leg to confirm an end stop, so this is the
     # person's own direct "closed" answer, not a measured one.
@@ -1030,7 +1713,7 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
     resulting entry data - so a regression that mis-mapped only the "open"
     branch (to anything other than 100, while leaving "closed" -> 0 intact)
     would have passed every other manual_times test undetected. This test
-    closes that gap, mirroring test_pair_device_calibration_choosing_open_
+    closes that gap, mirroring test_pairing_calibration_choosing_open_
     sets_initial_position_open's equivalent coverage for the calibration_
     close sibling.
     """
@@ -1060,20 +1743,15 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
     entry = _build_hub_entry(hass, connected_api)
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"test_direction": "open"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"motor_moved": True}
-    )
+    # Since the Issue #78 pairing-flow unification (2026-11-07),
+    # "manual_times" is offered by calibration_method_choice, right
+    # after naming - no motor test needed first (see async_step_name_
+    # device()'s own comment).
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"next_step_id": "manual_times"}
     )
@@ -1084,6 +1762,11 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
             CONF_CLOSE_TIME_SECONDS: 28.0,
             "initial_state": "open",
         },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
     )
     assert result["step_id"] == "discover_status"
 
@@ -1098,6 +1781,63 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_INITIAL_POSITION] == 100
+
+
+async def test_manual_times_skip_status_discovery_creates_entry_directly(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror of test_live_calibration_skip_status_discovery_creates_entry_
+    directly above, for the manual-entry pairing route's own _pending_data()
+    finish branch instead of the live-calibration route's _pending_
+    finish_data one - both branches in async_step_confirm_status_discovery()
+    need their own coverage for the skip path, the same way both already
+    have it for the "ran discovery" path above. async_discover_status_
+    identities() is deliberately never mocked here either, for the same
+    un-mocked-call-error reasoning as that test.
+    """
+    monkeypatch.setattr(
+        connected_api,
+        "pair_device_and_wait",
+        AsyncMock(return_value=(DEVICE_ID, DEVICE_ENUM)),
+    )
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    entry = _build_hub_entry(hass, connected_api)
+    result = await _start_pairing_flow(hass, entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "manual_times"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_OPEN_TIME_SECONDS: 30.0,
+            CONF_CLOSE_TIME_SECONDS: 28.0,
+            "initial_state": "closed",
+        },
+    )
+    assert result["step_id"] == "status_discovery_choice"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "skip_status_discovery"}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "New Blind"
+    assert result["data"][CONF_OPEN_TIME] == 30.0
+    assert result["data"][CONF_CLOSE_TIME] == 28.0
+    assert result["data"][CONF_INITIAL_POSITION] == 0
+    assert CONF_STATUS_DEVICE_ID not in result["data"]
+    assert CONF_STATUS_ENUM not in result["data"]
+    assert result["data"][CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_UNKNOWN
+    assert result["data"][CONF_SECONDARY_STATUS_IDENTITIES] == []
+    assert len(entry.subentries) == 1
 
 
 async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
@@ -1123,20 +1863,15 @@ async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
     entry = _build_hub_entry(hass, connected_api)
     result = await _start_pairing_flow(hass, entry)
     result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"next_step_id": "add_shutter_from_remote"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"test_direction": "open"}
-    )
-    result = await hass.config_entries.subentries.async_configure(
-        result["flow_id"], user_input={"motor_moved": True}
-    )
+    # Since the Issue #78 pairing-flow unification (2026-11-07),
+    # "manual_times" is offered by calibration_method_choice, right
+    # after naming - no motor test needed first (see async_step_name_
+    # device()'s own comment).
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"next_step_id": "manual_times"}
     )
@@ -1163,8 +1898,8 @@ async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
         },
     )
 
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "discover_status"
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
 
 
 async def test_discover_status_unavailable_shows_an_error(
@@ -1276,7 +2011,8 @@ async def test_discover_status_finding_nothing_keeps_the_existing_identity(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for audit finding 4.
+    """Regression guard: an inconclusive status discovery must not clear
+    the existing identity.
 
     An inconclusive discovery attempt (wrong button, pressed too fast, RF
     interference - no primary frame captured) used to unconditionally pop
@@ -1570,10 +2306,10 @@ async def test_test_existing_leads_into_the_short_command_test(
     tracked position doesn't override the choice either.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
-    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
-    # choice's own comment on this same patch: without it, each write below
-    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
-    # never fed.
+    # See test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close's own comment on this same patch: without it, each
+    # write below blocks for the real MOVE_ACK_TIMEOUT waiting for a stick
+    # reply that is never fed.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -1612,10 +2348,10 @@ async def test_test_existing_honors_chosen_direction_when_recorded_closed(
     would have picked, and getting exactly that sent.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
-    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
-    # choice's own comment on this same patch: without it, each write below
-    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
-    # never fed.
+    # See test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close's own comment on this same patch: without it, each
+    # write below blocks for the real MOVE_ACK_TIMEOUT waiting for a stick
+    # reply that is never fed.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -1661,10 +2397,10 @@ async def test_test_existing_honors_chosen_direction_when_recorded_open(
     - still sends exactly the chosen direction.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
-    # See test_add_shutter_from_remote_runs_test_motor_before_calibration_
-    # choice's own comment on this same patch: without it, each write below
-    # blocks for the real MOVE_ACK_TIMEOUT waiting for a stick reply that is
-    # never fed.
+    # See test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close's own comment on this same patch: without it, each
+    # write below blocks for the real MOVE_ACK_TIMEOUT waiting for a stick
+    # reply that is never fed.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -1868,10 +2604,10 @@ async def test_developer_tools_test_open_close_stop_each_send_one_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # No stick reply is ever fed for any of the three writes below, so
-    # without this, control_blind_exclusive()'s own ack-wait (added for
-    # audit finding 7) would block for the real MOVE_ACK_TIMEOUT on each
-    # one - see test_add_shutter_from_remote_runs_test_motor_before_
-    # calibration_choice's own comment on this same patch.
+    # without this, control_blind_exclusive()'s own ack-wait would block
+    # for the real MOVE_ACK_TIMEOUT on each one - see
+    # test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close's own comment on this same patch.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -1980,10 +2716,10 @@ async def test_developer_tools_teach_motor_success_sends_teach_open_and_stop(
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     # The trailing open+stop test (after a successful teach) never gets a
     # stick reply fed either, so without this, control_blind_exclusive()'s
-    # own ack-wait (added for audit finding 7) would block for the real
-    # MOVE_ACK_TIMEOUT on each of those two writes - see
-    # test_add_shutter_from_remote_runs_test_motor_before_calibration_
-    # choice's own comment on this same patch.
+    # own ack-wait would block for the real MOVE_ACK_TIMEOUT on each of
+    # those two writes - see
+    # test_choosing_test_motor_runs_motor_test_sequence_before_
+    # calibration_close's own comment on this same patch.
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -2135,7 +2871,8 @@ async def test_developer_tools_copy_diagnostics_shows_a_text_snapshot_then_retur
 async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
     hass: HomeAssistant, connected_api: SchellenbergUsbApi
 ) -> None:
-    """Regression for audit finding 21.
+    """Regression: the copy-diagnostics text export must show dashes,
+    not the literal word "None", when a blind has no position history.
 
     _add_existing_blind()'s device never has a position update recorded,
     so api.get_last_position_update() falls back to a dict with
@@ -2173,7 +2910,7 @@ async def test_copy_diagnostics_shows_dashes_not_none_with_no_position_history(
     assert "Current estimated position: None" not in diagnostics_text
 
 
-def _load_calibration_close_step(language: str) -> dict[str, Any]:
+def _load_step(language: str, step_id: str) -> dict[str, Any]:
     integration_dir = (
         Path(__file__).parent.parent / "custom_components" / "schellenberg_usb"
     )
@@ -2184,9 +2921,7 @@ def _load_calibration_close_step(language: str) -> dict[str, Any]:
     )
     with path.open(encoding="utf-8") as handle:
         doc = json.load(handle)
-    step: dict[str, Any] = doc["config_subentries"]["blind"]["step"][
-        "calibration_close"
-    ]
+    step: dict[str, Any] = doc["config_subentries"]["blind"]["step"][step_id]
     return step
 
 
@@ -2226,7 +2961,7 @@ def test_calibration_close_forces_an_explicit_initial_state_choice() -> None:
     top-level "selector" translation key instead of an implied opposite.
     """
     for language in ("strings", "en", "de", "es", "fr"):
-        step = _load_calibration_close_step(language)
+        step = _load_step(language, "calibration_close")
         assert "initial_state" in step["data"], language
         assert "currently_open" not in step["data"], language
         assert "data_description" not in step, language
@@ -2244,3 +2979,92 @@ def test_calibration_close_forces_an_explicit_initial_state_choice() -> None:
         "open": "Der Rollladen ist aktuell vollständig geöffnet",
         "closed": "Der Rollladen ist aktuell vollständig geschlossen",
     }
+
+
+def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None:
+    """Reported from a screenshot: on a hub with several blinds, the
+    position field's own pre-filled value gave no hint by itself which
+    blind it belonged to - only the step's top-level description said so,
+    and that line is easy to have already scrolled past. Three fixes, all
+    from the same day, settled this string's final shape:
+
+    First, a data_description was added under the "position" field,
+    repeating that same {selected_blind} name right next to the field
+    itself, in every language, worded "The position shown below is for
+    {selected_blind}." (and each language's own equivalent) - reusing the
+    placeholder async_step_set_position_manual() already fills via its
+    existing description_placeholders.
+
+    Second, a follow-up screenshot showed that wording had the direction
+    backwards in every language: Home Assistant renders a field's own
+    data_description as a caption *underneath* that field, not above it,
+    so "shown below" should have read "shown above" from the start.
+    Corrected to "shown above"/"oben angezeigte"/"mostrada arriba"/
+    "ci-dessus" - briefly, before the third fix below reverted it again.
+
+    Third, rather than keep fighting the above/below wording against a
+    caption position neither of the first two fixes actually controlled,
+    the sentence itself was moved to *before* the field instead - the one
+    place in this form that already renders above it, the step's own
+    top-level `description`, which already uses this same {selected_blind}
+    placeholder successfully for its own first sentence. The sentence was
+    re-reverted to its original "below"/"unten"/"a continuación"/
+    "ci-dessous" wording (correct again now that it precedes the field)
+    and appended as `description`'s own final sentence; `data_description`
+    was removed for this step entirely, rather than left behind holding an
+    empty object once "position" was its only key. Being the very last
+    thing read before the field itself, immediately adjacent to it exactly
+    as the original real-world report asked for, no caption below the
+    field is needed any more either - and no config_flow.py change was
+    needed for any of the three fixes, since description_placeholders
+    already reaches both `description` and `data_description` alike (the
+    second screenshot incidentally confirmed this for `data_description`
+    too, rendering {selected_blind} as the real device name
+    "Badezimmerrolladen" rather than a literal, unsubstituted placeholder -
+    moot for this field's own final shape, which no longer uses
+    data_description at all, but settled for any future use of it
+    elsewhere in this integration).
+
+    The German description text separately dropped its leading article on
+    the second sentence ("Aktuell erfasste Position" instead of "Die
+    aktuell erfasste Position") - also from the first screenshot, and also
+    fixed here; "en"/"es"/"fr" already read naturally without one.
+
+    Fourth (2026-11-08, a later real-world report, same final sentence):
+    with a long enough {selected_blind} name and/or a narrow enough dialog,
+    the German final sentence's own leading "Die unten" wrapped across two
+    lines on its own - "Die" ending one line, "unten angezeigte Position
+    ist für <name>." starting the next - reading as if "Die" belonged to
+    the sentence above it rather than to "unten" right after it. Joined
+    with U+00A0 (a non-breaking space) between exactly those two words, so
+    a browser can still wrap the rest of the sentence normally but can no
+    longer split this specific pair - the same narrow, surgical fix the
+    report's own wording asked for ("die zwei Wörter 'Die unten' sollen
+    nur eine Zeile runter zu den anderen Wörtern"), without reopening the
+    sentence-boundary/caption-position questions the first three fixes
+    above already settled. "en"/"es"/"fr" start their own final sentence
+    differently ("The position"/"La posición"/"La position", not a bare
+    two-word adverbial lead-in) and were never reported to have this
+    problem, so none of the three were touched.
+    """
+    expected_final_sentence = {
+        "strings": "The position shown below is for {selected_blind}.",
+        "en": "The position shown below is for {selected_blind}.",
+        # The space between "Die" and "unten" below is U+00A0 (a
+        # non-breaking space), matching the production string exactly -
+        # see the fourth fix in this test's own docstring above. RUF001
+        # flags it as visually ambiguous against a plain space, which is
+        # exactly why it needs this comment, but it is not a mistake.
+        "de": "Die unten angezeigte Position ist für {selected_blind}.",  # noqa: RUF001
+        "es": "La posición mostrada a continuación es para {selected_blind}.",
+        "fr": "La position indiquée ci-dessous concerne {selected_blind}.",
+    }
+    for language in ("strings", "en", "de", "es", "fr"):
+        step = _load_step(language, "set_position_manual")
+        assert step["description"].endswith(expected_final_sentence[language]), language
+        assert "data_description" not in step, language
+
+    assert (
+        "Die aktuell erfasste Position"
+        in _load_step("de", "set_position_manual")["description"]
+    )

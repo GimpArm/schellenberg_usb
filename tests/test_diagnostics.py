@@ -253,7 +253,7 @@ async def test_device_diagnostics_matches_the_right_blind_among_several(
 async def test_device_diagnostics_returns_the_hub_sticks_state(
     hass: HomeAssistant, connected_api: SchellenbergUsbApi
 ) -> None:
-    """Regression for audit finding 10: the hub (USB stick) is registered
+    """Regression test: the hub (USB stick) is registered
     as its own device, tied to its own SUBENTRY_TYPE_HUB subentry rather
     than any blind's - see __init__.py's async_setup_entry(). Downloading
     diagnostics from *that* device's own page used to always fall through

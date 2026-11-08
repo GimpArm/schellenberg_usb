@@ -35,7 +35,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.schellenberg_usb.api import StopOutcome
 from custom_components.schellenberg_usb.const import (
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS,
     CMD_DOWN,
     CMD_UP,
     CONF_CLOSE_TIME,
@@ -52,6 +54,7 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
     OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
+    POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
     SIGNAL_DEVICE_EVENT,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
     STOP_COMMAND_LATENCY_SECONDS,
@@ -212,7 +215,8 @@ async def test_async_close_cover_raises_when_control_blind_with_retry_fails(
 async def test_async_open_cover_clears_stale_target_when_a_preserved_leg_fails(
     hass: HomeAssistant,
 ) -> None:
-    """Regression guard for audit finding 2.
+    """Regression guard: a failed, target-preserving leg must not leave
+    a stale target behind.
 
     A failed set_cover_position() leg (_preserve_target=True) used to leave
     _target_position stale, since only a plain, non-preserving open/close
@@ -407,17 +411,22 @@ async def test_async_close_cover_does_not_start_tracking_before_retry_succeeds(
     mock_start_tracking.assert_called_once_with()
 
 
-async def test_async_open_cover_pushes_move_start_time_past_the_dead_time(
+async def test_async_open_cover_sets_move_start_time_to_plain_monotonic(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The real _move_start_time must land STOP_COMMAND_LATENCY_SECONDS ahead.
+    """The real _move_start_time must land at plain time.monotonic(), not
+    pushed into the future.
 
     Companion to test_async_open_cover_does_not_start_tracking_before_
     retry_succeeds above, which only proves _move_start_time is set at
     all (not None) once control_blind_with_retry() succeeds. This proves
-    *where* it is set to - time.monotonic() plus STOP_COMMAND_LATENCY_
-    SECONDS, not plain time.monotonic() - see that assignment's own
-    comment in _async_open_cover_body() for why.
+    *where* it is set to. Used to be pushed STOP_COMMAND_LATENCY_SECONDS
+    ahead instead; reverted (Issue #78, 2026-11-07) because that push
+    froze the reported position for just over a second at the start of
+    every move - see this assignment's own comment in
+    _async_open_cover_body() for the full reasoning, and
+    stop_lead_percent's own comment in _async_position_update_loop() for
+    where that compensation lives now instead.
     """
     clock = _FakeClock(2_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
@@ -428,13 +437,13 @@ async def test_async_open_cover_pushes_move_start_time_past_the_dead_time(
 
     await cover.async_open_cover()
 
-    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
+    assert cover._move_start_time == 2_000.0
 
 
-async def test_async_close_cover_pushes_move_start_time_past_the_dead_time(
+async def test_async_close_cover_sets_move_start_time_to_plain_monotonic(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mirrors test_async_open_cover_pushes_move_start_time_past_the_dead_time."""
+    """Mirrors test_async_open_cover_sets_move_start_time_to_plain_monotonic."""
     clock = _FakeClock(2_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
     api = MagicMock()
@@ -444,7 +453,7 @@ async def test_async_close_cover_pushes_move_start_time_past_the_dead_time(
 
     await cover.async_close_cover()
 
-    assert cover._move_start_time == 2_000.0 + STOP_COMMAND_LATENCY_SECONDS
+    assert cover._move_start_time == 2_000.0
 
 
 async def test_async_close_cover_skips_reset_for_redundant_resend(
@@ -733,7 +742,7 @@ async def test_async_stop_cover_sends_stop_via_control_blind_stop(
     """
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
 
     await cover.async_stop_cover()
@@ -760,9 +769,9 @@ async def test_async_stop_cover_cancels_a_pending_move_for_this_device_first(
     def _record_cancel(_device_id: str) -> None:
         call_order.append("cancel")
 
-    async def _record_stop(*_args: object, **_kwargs: object) -> bool:
+    async def _record_stop(*_args: object, **_kwargs: object) -> StopOutcome:
         call_order.append("stop")
-        return True
+        return StopOutcome.CONFIRMED
 
     api = MagicMock()
     api.cancel_pending_move = Mock(side_effect=_record_cancel)
@@ -793,7 +802,7 @@ async def test_async_stop_cover_does_not_itself_wait_for_transmitter_idle(
     awaited from here.
     """
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.wait_for_transmitter_idle = AsyncMock(return_value=True)
     cover = _build_cover(hass, api)
 
@@ -806,7 +815,7 @@ async def test_async_stop_cover_raises_when_control_blind_stop_fails(
     hass: HomeAssistant,
 ) -> None:
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=False)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.FAILED)
     api.transmit_block_reason = "disconnected"  # stable code, see api.py
     cover = _build_cover(hass, api)
 
@@ -829,7 +838,7 @@ async def test_async_stop_cover_leaves_moving_state_untouched_when_stop_fails(
     docstring for why), needs putting back on this path.
     """
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=False)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.FAILED)
     api.transmit_block_reason = "disconnected"  # stable code, see api.py
     cover = _build_cover(hass, api)
     cover._attr_is_closing = True
@@ -865,7 +874,7 @@ async def test_async_stop_cover_does_not_touch_idle_state_when_stop_fails(
     _start_position_tracking() either.
     """
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=False)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.FAILED)
     api.transmit_block_reason = "disconnected"  # stable code, see api.py
     cover = _build_cover(hass, api)
     cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
@@ -895,9 +904,9 @@ async def test_async_stop_cover_clears_target_before_awaiting_control_blind_stop
     """
     seen_target_during_call: list[int | None] = []
 
-    async def _record_target(*_args: object, **_kwargs: object) -> bool:
+    async def _record_target(*_args: object, **_kwargs: object) -> StopOutcome:
         seen_target_during_call.append(cover._target_position)
-        return True
+        return StopOutcome.CONFIRMED
 
     api = MagicMock()
     api.control_blind_stop = AsyncMock(side_effect=_record_target)
@@ -923,10 +932,10 @@ async def test_async_stop_cover_does_not_cancel_tracking_before_stop_succeeds(
     task = asyncio.ensure_future(asyncio.sleep(100))
     still_live_when_called = False
 
-    async def _check_still_tracking(*_args: object, **_kwargs: object) -> bool:
+    async def _check_still_tracking(*_args: object, **_kwargs: object) -> StopOutcome:
         nonlocal still_live_when_called
         still_live_when_called = cover._position_update_task is task and not task.done()
-        return True
+        return StopOutcome.CONFIRMED
 
     api = MagicMock()
     api.control_blind_stop = AsyncMock(side_effect=_check_still_tracking)
@@ -965,12 +974,12 @@ async def test_async_stop_cover_freezes_position_from_elapsed_time_after_stop_re
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
 
-    async def _delayed_stop(*_args: object, **_kwargs: object) -> bool:
+    async def _delayed_stop(*_args: object, **_kwargs: object) -> StopOutcome:
         # Stands in for a real transmit queued behind another blind's own
         # command - see STOP_RETRY_BUDGET's and _move_lock's own comments
         # in api.py for why this is a realistic, not a worst-case, gap.
         clock.advance(1.5)
-        return True
+        return StopOutcome.CONFIRMED
 
     api = MagicMock()
     api.control_blind_stop = AsyncMock(side_effect=_delayed_stop)
@@ -991,6 +1000,218 @@ async def test_async_stop_cover_freezes_position_from_elapsed_time_after_stop_re
     assert cover._move_start_time is None
 
 
+async def test_async_stop_cover_fallback_leaves_a_racing_retarget_untouched(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A racing same-direction retarget's own target must survive this fallback.
+
+    A third independent review (2026-11-08) of #226/#227 and its own two
+    follow-up fixes found that this general fallback - reached here via an
+    ordinary CONFIRMED stop - never touches self._target_position, unlike
+    the FAILED and backstop-exhaustion branches fixed elsewhere in this
+    method. On its face that looks like the same staleness hazard, but is
+    deliberately correct: a different, newer async_set_cover_position()
+    call's own synchronous write can land during control_blind_stop()'s
+    own await (simulated here exactly as test_async_stop_cover_fallback_
+    does_not_clobber_a_newer_move does for its own is_opening/is_closing
+    case) and leave self._target_position holding its own, live target -
+    which must come through this fallback's own cleanup completely
+    untouched, not reset to None, since _async_open_cover_body()'s/_async_
+    close_cover_body()'s own is_redundant_resend re-arm (or, on its own
+    write failing instead, its own _preserve_target handling) is what
+    actually resolves it, not this method.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+
+    async def _confirmed_while_a_retarget_already_landed(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a different, newer async_set_cover_position()
+        # call's own first, synchronous write (self._target_position =
+        # target_position) landing while this stop's own control_blind_
+        # stop() is still suspended.
+        cover._target_position = 30
+        return StopOutcome.CONFIRMED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_confirmed_while_a_retarget_already_landed
+    )
+    cover = _build_cover(hass, api)
+    cover._travel_time_close = 50.0
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._move_start_position = 100
+    cover._move_start_time = time.monotonic()
+
+    await cover.async_stop_cover()
+
+    # The ordinary fallback still runs for this, still-same-direction
+    # move - is_closing clears exactly as the companion test above
+    # asserts...
+    assert cover._attr_is_closing is False
+    assert cover._position_source_kind == "HA command"
+    # ...but the racing retarget's own target must survive completely
+    # untouched, for that call's own logic to resolve.
+    assert cover._target_position == 30
+    assert any(
+        "a newer target already claimed" in record.message for record in caplog.records
+    )
+
+
+async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for #226/#227.
+
+    A stop whose own control_blind_stop() call is still suspended - here
+    because, standing in for the real debug log that root-caused this, a
+    different, newer async_open_cover() call for this same device already
+    set its own is_opening/is_closing (its own very first line, no await
+    of its own first) while this call's own await of control_blind_stop()
+    was still pending - must not fall through to the ordinary stick-ack-
+    only cleanup once that await resolves: doing so clobbered the newer
+    move's own is_opening/is_closing, move_start_* and tracking task with
+    state meant for the move this stop actually targeted, freezing the
+    dashboard until the next command. The newer move's state (simulated
+    here exactly as test_async_close_cover_skips_reset_for_redundant_
+    resend above does for its own already-in-progress case) must come
+    through this call completely untouched.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+
+    async def _stop_while_a_newer_open_already_took_over(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a real dashboard "open" tap racing in while this
+        # stop is still in flight: async_open_cover()'s own very first
+        # lines (no await before them) flip these two and nothing else,
+        # before its own control_blind_with_retry() or tracking loop ever
+        # runs - exactly the window this test is closing.
+        cover._attr_is_opening = True
+        cover._attr_is_closing = False
+        return StopOutcome.CONFIRMED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_stop_while_a_newer_open_already_took_over
+    )
+    cover = _build_cover(hass, api)
+    cover._async_cancel_position_tracking = AsyncMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True  # the move this stop call was actually sent for
+    cover._attr_current_cover_position = 60
+
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    cover._position_update_task = fake_task  # the newer open's own tracking
+    cover._move_start_time = 999.0  # the newer open's own baseline
+    cover._move_start_position = 54
+
+    await cover.async_stop_cover()
+
+    # The newer move's state must come through exactly as it set it - none
+    # of it read back from this call's own fallback, which was written for
+    # the close this stop call actually targeted, not the open that
+    # superseded it.
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    assert cover._position_update_task is fake_task
+    assert cover._move_start_time == 999.0
+    assert cover._move_start_position == 54
+    assert cover._attr_current_cover_position == 60
+    cover._async_cancel_position_tracking.assert_not_awaited()
+    assert any(
+        "a newer move already started for this device" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_async_stop_cover_failed_outcome_does_not_clobber_a_newer_target(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for the same bug class, in the FAILED branch.
+
+    A second independent review (2026-11-08) of the fix above found an
+    analogous, unconfirmed assumption a few lines away: the FAILED branch
+    restores self._target_position from previous_target_position
+    unconditionally, with no re-check that nothing else claimed the
+    target slot while control_blind_stop() above was suspended - exactly
+    the mistake #226/#227 fixed for is_opening/is_closing. Here, a
+    different, newer async_set_cover_position() call's own synchronous
+    write (self._target_position = target_position) lands during that
+    same await, before this stop's own write fails. The newer call's
+    target must survive completely untouched, not be overwritten with
+    this stale call's own, now-irrelevant previous target.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+
+    async def _fail_while_a_newer_target_already_landed(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a different, newer async_set_cover_position()
+        # call's own first, synchronous write landing while this stop's
+        # own control_blind_stop() is still suspended - see async_set_
+        # cover_position()'s own self._target_position = target_position.
+        cover._target_position = 30
+        return StopOutcome.FAILED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_fail_while_a_newer_target_already_landed
+    )
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._target_position = 50  # the target this stop call itself cleared
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_stop_cover()
+
+    assert cover._target_position == 30
+    assert any(
+        "a newer move already claimed its own target" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_async_stop_cover_reports_unconfirmed_without_raising(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A manual stop must stay responsive on UNCONFIRMED, not raise or hang.
+
+    Unlike the auto-stop-at-target loop (which can afford to keep retrying
+    for up to AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS - see its own tests
+    below), a manual stop press must not wait any longer than control_
+    blind_stop() itself already does internally: StopOutcome.UNCONFIRMED
+    here still completes the same way StopOutcome.CONFIRMED does (freezes
+    the estimate, stops tracking, clears is_opening/is_closing) rather than
+    raising HomeAssistantError the way FAILED does - a write genuinely went
+    out, it is simply not provably accepted. What changes is honesty about
+    that: _position_source_kind must reflect this was not positively
+    confirmed, and a warning must say so, rather than this being logged
+    identically to a confirmed stop the way it was before StopOutcome
+    existed.
+    """
+    caplog.set_level(logging.WARNING, logger="custom_components.schellenberg_usb.cover")
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.UNCONFIRMED)
+    cover = _build_cover(hass, api)
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._move_start_position = 50
+    cover._move_start_time = time.monotonic()
+
+    await cover.async_stop_cover()
+
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
+    assert cover._position_source_kind == "unconfirmed stop"
+    assert any("not confirmed accepted" in record.message for record in caplog.records)
+
+
 async def test_position_loop_stops_at_a_partial_target(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -999,7 +1220,7 @@ async def test_position_loop_stops_at_a_partial_target(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
     monkeypatch.setattr(
         cover,
@@ -1036,7 +1257,7 @@ async def test_position_loop_retries_auto_stop_when_the_write_fails(
 ) -> None:
     """A failed auto-stop write must not be treated as a successful stop.
 
-    Regression guard for audit finding 1: control_blind_stop()'s return
+    Regression guard: control_blind_stop()'s return
     value used to be discarded, so is_closing/is_opening/the target were
     cleared unconditionally even when the write never reached the wire -
     reporting the move as finished while the motor kept running toward its
@@ -1050,7 +1271,9 @@ async def test_position_loop_retries_auto_stop_when_the_write_fails(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(side_effect=[False, _LoopKeptRunning])
+    api.control_blind_stop = AsyncMock(
+        side_effect=[StopOutcome.FAILED, _LoopKeptRunning]
+    )
     cover = _build_cover(hass, api)
     monkeypatch.setattr(
         cover,
@@ -1069,6 +1292,376 @@ async def test_position_loop_retries_auto_stop_when_the_write_fails(
     # eventual end-stop) can still be acted on - not silently discarded.
     assert cover._target_position == 40
     assert cover._attr_is_closing is True
+
+
+async def test_position_loop_retries_auto_stop_when_the_write_is_unconfirmed(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An UNCONFIRMED auto-stop write must not be treated as a successful stop either.
+
+    The actual bug this whole fix exists for: control_blind_stop() used to
+    return a bare bool, so STOP_RETRY_BUDGET's own exhausted-fallback write
+    - sent, but nothing confirms the stick (let alone the motor) ever saw
+    it - was indistinguishable from a genuinely stick-accepted stop. A real
+    six-blind Alexa "25%" command (2026-11-01) hit exactly this: the
+    fallback fired for one blind, this loop finalized on the strength of
+    it, and that blind then kept physically closing all the way to its own
+    end stop while the dashboard stayed frozen at the stale percentage this
+    loop had already committed to. StopOutcome.UNCONFIRMED must retry next
+    tick, exactly like FAILED already does (see the test above), not
+    finalize - see test_position_loop_backstop_reports_unknown_after_
+    prolonged_unconfirmed_stops below for how long it may keep retrying.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=[StopOutcome.UNCONFIRMED, _LoopKeptRunning]
+    )
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 40),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    assert api.control_blind_stop.await_count == 2
+    # Same assertions as the FAILED case above, for the same reason: must
+    # still be a live, untouched move so the retry (or the motor's own
+    # eventual end-stop) can still be acted on - not silently discarded.
+    assert cover._target_position == 40
+    assert cover._attr_is_closing is True
+
+
+async def test_position_loop_backstop_reports_unknown_after_prolonged_unconfirmed_stops(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retrying an unconfirmed auto-stop is not unbounded.
+
+    Companion to the UNCONFIRMED-retries test above: retrying forever would
+    just trade one false-confidence bug (a stale, wrong percentage treated
+    as a confirmed stop) for another (an entity that looks like it is still
+    confidently tracking a position it can no longer vouch for at all).
+    Once AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS has genuinely elapsed
+    since the first attempt at this stop, the loop must give up and report
+    the position as unknown (None, Home Assistant's own representation for
+    this, already used elsewhere in this integration) rather than leave the
+    stale, already-snapped target percentage on the dashboard looking as
+    trustworthy as a confirmed one.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    caplog.set_level(logging.ERROR, logger="custom_components.schellenberg_usb.cover")
+    call_count = 0
+
+    async def _unconfirmed_then_past_the_backstop(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Still well inside the backstop - proves this isn't simply a
+            # one-strike give-up disguised as a budget.
+            clock.advance(1.0)
+        else:
+            clock.advance(AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS)
+        return StopOutcome.UNCONFIRMED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(side_effect=_unconfirmed_then_past_the_backstop)
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 40),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+
+    await cover._async_position_update_loop()
+
+    assert api.control_blind_stop.await_count == 2
+    # Gives up for real this time: no more retrying, and the dashboard must
+    # not keep showing the stale, already-snapped 40% with no real backing
+    # any more - nor "closing", which is just as much a confidence claim
+    # this loop can no longer make.
+    assert cover._attr_current_cover_position is None
+    assert cover._attr_is_closed is None
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
+    assert cover._move_start_position is None
+    assert cover._target_position is None
+    assert cover._pending_auto_stop_since is None
+    assert any("still unconfirmed" in record.message for record in caplog.records)
+
+
+async def test_position_loop_backstop_resets_after_a_retarget_mid_unconfirmed_retry(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retarget landing while UNCONFIRMED must not inherit the old clock.
+
+    Regression guard for a gap an independent review (2026-11-01) found in
+    the backstop mechanism's first version: self._pending_auto_stop_since
+    was only ever cleared on StopOutcome.CONFIRMED or on the backstop's own
+    exhaustion - never when a retarget (or a direction-reversal
+    cancellation; see _async_cancel_position_tracking()'s own comment)
+    lands while still UNCONFIRMED/FAILED and retrying. A stale timestamp
+    left over from the *old* target could then survive into a completely
+    different, later episode and silently eat into (or exhaust outright)
+    its own AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS budget before that
+    episode's very first attempt. Exercised here via a same-task retarget
+    (the same gap test_position_loop_keeps_tracking_a_same_direction_
+    retarget_mid_stop covers for the CONFIRMED case) rather than an actual
+    cancel+restart, to isolate this loop's own re-stamping logic from
+    _async_cancel_position_tracking()'s separate, already-straightforward
+    clearing.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    call_count = 0
+
+    async def _unconfirmed_retarget_then_unconfirmed_again(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Burns almost this episode's whole budget against the
+            # *original* target (40) before a retarget lands.
+            clock.advance(AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS - 1.0)
+            cover._target_position = 25
+            return StopOutcome.UNCONFIRMED
+        if call_count == 2:
+            # ... then only a couple more seconds against the *new*
+            # target (25). If the old timestamp leaked through, the
+            # combined elapsed time (almost the full budget, plus this)
+            # would already exceed AUTO_STOP_CONFIRMATION_BACKSTOP_
+            # SECONDS and the loop would wrongly give up right here, on
+            # this target's very first attempt.
+            clock.advance(2.0)
+            return StopOutcome.UNCONFIRMED
+        raise _LoopKeptRunning
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_unconfirmed_retarget_then_unconfirmed_again
+    )
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", cover._target_position),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    # Three calls: proves the loop neither gave up prematurely right after
+    # the retarget (call 2, the old-bug outcome) nor got stuck retrying the
+    # stale 40 target forever instead of noticing 25.
+    assert api.control_blind_stop.await_count == 3
+    assert cover._target_position == 25
+    assert cover._attr_is_closing is True
+    # The clock was actually re-stamped for the new target, not merely
+    # "happened to not exceed the budget" by coincidence.
+    assert cover._pending_auto_stop_target == 25
+    assert cover._pending_auto_stop_since == pytest.approx(
+        1_000.0 + AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS - 1.0
+    )
+
+
+async def test_position_loop_backstop_exhaustion_does_not_clobber_a_retarget(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for the same bug class, in the backstop-exhaustion path.
+
+    A second independent review (2026-11-08) of #226/#227 found an
+    analogous gap here: unlike the sibling test above - a retarget landing
+    on some *earlier*, still-retrying attempt, which self-corrects on the
+    very next tick's own fresh target_when_stop_was_sent - nothing
+    protected the one attempt whose own clock.advance() happens to cross
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS itself. Before this fix, a
+    retarget landing in that exact attempt's own await fell straight into
+    the backstop-exhaustion branch's unconditional clear, wiping out the
+    brand new target (and is_closing/tracking) a retarget call had already
+    claimed moments earlier in that same await, and ending this task via
+    return with nothing left to track or auto-stop the new leg at all -
+    the #226/#227 bug class again, reached via 30s of sustained backstop
+    retries landing on the same tick as a retarget rather than a direction
+    reversal racing a manual stop.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+    call_count = 0
+
+    async def _retarget_then_cross_the_backstop_on_the_same_attempt(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Stands in for a same-direction retarget (a fresh
+            # set_cover_position() call) landing during *this* attempt's
+            # own control_blind_stop() await - its own first synchronous
+            # write already pointed self._target_position at its own new
+            # value before this same attempt's own clock.advance() below
+            # crosses the backstop.
+            cover._target_position = 25
+            clock.advance(AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS)
+            return StopOutcome.UNCONFIRMED
+        raise _LoopKeptRunning
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_retarget_then_cross_the_backstop_on_the_same_attempt
+    )
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", cover._target_position),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40  # the stale target this attempt was sent for
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    # Reached a second attempt - against the new target - rather than
+    # returning from inside the first attempt's own backstop-exhaustion
+    # cleanup.
+    assert api.control_blind_stop.await_count == 2
+    # The retarget's own state must come through exactly as it set it -
+    # none of it read back from this attempt's own backstop-exhaustion
+    # cleanup, which was written for the stale 40 target this attempt
+    # actually sent a stop for, not the 25 that superseded it.
+    assert cover._target_position == 25
+    assert cover._attr_is_closing is True
+    assert cover._attr_current_cover_position == 25
+    assert cover._move_start_time == 1_000.0
+    assert cover._move_start_position == 50
+    assert any(
+        "a newer retarget already claimed this device" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_position_loop_times_out_after_the_outer_budget_is_exhausted(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole loop, not just the auto-stop retry sub-step, is bounded.
+
+    Issue #78's own outer safety net (2026-11-07, confirmed directly with
+    the project owner): POSITION_UPDATE_LOOP_TIMEOUT_SECONDS bounds
+    _async_position_update_loop()'s own total running time, regardless of
+    which branch it is stuck in - unlike AUTO_STOP_CONFIRMATION_BACKSTOP_
+    SECONDS above, which only times the auto-stop-at-target retry sub-loop
+    and never engages for a plain open()/close() at all (target_position
+    is None there). Exercised here via exactly that plain-close scenario,
+    with its own position estimate pinned well short of the 0% end stop no
+    matter how much simulated time passes, so neither the ordinary
+    "reached fully closed" branch nor the auto-stop backstop can be what
+    ends this loop - only this outer timeout can.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    caplog.set_level(logging.ERROR, logger="custom_components.schellenberg_usb.cover")
+    call_count = 0
+
+    def _pinned_position_update() -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Still well inside the budget - proves this isn't simply a
+            # one-tick give-up disguised as a timeout.
+            clock.advance(1.0)
+        else:
+            clock.advance(POSITION_UPDATE_LOOP_TIMEOUT_SECONDS)
+        # Pinned short of the end stop no matter how much simulated time
+        # passes - the real _update_position() is a monotonic, clamped
+        # function of elapsed time and would otherwise eventually reach 0
+        # on its own, which would let the ordinary end-stop branch end
+        # this loop first and defeat the point of this test.
+        cover._attr_current_cover_position = 50
+
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(cover, "_update_position", _pinned_position_update)
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = None
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+    # Set to prove this outer timeout's own cleanup clears it too - unlike
+    # the narrower auto-stop backstop above, this can fire mid-full-travel-
+    # resync as well as mid-auto-stop, so it has to clean up after either.
+    cover._full_travel_resync_direction = "closing"
+
+    await cover._async_position_update_loop()
+
+    assert call_count == 2
+    # Same "stop trusting a stale estimate" outcome as the auto-stop
+    # backstop above, reached via a completely different, outer path.
+    assert cover._attr_current_cover_position is None
+    assert cover._attr_is_closed is None
+    assert cover._attr_is_opening is False
+    assert cover._attr_is_closing is False
+    assert cover._move_start_time is None
+    assert cover._move_start_position is None
+    assert cover._target_position is None
+    assert cover._pending_auto_stop_since is None
+    assert cover._pending_auto_stop_target is None
+    assert cover._full_travel_resync_direction is None
+    assert cover._position_source_kind == "unconfirmed - position update loop timed out"
+    assert any("still running after" in record.message for record in caplog.records)
 
 
 async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
@@ -1101,7 +1694,7 @@ async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
     api = MagicMock()
     call_count = 0
 
-    async def _stop_side_effect(*_args: object, **_kwargs: object) -> bool:
+    async def _stop_side_effect(*_args: object, **_kwargs: object) -> StopOutcome:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1113,7 +1706,7 @@ async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
             # reaction to the race from that method's side of it (already
             # covered by the is_redundant_resend tests above).
             cover._target_position = 25
-            return True
+            return StopOutcome.CONFIRMED
         # Proves the loop re-evaluated against the new target on the very
         # next tick instead of having already ended itself.
         raise _LoopKeptRunning
@@ -1153,64 +1746,19 @@ async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
     assert cover._move_start_position is not None
 
 
-async def test_position_loop_stops_early_to_compensate_stop_latency(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fast blind's stop must fire before the literal target, not at it.
-
-    Companion to test_position_loop_stops_at_a_partial_target above: that
-    test's default 60s travel time makes the latency-compensation lead
-    (STOP_COMMAND_LATENCY_SECONDS / travel_time * 100, roughly 2 points)
-    too small to tell apart from the uncompensated boundary by itself. Here
-    a short, 6s close travel time makes the lead a much larger ~20 points,
-    so a position estimate that has only reached 25% (still well short of
-    the literal 20% target) is enough to trigger the stop - proving the
-    comparison is actually against `target + lead`, not `target`.
-    """
-
-    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
-    api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
-    monkeypatch.setattr(
-        cover,
-        "_update_position",
-        lambda: setattr(cover, "_attr_current_cover_position", 25),
-    )
-    cover._attr_is_closing = True
-    cover._attr_current_cover_position = 30
-    cover._target_position = 20
-
-    await cover._async_position_update_loop()
-
-    # Same reasoning as test_position_loop_stops_at_a_partial_target above.
-    api.cancel_pending_move.assert_called_once_with(cover._command_device_id)
-    api.control_blind_stop.assert_awaited_once_with(
-        cover._command_enum, device_id=cover._command_device_id
-    )
-    # The entity still reports having reached the *requested* target, not
-    # the earlier point the stop was actually sent at - compensation is
-    # about when the stop command goes out, not what position is recorded.
-    assert cover._attr_current_cover_position == 20
-    assert cover._target_position is None
-    assert cover._attr_is_closing is False
-
-
 class _LoopKeptRunning(Exception):
     """Marks that the position loop survived a pass without stopping.
 
-    Used by test_position_loop_does_not_stop_before_the_compensated_lead
-    below to end the loop once it has proven the point, instead of
-    letting it spin forever. Deliberately not asyncio.CancelledError and
-    deliberately not delivered through a real task.cancel(): both of
-    those were tried here first and both crashed the pytest-xdist worker
-    running this test in real CI - first as an "ERROR at teardown ...
-    CancelledError", and after switching to a genuine task.cancel() on a
-    real asyncio.ensure_future() task, as an unrecoverable "[gw3] node
-    down: Not properly terminated" with no traceback at all. Either way,
+    Used by test_position_loop_does_not_stop_early_on_a_short_uncontended_leg
+    and test_position_loop_does_not_stop_before_the_compensated_lead below
+    to end the loop once it has proven the point, instead of letting it
+    spin forever. Deliberately not asyncio.CancelledError and deliberately
+    not delivered through a real task.cancel(): both of those were tried
+    here first and both crashed the pytest-xdist worker running this test
+    in real CI - first as an "ERROR at teardown ... CancelledError", and
+    after switching to a genuine task.cancel() on a real
+    asyncio.ensure_future() task, as an unrecoverable "[gw3] node down:
+    Not properly terminated" with no traceback at all. Either way,
     something about asyncio's own cancellation machinery interacting
     with a real, long asyncio.sleep() and this suite's thread-based
     pytest-timeout does not survive cleanly in that environment. An
@@ -1222,14 +1770,77 @@ class _LoopKeptRunning(Exception):
     """
 
 
+async def test_position_loop_does_not_stop_early_on_a_short_uncontended_leg(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short leg's own travel time must no longer inflate the lead.
+
+    Replaces this test's own former self (named ..._stops_early_to_
+    compensate_stop_latency), which proved the opposite: that a short,
+    5s close travel time turned the old ~0.5s uncontended baseline
+    (MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS) into
+    a disproportionately large ~10-point lead, large enough that a
+    position estimate of 25% - still 5 points short of the literal 20%
+    target - satisfied the compensated threshold and fired the stop
+    early. That was the same mechanism as the separately-reported
+    Küchenrolladen 92%/4%-undershoot/dashboard-sluggishness bug, just on
+    the intermediate-target side of it instead of the full-travel side -
+    see stop_lead_percent's own comment in _async_position_update_loop()
+    for the shared root cause and why the uncontended baseline is now
+    zeroed outright rather than merely recomputed. Uncontended, the lead
+    is now exactly 0 regardless of how short the travel time is, so this
+    same 25% estimate must no longer satisfy "<=20": the loop has to
+    keep waiting for the estimate to actually reach the literal target
+    instead, proving short legs no longer get an inflated lead at all.
+    """
+
+    sleep_calls = 0
+
+    async def counting_sleep(*_args: object, **_kwargs: object) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            # See _LoopKeptRunning's own docstring above for why this is
+            # how this suite ends a loop proven not to stop, rather than
+            # a real cancellation.
+            raise _LoopKeptRunning
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 5.0})
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 25),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 30
+    cover._target_position = 20
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    api.control_blind_stop.assert_not_awaited()
+    api.cancel_pending_move.assert_not_called()
+    assert cover._target_position == 20
+
+
 async def test_position_loop_does_not_stop_before_the_compensated_lead(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The early trigger must not fire any earlier than the compensated lead.
 
-    Mirrors the test above with the same 6s travel time (~20-point lead),
-    but the estimate (45%) is still outside target(20) + lead(~20) = ~40 -
-    so the loop must keep waiting rather than stopping prematurely.
+    10s close travel time, uncontended: the lead (stop_latency_seconds /
+    travel_time * 100 - see stop_lead_percent's own comment in
+    _async_position_update_loop() for the derivation) is 0.0/10*100 = 0,
+    putting the threshold at the literal target(20) alone. The estimate
+    (30%) is still outside that - above it, since this is a close - so
+    the loop must keep waiting rather than stopping prematurely. Same
+    fixture as test_position_loop_widens_the_stop_lead_when_the_move_
+    lock_is_busy below, uncontended, to show the contrast: there, the
+    same 30% estimate *does* satisfy that test's own widened, contended
+    threshold.
     """
 
     sleep_calls = 0
@@ -1256,12 +1867,12 @@ async def test_position_loop_does_not_stop_before_the_compensated_lead(
 
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 10.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
-        lambda: setattr(cover, "_attr_current_cover_position", 45),
+        lambda: setattr(cover, "_attr_current_cover_position", 30),
     )
     cover._attr_is_closing = True
     cover._attr_current_cover_position = 50
@@ -1281,24 +1892,26 @@ async def test_position_loop_widens_the_stop_lead_when_the_move_lock_is_busy(
     """Contention for the shared transmit lock must widen the lead further.
 
     Exact same fixture as test_position_loop_does_not_stop_before_the_
-    compensated_lead above - 6s close travel, estimate stuck at 45%,
-    target 20 - which that test used to prove the plain, uncontended lead
-    (~20 points, threshold ~40) does *not* yet cover 45%. The only
-    difference here is api.move_lock_busy=True: the lead doubles to ~40
-    points (threshold target(20) + 40 = 60), which 45 *does* satisfy -
-    proving the loop actually reads move_lock_busy and widens the lead
-    for it, rather than ignoring it or always capping at
+    compensated_lead above - 10s close travel, estimate stuck at 30%,
+    target 20 - which that test used to prove the plain, uncontended
+    lead (now 0, threshold the literal target(20) alone) does *not* yet
+    cover 30. The only difference here is api.move_lock_busy=True: the
+    lead widens to include one STOP_COMMAND_LATENCY_SECONDS on top of
+    that same, now-zeroed uncontended baseline (0.0 + 1.2 = 1.2s), to
+    1.2/10*100 = 12 points (threshold target(20) + 12 = 32), which 30
+    *does* satisfy - proving the loop actually reads move_lock_busy and
+    widens the lead for it, rather than ignoring it or always capping at
     MAX_STOP_LEAD_PERCENT regardless. Real-log motivation: see
     move_lock_busy's own comment in api.py.
     """
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.move_lock_busy = True
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 6.0})
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 10.0})
     monkeypatch.setattr(
         cover,
         "_update_position",
-        lambda: setattr(cover, "_attr_current_cover_position", 45),
+        lambda: setattr(cover, "_attr_current_cover_position", 30),
     )
     cover._attr_is_closing = True
     cover._attr_current_cover_position = 50
@@ -1320,19 +1933,25 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
 ) -> None:
     """The latency-compensation lead must not swallow the whole travel range.
 
-    Regression guard for audit finding 18. stop_lead_percent's own divisor
+    Regression guard: stop_lead_percent's own divisor
     (travel_time_for_lead) is floored at 0.1s, same as _update_position()'s
     - but unlike that calculation, whose final position *is* clamped to
     [0, 100], stop_lead_percent itself used to carry no matching ceiling.
-    A 1s close time - clearly outside anything a real shutter reports, but
-    exactly the kind of corrupt/legacy config value that floor exists for
-    - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 1.0 * 100) = 120
-    points: more than the entire 0-100 range. Uncapped, target(30) + 120 =
-    150 is satisfied by any position at all, so the loop used to fire its
-    stop the instant it was entered, however far from 30 the blind actually
-    was. Capped at MAX_STOP_LEAD_PERCENT (50), the threshold is a sane 80:
-    a position of 85 - the blind has barely started closing from 100 -
-    must not satisfy "85 <= 80" and must not stop yet.
+    Exercised here with api.move_lock_busy=True: the uncontended baseline
+    is now zeroed outright (see stop_lead_percent's own comment in
+    _async_position_update_loop()), so it can no longer produce a lead
+    needing capping however short travel_time_for_lead is - only the
+    contended term (STOP_COMMAND_LATENCY_SECONDS) can still do that now.
+    A 0.2s close time - clearly outside anything a real shutter reports,
+    but exactly the kind of corrupt/legacy config value that floor exists
+    for - makes the raw lead (STOP_COMMAND_LATENCY_SECONDS / 0.2 * 100)
+    = 600 points: far more than the entire 0-100 range. Uncapped,
+    target(30) + 600 = 630 is satisfied by any position at all, so the
+    loop would fire its stop the instant it was entered, however far
+    from 30 the blind actually was. Capped at MAX_STOP_LEAD_PERCENT (50),
+    the threshold is a sane 80: a position of 85 - the blind has barely
+    started closing from 100 - must not satisfy "85 <= 80" and must not
+    stop yet.
     """
 
     sleep_calls = 0
@@ -1348,8 +1967,9 @@ async def test_position_loop_caps_the_stop_lead_for_a_very_short_travel_time(
 
     monkeypatch.setattr(asyncio, "sleep", counting_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
-    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 1.0})
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
+    api.move_lock_busy = True
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 0.2})
     monkeypatch.setattr(
         cover,
         "_update_position",
@@ -1387,7 +2007,7 @@ async def test_position_loop_endstop_target_skips_the_transmitter_wait_too(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     api.wait_for_transmitter_idle = AsyncMock(return_value=True)
     cover = _build_cover(hass, api)
     monkeypatch.setattr(
@@ -1424,7 +2044,7 @@ async def test_position_loop_reaching_an_endstop_target_sends_no_active_stop(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
     monkeypatch.setattr(
         cover,
@@ -1452,8 +2072,7 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
     """Reaching 0/100 via an *explicit* target (set_cover_position) must
     confirm full-travel resync exactly like the plain open_cover()/
     close_cover() path (the target_position-is-None branch further below)
-    already does - found during the independent audit alongside the
-    CHANGELOG entries above this one. Before this fix, this branch set the
+    already does. Before this fix, this branch set the
     live position correctly but never called _confirm_full_travel_resync(),
     so _position_confirmed_since_restart stayed False and the diagnostics
     history never recorded this transit, even though the blind had, in
@@ -1465,7 +2084,7 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
     monkeypatch.setattr(
         cover,
@@ -1496,6 +2115,160 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
         status="estimated from full travel",
     )
     assert cover._attr_is_closing is False
+
+
+async def test_confirm_full_travel_resync_marks_confirmed_even_unarmed(
+    hass: HomeAssistant,
+) -> None:
+    """The real bug the test above's own hand-set _full_travel_resync_
+    direction masked: a set_cover_position(0)/(100) call never arms that
+    attribute in the first place (see async_close_cover's/async_open_
+    cover's own ternary, gated on self._target_position is None, which a
+    set_cover_position() leg's own _preserve_target=True never leaves
+    true) - so in real production code, reaching the endstop this way
+    always calls _confirm_full_travel_resync() with that attribute still
+    None, never "closing"/"opening". Before this fix, the mismatch made
+    the whole call a no-op, so self._position_confirmed_since_restart
+    stayed False forever if the first interaction after a restart
+    happened to be a set_cover_position() call instead of a plain
+    open/close - found and fixed at the project owner's own request
+    (2026-11-08), confirmed to be the same problem on both open and
+    close since async_open_cover()'s own ternary is the identical
+    mirror of async_close_cover()'s.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    assert cover._position_confirmed_since_restart is False
+    assert cover._full_travel_resync_direction is None
+    cover._move_start_position = 30
+
+    cover._confirm_full_travel_resync("closing", 0)
+
+    assert cover._position_confirmed_since_restart is True
+    # Nothing was actually pending, so there is nothing to clear and no
+    # special "estimated from full travel" diagnostic to record either -
+    # only the flag itself changes.
+    assert cover._full_travel_resync_direction is None
+    api.record_position_update.assert_not_called()
+
+
+async def test_confirm_full_travel_resync_leaves_a_different_pending_direction_alone(
+    hass: HomeAssistant,
+) -> None:
+    """Confirming one direction must still not cancel a genuinely
+    different, still-pending resync for the other direction - mirrors
+    test_waiting_for_full_travel_resync_is_false_for_the_other_direction's
+    own point, for this method instead of that one, now that this
+    method's own early return no longer gates the confirmed flag too.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._full_travel_resync_direction = "opening"
+    cover._move_start_position = 30
+
+    cover._confirm_full_travel_resync("closing", 0)
+
+    assert cover._position_confirmed_since_restart is True
+    assert cover._full_travel_resync_direction == "opening"
+    api.record_position_update.assert_not_called()
+
+
+async def test_set_cover_position_to_an_endstop_confirms_position_after_a_restart(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end version of the two tests above, through the real
+    async_set_cover_position()/_async_position_update_loop() wiring
+    rather than _confirm_full_travel_resync() called directly - proves
+    the fix against the actual bug report, not just the helper method:
+    a device whose first interaction after a restart is a
+    set_cover_position(0) call (e.g. a dashboard's own position slider
+    dragged all the way down, rather than the dedicated close button)
+    must come out of it with self._position_confirmed_since_restart set,
+    exactly as a plain close_cover() reaching the same endstop already
+    does.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    assert cover._position_confirmed_since_restart is False
+    cover._attr_current_cover_position = 30
+
+    await cover.async_set_cover_position(**{ATTR_POSITION: 0})
+
+    assert cover._target_position == 0
+    assert cover._attr_is_closing is True
+    # Never armed in the first place - see _confirm_full_travel_resync()'s
+    # own docstring for why that is exactly the gap this test closes.
+    assert cover._full_travel_resync_direction is None
+
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 0),
+    )
+    # _start_position_tracking() was mocked out above, exactly like the
+    # other async_set_cover_position() tests above - this call stands in
+    # for the real background task it would otherwise have spawned.
+    await cover._async_position_update_loop()
+
+    assert cover._attr_current_cover_position == 0
+    assert cover._position_confirmed_since_restart is True
+    assert cover._attr_is_closing is False
+
+
+async def test_set_cover_position_to_an_endstop_also_confirms_when_opening(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the test above, for the opening side.
+
+    Added on the project owner's own direct follow-up question of whether
+    both directions were truly verified, not just argued to be identical
+    by reading async_open_cover()'s ternary alongside async_close_cover()'s
+    (see _confirm_full_travel_resync()'s own docstring) - that argument is
+    correct (the two ternaries differ only in the "opening"/"closing"
+    string literal, see cover.py directly), but is a code-reading argument,
+    not a test. This gives the opening side the same direct, end-to-end
+    proof the test above already gives the closing side, rather than
+    leaving it resting on the symmetry argument alone.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    api = MagicMock()
+    api.control_blind_with_retry = AsyncMock(return_value=True)
+    cover = _build_cover(hass, api)
+    cover._start_position_tracking = MagicMock()  # type: ignore[method-assign]
+    assert cover._position_confirmed_since_restart is False
+    cover._attr_current_cover_position = 70
+
+    await cover.async_set_cover_position(**{ATTR_POSITION: 100})
+
+    assert cover._target_position == 100
+    assert cover._attr_is_opening is True
+    # Never armed in the first place - same reason as the closing-side
+    # test above, mirrored: async_open_cover()'s own ternary is gated on
+    # self._target_position is None exactly like async_close_cover()'s,
+    # and async_set_cover_position() already set it to 100 beforehand.
+    assert cover._full_travel_resync_direction is None
+
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", 100),
+    )
+    await cover._async_position_update_loop()
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._position_confirmed_since_restart is True
+    assert cover._attr_is_opening is False
 
 
 # ---------------------------------------------------------------------------
@@ -1551,20 +2324,27 @@ async def test_update_position_estimates_closing_progress_from_elapsed_time(
 async def test_update_position_holds_at_start_during_the_transmit_dead_time(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Position must not move before the modeled start-side latency elapses.
+    """A _move_start_time pushed into the future must not run the position
+    estimate backwards past the start position.
 
-    async_open_cover()/async_close_cover() push _move_start_time this far
-    into the future rather than leaving it at plain time.monotonic() (see
-    their own comments) - modeling the real ~1.1-1.2s it takes the stick
-    to accept a write before the motor actually starts turning, the same
-    figure STOP_COMMAND_LATENCY_SECONDS already measures for the opposite,
-    stop-side case. Exercises _update_position()'s own max(0.0, ...)
-    clamp directly: while time.monotonic() has not yet reached that
-    pushed-forward point, elapsed_time would otherwise go negative and
-    run total_position_change backwards past _move_start_position - the
-    clamp holds the estimate exactly at the start position instead, and
-    the position resumes its ordinary ramp, from that same start
-    position, once real time catches up to it.
+    async_open_cover()/async_close_cover() used to push _move_start_time
+    this far into the future themselves, modeling the real ~1.1-1.2s it
+    takes the stick to accept a write before the motor actually starts
+    turning - reverted (Issue #78, 2026-11-07; see both call sites' own
+    comments) because it froze the reported position for just over a
+    second at the start of every single move, a real, user-visible
+    regression of its own. Neither call site constructs this scenario any
+    more, but _update_position()'s own max(0.0, ...) clamp - the actual
+    thing under test here - is left in place as a defensive guard rather
+    than removed along with the one caller that used to exercise it, so
+    this test now builds the scenario directly rather than through
+    async_open_cover()/async_close_cover(): while time.monotonic() has
+    not yet reached a (here, manually set) pushed-forward _move_start_
+    time, elapsed_time would otherwise go negative and run total_
+    position_change backwards past _move_start_position - the clamp
+    holds the estimate exactly at the start position instead, and the
+    position resumes its ordinary ramp, from that same start position,
+    once real time catches up to it.
     """
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
@@ -1853,6 +2633,52 @@ async def test_handle_event_stopped_freezes_the_estimated_position(
     assert cover._attr_current_cover_position == 45
     assert cover._attr_is_opening is False
     assert cover._attr_is_closing is False
+
+
+async def test_handle_event_stopped_after_backstop_exhaustion_does_not_error(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A late STOPPED after the backstop gave up must not break log formatting.
+
+    Regression guard for a second bug the same independent review
+    (2026-11-01) found alongside the retarget-leak covered above: once the
+    backstop branch in _async_position_update_loop() sets self._attr_
+    current_cover_position to None (see AUTO_STOP_CONFIRMATION_BACKSTOP_
+    SECONDS's own exhaustion branch), nothing stops a real, late STOPPED
+    confirmation from the stick itself arriving afterwards - the backstop
+    giving up does not mean the motor stopped trying to answer. This
+    handler's own log line used to format that None straight into "%d%%",
+    which raises inside the logging module's own lazy formatting
+    (record.getMessage()) - normally caught by a handler's own
+    handleError() rather than propagating, so this never crashed Home
+    Assistant, but it did turn exactly the event this handler most needs
+    to report cleanly into a confusing traceback instead. Checked here by
+    calling getMessage() directly, the same way a handler's own formatting
+    would, rather than relying on whichever error-swallowing behaviour
+    caplog's own handler happens to have.
+    """
+    caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.cover")
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    # Mirrors exactly what the backstop-exhaustion branch itself leaves
+    # behind (see _async_position_update_loop()'s own code) - position
+    # genuinely unknown, no move tracked any more.
+    cover._attr_current_cover_position = None
+    cover._attr_is_closed = None
+    cover._attr_is_opening = False
+    cover._attr_is_closing = False
+    cover._move_start_time = None
+    cover._move_start_position = None
+    cover._target_position = None
+
+    cover._handle_event(EVENT_STOPPED)
+
+    stopped_messages = [
+        record.getMessage() for record in caplog.records if "STOPPED" in record.msg
+    ]
+    assert stopped_messages
+    assert "unknown" in stopped_messages[0]
     # A STOPPED echo must not snap to the stale target - see _handle_event's
     # own comment: the blind was interrupted externally (e.g. the physical
     # remote), so the commanded target was never actually reached.
@@ -2019,7 +2845,8 @@ async def test_handle_event_stopped_logs_the_recalculated_position(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression for audit finding 17.
+    """Regression: the STOPPED info log must print the recalculated
+    position, not a stale polling-tick snapshot.
 
     The "Device %s STOPPED (position: %d%%)" info log used to be emitted
     *before* _update_position() recalculated self._attr_current_cover_
@@ -2675,7 +3502,7 @@ async def test_set_cover_position_equal_to_current_while_moving_stops_instead(
     """Reaching exactly the already-in-flight target by a new command of the
     same value must stop, not let the loop drive past it."""
     api = MagicMock()
-    api.control_blind_stop = AsyncMock(return_value=True)
+    api.control_blind_stop = AsyncMock(return_value=StopOutcome.CONFIRMED)
     cover = _build_cover(hass, api)
     cover._attr_is_opening = True
     cover._attr_current_cover_position = 50
@@ -2834,9 +3661,10 @@ async def test_added_to_hass_leaves_position_unknown_when_nothing_was_restored(
 ) -> None:
     """A brand-new entity with no prior Home Assistant state at all, and no
     CONF_INITIAL_POSITION in its device_data either (e.g. a blind paired
-    before that key existed, or via the hybrid add_shutter_from_remote
-    workflow, which never calibrates) - see the sibling test right below
-    for the case where that key *is* present.
+    before that key existed, or - before the Issue #78 pairing-flow
+    unification (2026-11-07) - via what was then a separate manual-entry
+    path that never calibrated) - see the sibling test right below for
+    the case where that key *is* present.
 
     Used to default to 0%/closed here - see this branch's own comment in
     cover.py for the real-world report that traced "every blind on a hub
@@ -3102,7 +3930,8 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
 async def test_async_setup_entry_nulls_a_stale_status_identity_when_source_is_unknown(
     hass: HomeAssistant,
 ) -> None:
-    """Regression guard for audit finding 8.
+    """Regression guard: a stale status identity left over from before
+    the source went unconfirmed must not be read back as live.
 
     identities.py's resolve_blind_identities() - the canonical logic for
     this exact resolution, shared by config_flow.py's developer-tools
@@ -3155,8 +3984,7 @@ async def test_async_setup_entry_resyncs_device_registry_name_and_model_on_edit(
     form, via async_update_and_abort() -> the entry-update listener's
     async_reload() -> this same async_setup_entry() running again) must
     update the already-existing device registry entry's name/model to
-    match - found during the independent audit alongside the CHANGELOG
-    entries above this one. Before this fix, device_registry.async_get_or_
+    match. Before this fix, device_registry.async_get_or_
     create()'s name=/model= kwargs were only ever honored on the device's
     very first creation; every later call found the device already
     existing and left its name/model exactly as first registered, forever,
@@ -3492,7 +4320,7 @@ async def test_will_remove_from_hass_shuts_down_tracking_then_calls_super(
 async def test_will_remove_from_hass_cancels_this_devices_in_flight_move(
     hass: HomeAssistant,
 ) -> None:
-    """Regression for audit finding 16: removing a blind's own subentry/
+    """Regression: removing a blind's own subentry/
     device used to leave any in-flight control_blind_with_retry() loop for
     it running untouched - still able to transmit a real RF command, or
     process a stray ack, for a blind Home Assistant no longer has an

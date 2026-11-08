@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -43,6 +44,7 @@ from .const import (
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
     SIGNAL_DEVICE_EVENT_CAPTURE,
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS,
     STATUS_IDENTITY_SOURCE_CALIBRATION,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
 )
@@ -58,6 +60,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 type FlowResult = SubentryFlowResult
+
+# How often _claim_or_advance_capture() below re-polls a capture claim that
+# first came back busy. Short enough that a genuinely concurrent claim
+# (the only way to still be busy once start_status_frame_capture()'s own
+# staleness reclaim applies - api.py) clears within a couple of polls of
+# whichever flow actually holds it finishing normally, long enough not to
+# spin needlessly while the person simply waits.
+CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS = 2.0
 
 
 class CalibrationFlowHandler:
@@ -99,7 +109,7 @@ class CalibrationFlowHandler:
         self._capture_active = False
         # The SchellenbergUsbApi instance the currently-active capture was
         # actually started on, if any - see _start_calibration_capture()'s
-        # own comment (audit finding 15) for why _set_calibration_capture_
+        # own comment for why _set_calibration_capture_
         # phase()/_finish_calibration_capture() read this instead of each
         # re-fetching entry.runtime_data while a capture is active.
         self._capture_api: SchellenbergUsbApi | None = None
@@ -120,11 +130,11 @@ class CalibrationFlowHandler:
         let two concurrent flows for two *different* blinds silently
         corrupt each other's result, up to and including writing the
         wrong status identity into a blind's permanent config data.
-        async_discover_status_identities() in config_flow.py already
-        gets this right for the exact same buffer: it lets the
-        RuntimeError propagate so its caller can show a "busy" error
-        instead of stealing. This mirrors that behavior here - found
-        during the lifecycle audit round.
+        async_discover_status_identities() (api.py), called from
+        config_flow.py's async_step_discover_status, already gets this
+        right for the exact same buffer: it lets the RuntimeError
+        propagate so that caller can show a "busy" error instead of
+        stealing. This mirrors that behavior here.
         """
         api = self._runtime_api()
         if api is None:
@@ -134,7 +144,7 @@ class CalibrationFlowHandler:
         except RuntimeError:
             return False
         self._capture_active = True
-        # Audit finding 15: cache the instance this capture actually
+        # Cache the instance this capture actually
         # started on, rather than letting _set_calibration_capture_phase()/
         # _finish_calibration_capture() each re-fetch entry.runtime_data
         # (via self._runtime_api()) on every call. Every subentry add/
@@ -170,12 +180,12 @@ class CalibrationFlowHandler:
             # frames - leaving the blind at "status unknown" with no
             # position tracking and no indication the earlier timeout was
             # the cause. Start a fresh capture instead of labelling one
-            # that no longer exists - found during the lifecycle audit
-            # round. That fresh start can itself find another blind's
-            # capture already running, so callers must still check the
-            # return value rather than assuming a retry always succeeds.
+            # that no longer exists. That fresh start can itself find
+            # another blind's capture already running, so callers must
+            # still check the return value rather than assuming a retry
+            # always succeeds.
             return self._start_calibration_capture(phase=phase)
-        # Audit finding 15: read the instance this same capture actually
+        # Read the instance this same capture actually
         # started on (see _start_calibration_capture()'s own comment),
         # never a fresh self._runtime_api() lookup - entry.runtime_data may
         # already point at a different, newer instance by now.
@@ -186,7 +196,7 @@ class CalibrationFlowHandler:
         return True
 
     def _finish_calibration_capture(self, end_reason: str) -> None:
-        # Audit finding 15: same reasoning as _set_calibration_capture_
+        # Same reasoning as _set_calibration_capture_
         # phase() above - read back from the instance this capture was
         # actually started on, not whatever entry.runtime_data currently
         # points at.
@@ -199,8 +209,8 @@ class CalibrationFlowHandler:
         # that method's own comment) - without also passing it here, that
         # other blind's real frames, captured into this same hub-wide
         # buffer regardless of either protection, could still outscore
-        # this blind's own and get chosen as its identity instead. Audit
-        # finding 9: the wait was already scoped this way, the actual
+        # this blind's own and get chosen as its identity instead. The
+        # wait was already scoped this way; the actual
         # identity decision below was not.
         foreign_device_ids: frozenset[str] = (self._selected_device or {}).get(
             "foreign_capture_device_ids"
@@ -210,6 +220,38 @@ class CalibrationFlowHandler:
         )
         self._capture_active = False
         self._capture_api = None
+
+    async def _claim_or_advance_capture(self, claim: Callable[[], bool]) -> bool:
+        """Run `claim` (either _start_calibration_capture or
+        _set_calibration_capture_phase, bound to its phase), waiting out a
+        busy capture instead of failing on the first try.
+
+        start_status_frame_capture()'s own staleness reclaim (api.py)
+        already means a capture abandoned by a flow that never finished it
+        stops blocking anyone on its own, within
+        STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS - so the only way
+        `claim` can still come back False here is a second flow's own
+        genuinely still-running capture for a *different* blind, which
+        this waits out rather than surfacing as a dead end the person has
+        to notice and manually retry (2026-11-08, replacing the
+        "calibration_capture_busy" error this step used to show - see
+        CALIBRATION_TIMEOUT's neighbour in const.py for the fuller story).
+        Bounded by that same staleness window plus one extra poll's worth
+        of margin: by the time that elapses, either `claim` has already
+        succeeded on an earlier poll, or the other flow's own capture has
+        itself gone stale and this call's own next poll reclaims it.
+        """
+        deadline = (
+            time.monotonic()
+            + STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
+            + CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS
+        )
+        while True:
+            if claim():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS)
 
     def _apply_calibration_status_candidates(self) -> None:
         result = self._calibration_discovery_result
@@ -285,6 +327,21 @@ class CalibrationFlowHandler:
     def set_selected_device(self, device: dict[str, Any]) -> None:
         self._selected_device = device
 
+    def recorded_leg_times(self) -> tuple[float | None, float | None]:
+        """Return (open_time, close_time) as actually measured so far.
+
+        Used by async_step_manual_times() (config_flow.py) to pre-fill
+        whichever leg already has a real, measured value when the person
+        abandons a live calibration for manual entry after the *other*
+        leg's own timeout, instead of asking them to re-enter or guess a
+        number Home Assistant already knows precisely - see that
+        method's own docstring. At most one of the two is ever non-None
+        here: both becoming set means the live run already completed and
+        moved on to async_step_calibration_complete() instead of ever
+        offering manual entry again.
+        """
+        return self._open_time, self._close_time
+
     async def async_step_calibration_close(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -292,15 +349,24 @@ class CalibrationFlowHandler:
         if user_input is not None:
             initial_state = user_input.get("initial_state")
             if initial_state == "open":
-                if not self._start_calibration_capture(phase="closing"):
-                    errors["base"] = "calibration_capture_busy"
-                else:
+                if await self._claim_or_advance_capture(
+                    lambda: self._start_calibration_capture(phase="closing")
+                ):
                     return await self.async_step_calibration_close_instruction()
+                # Only reachable if a *different* flow's own capture somehow
+                # stayed genuinely active (never stale) for the entire wait
+                # in _claim_or_advance_capture() above - see that method's
+                # own docstring. Generic "unknown" rather than a dedicated
+                # string: honestly unexpected at this point, not worth a
+                # fourth-language string for a case this close to
+                # unreachable.
+                errors["base"] = "unknown"
             elif initial_state == "closed":
-                if not self._start_calibration_capture(phase="opening"):
-                    errors["base"] = "calibration_capture_busy"
-                else:
+                if await self._claim_or_advance_capture(
+                    lambda: self._start_calibration_capture(phase="opening")
+                ):
                     return await self.async_step_calibration_open_instruction()
+                errors["base"] = "unknown"
             else:
                 # Neither real option was chosen - see the schema comment
                 # below for why this is reachable even though the field is
@@ -367,8 +433,14 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        if not self._set_calibration_capture_phase("opening"):
-            errors["base"] = "calibration_capture_busy"
+        if not await self._claim_or_advance_capture(
+            lambda: self._set_calibration_capture_phase("opening")
+        ):
+            # See async_step_calibration_close()'s own comment on its
+            # identical fallback - near-unreachable once
+            # _claim_or_advance_capture() has already waited out any
+            # genuinely concurrent capture.
+            errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_open_instruction",
                 data_schema=vol.Schema({}),
@@ -382,6 +454,23 @@ class CalibrationFlowHandler:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_UP)
             if not start_ok:
                 self._finish_calibration_capture("opening_start_timeout")
+                if self._create_subentry_after_calibration:
+                    # Issue #77 (2026-11-07): a fresh pairing gets an
+                    # explicit choice instead of only an on-screen error and
+                    # an implicit "submit this same form again" - see
+                    # async_step_calibration_retry()'s own docstring below
+                    # and CALIBRATION_TIMEOUT's own comment in const.py.
+                    # Recalibrating an already-paired blind
+                    # (_create_subentry_after_calibration is False there -
+                    # see async_step_calibrate() in config_flow.py) falls
+                    # through to the unchanged error-and-resubmit behavior
+                    # below instead; every other timeout branch in this
+                    # method mirrors this same check without repeating this
+                    # comment.
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -398,6 +487,11 @@ class CalibrationFlowHandler:
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
                 self._finish_calibration_capture("opening_stop_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_open_instruction",
@@ -455,8 +549,14 @@ class CalibrationFlowHandler:
                 last_step=False,
             )
 
-        if not self._set_calibration_capture_phase("closing"):
-            errors["base"] = "calibration_capture_busy"
+        if not await self._claim_or_advance_capture(
+            lambda: self._set_calibration_capture_phase("closing")
+        ):
+            # See async_step_calibration_close()'s own comment on its
+            # identical fallback - near-unreachable once
+            # _claim_or_advance_capture() has already waited out any
+            # genuinely concurrent capture.
+            errors["base"] = "unknown"
             return self.flow.async_show_form(
                 step_id="calibration_close_instruction",
                 data_schema=vol.Schema({}),
@@ -470,6 +570,11 @@ class CalibrationFlowHandler:
             start_ok = await self._wait_for_movement_start(EVENT_STARTED_MOVING_DOWN)
             if not start_ok:
                 self._finish_calibration_capture("closing_start_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_start_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -486,6 +591,11 @@ class CalibrationFlowHandler:
             stop_ok = await self._wait_for_stop_event()
             if not stop_ok:
                 self._finish_calibration_capture("closing_stop_timeout")
+                if self._create_subentry_after_calibration:
+                    return self.flow.async_show_menu(
+                        step_id="calibration_timeout_choice",
+                        menu_options=["calibration_retry", "manual_times"],
+                    )
                 errors["base"] = "calibration_timeout"
                 return self.flow.async_show_form(
                     step_id="calibration_close_instruction",
@@ -587,9 +697,25 @@ class CalibrationFlowHandler:
                 if calibration_record := self._calibration_record():
                     data[CONF_LAST_CALIBRATION] = calibration_record
                 pairing_flow = cast("SchellenbergPairingSubentryFlow", self.flow)
-                return pairing_flow._finish_pairing(
-                    title=self._pending_device_name, data=data
-                )
+                # Offer a real status-identity discovery attempt before
+                # finishing, the same as async_step_manual_times()'s own
+                # pairing route already does (config_flow.py) - this
+                # live-calibration route used to finish immediately here
+                # with no discovery attempted at all, so a freshly-paired
+                # blind's secondary (and, unless a person separately ran
+                # "Discover status" from Developer Tools afterward,
+                # primary) status identity stayed permanently unset.
+                # `_pending_finish_data` carries this already-assembled
+                # `data` dict through that detour; see its own docstring
+                # in config_flow.py's __init__. Routed through async_step_
+                # status_discovery_choice() rather than straight into
+                # async_step_discover_status() itself (2026-11-08, project
+                # owner's own request) so a person without their original
+                # remote to hand - or who simply doesn't want to run this
+                # right now - can skip it instead of having to abandon
+                # this whole pairing attempt to get past it.
+                pairing_flow._pending_finish_data = data
+                return await pairing_flow.async_step_status_discovery_choice()
 
             existing_data = self.flow._get_reconfigure_subentry().data
             existing_status_identity = normalize_status_identity(
@@ -682,6 +808,26 @@ class CalibrationFlowHandler:
             last_step=True,
         )
 
+    async def async_step_calibration_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Re-enter whichever leg's instruction step is still pending.
+
+        The sole redirect target for calibration_timeout_choice's "retry"
+        option (see async_step_calibration_open_instruction's own comment
+        on its first timeout branch for when that menu is shown at all) -
+        shared by all four timeout cases (open/close leg, movement-start/
+        stop wait) rather than one retry step per case, since which leg is
+        still pending is exactly the same check async_step_calibration_
+        open_instruction/_close_instruction's own success tail already uses
+        to decide what comes after a leg completes: self._open_time is
+        None until the open leg has actually finished, regardless of which
+        leg's own wait just timed out.
+        """
+        if self._open_time is None:
+            return await self.async_step_calibration_open_instruction(user_input)
+        return await self.async_step_calibration_close_instruction(user_input)
+
     async def _wait_for_movement_start(self, event_type: str) -> bool:
         """Wait for one specific device-event command, or time out.
 
@@ -719,8 +865,8 @@ class CalibrationFlowHandler:
             # SIGNAL_DEVICE_EVENT_CAPTURE's own comment in api.py) - without
             # this check it accepted a *different*, unrelated blind moving
             # on the same hub at the same moment as a false positive for
-            # this one, corrupting the open/close time being measured here -
-            # found during the same audit as the entries above. Only ever
+            # this one, corrupting the open/close time being measured here.
+            # Only ever
             # rejects a frame positively attributed to one of those other
             # blinds; anything not yet claimed by anyone - including this
             # same blind's own not-yet-confirmed real identity, exactly the

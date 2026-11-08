@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, cast
 
 import serialx
@@ -38,6 +39,7 @@ from .const import (
     SIGNAL_MANUAL_POSITION_SYNC,
     SIGNAL_STICK_STATUS_UPDATED,
     STATUS_DISCOVERY_TIMEOUT,
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS,
     STOP_COMMAND_EXTRA_RESENDS,
     STOP_COMMAND_RESEND_DELAY_SECONDS,
     VERIFY_TIMEOUT,
@@ -80,7 +82,7 @@ MOVE_ACK_TIMEOUT = 1.0
 # hold the hub-wide lock open-endedly and block every other blind's own
 # open/close behind it - a new coupling between blinds that control_blind()
 # alone never had, since each of its writes was always instant and
-# independent. 15s comfortably covers several full retry cycles even at
+# independent. 30s comfortably covers several full retry cycles even at
 # TRANSMIT_IDLE_TIMEOUT's and MOVE_ACK_TIMEOUT's own worst case (busy
 # replies in normal operation arrive within tens of milliseconds, per real
 # logs - see MOVE_ACK_TIMEOUT's own comment - so this is not a budget meant
@@ -89,8 +91,10 @@ MOVE_ACK_TIMEOUT = 1.0
 # callers, from any other control_blind_with_retry() failure: it latches
 # _busy_latched, same as send_command()'s own exhausted-retry path, so the
 # existing "busy_latched" block reason explains it in the UI without a new
-# translation string.
-MOVE_RETRY_OVERALL_TIMEOUT = 15.0
+# translation string. Raised from 15s to 30s (2026-11-07, project owner's
+# own direction) for more headroom under this installation's real, heavier
+# multi-blind contention than the original figure assumed.
+MOVE_RETRY_OVERALL_TIMEOUT = 30.0
 
 # Total time control_blind_stop() spends, combined, waiting for the
 # transmitter to go idle, acquiring _move_lock (with priority - see
@@ -123,7 +127,7 @@ STOP_RETRY_BUDGET = 2.0
 # whole buffer, so per-chunk CPU cost grows right along with memory, not
 # just the one or the other. A reconnect already clears it (a fresh
 # SchellenbergProtocol instance starts with an empty buffer), but nothing
-# previously forced one on its own - audit finding 12.
+# previously forced one on its own.
 MAX_SERIAL_BUFFER_LENGTH = 4096
 
 # Cap on how many distinct status identities _handle_message() will
@@ -133,7 +137,7 @@ MAX_SERIAL_BUFFER_LENGTH = 4096
 # still bounding a noisy RF environment where many *different*,
 # syntactically-valid identities (someone else's remote, a neighbour's
 # winder, ...) that this hub will never register an entity for could
-# otherwise each mint their own permanent entry forever - audit finding 13.
+# otherwise each mint their own permanent entry forever.
 MAX_LAST_RECEIVED_MESSAGES = 64
 
 # Cap on how many frames one status-frame capture window
@@ -148,8 +152,7 @@ MAX_LAST_RECEIVED_MESSAGES = 64
 # above: finish_status_frame_capture() already only reads real signal out
 # of whatever this holds (summarize_status_discovery_frames() - garbage
 # frames cannot masquerade as a real identity either way), and the window
-# always closes and discards this list on its own regardless - audit
-# finding 14.
+# always closes and discards this list on its own regardless.
 MAX_STATUS_DISCOVERY_FRAMES = 1000
 
 
@@ -299,6 +302,51 @@ def _normalize_protocol_enum(value: object) -> str:
     return text
 
 
+class StopOutcome(Enum):
+    """What control_blind_stop() actually knows once it returns.
+
+    A plain bool used to flatten two very different outcomes into the
+    same truthy value: the stick explicitly accepting the stop write
+    ("t1"), and the STOP_RETRY_BUDGET-exhausted fallback - one last,
+    completely unlocked, unretried control_blind() write, fired with
+    no idea whether the stick (let alone the motor) ever saw it. Both
+    returned True, and both callers (async_stop_cover() and the
+    auto-stop-at-target branch in _async_position_update_loop) then
+    treated "True" as "this blind has now stopped, safe to freeze/
+    clear tracking" - which is correct for the first case and simply
+    wrong for the second: a real 6-blind Alexa "25%" command (2026-
+    11-01) produced exactly this fallback for the living-room blind,
+    which then kept physically closing, uncontrolled, for several
+    more seconds while the entity's reported position stayed frozen
+    at the stale 68% _update_position() had last computed before
+    tracking was torn down - the blind actually ended up fully
+    closed, nothing in Home Assistant ever showed that.
+
+    - CONFIRMED: the stick accepted the write ("t1"). As always, this
+      still says nothing about whether the motor itself caught it
+      (see STOP_COMMAND_EXTRA_RESENDS's own comment in const.py) -
+      only that the one hop this integration can ever observe
+      succeeded. Safe to treat as done the way the old True did.
+    - UNCONFIRMED: STOP_RETRY_BUDGET ran out and the fallback plain
+      write fired, but nothing confirms the stick (or the motor) ever
+      received it. Callers must not finalize position tracking on
+      this - either keep retrying (the auto-stop-at-target branch,
+      which already has a safe "not yet done, retry next tick" path
+      for FAILED and now reuses it here) or, where retrying is not
+      appropriate (a manual stop should stay responsive, not hang),
+      mark the resulting position as unconfirmed rather than display
+      it with the same confidence as a CONFIRMED stop.
+    - FAILED: not even the fallback write reached the wire (e.g. the
+      serial port itself is down). Exactly the old False - nothing
+      about this blind's tracking state has changed, there is
+      nothing to tear down or restore.
+    """
+
+    CONFIRMED = "confirmed"
+    UNCONFIRMED = "unconfirmed"
+    FAILED = "failed"
+
+
 class SchellenbergUsbApi:
     """Manages all communication with the Schellenberg USB stick."""
 
@@ -318,6 +366,12 @@ class SchellenbergUsbApi:
         self._registered_devices: dict[
             str, str
         ] = {}  # Dict[device_id, device_enum] for registered entities
+        # The highest device_enum (as an int) initialize_next_device_enum()
+        # has ever handed out on this connection, regardless of whether
+        # that pairing attempt went on to register a device above - see
+        # that method's own comment for why this is tracked separately
+        # from _registered_devices.
+        self._highest_issued_device_enum: int | None = None
         self._registered_entity_keys: dict[
             StatusIdentity, _StatusIdentityRegistration
         ] = {}
@@ -466,10 +520,15 @@ class SchellenbergUsbApi:
         # whatever this device_id's count happens to cover" - see
         # _move_cancel_requested's own comment below for the second,
         # narrower bug that distinction was needed to close. Each call adds
-        # its own token here on entry and discards (only) that same token
-        # in its own `finally`, popping the device_id entirely once its set
-        # empties, so this dict never holds a stale, empty entry for a
-        # device with nothing genuinely in flight.
+        # its own token here on entry and discards (only) that same
+        # token - in its own `finally`, or, for a move whose
+        # resend_task_spawned ends up True, in that same call's own
+        # detached _send_move_resends_and_cleanup() task's `finally`
+        # instead (see resend_task_spawned's own comment at its call
+        # site for why that one case defers it) - popping the device_id
+        # entirely once its set empties, so this dict never holds a
+        # stale, empty entry for a device with nothing genuinely in
+        # flight.
         self._moves_in_progress: dict[str, set[object]] = {}
         # Per device_id, the subset of that device's own _moves_in_progress
         # tokens (above) that cancel_pending_move() had already snapshotted
@@ -496,10 +555,20 @@ class SchellenbergUsbApi:
         # discarded - a cancellation is conceptually for the device, not
         # for one arbitrarily-chosen call among the several it was
         # snapshotted against), and cleared the same way as
-        # _moves_in_progress above: each call discards only its own token
-        # from its own device_id's entry in its own `finally`, popping the
+        # _moves_in_progress above - including that same resend_task_
+        # spawned exception to "its own `finally`" - each call discards
+        # only its own token from its own device_id's entry, popping the
         # device_id entirely once nothing remains for it in either
         # collection.
+        #
+        # Unlike _moves_in_progress, never discarded in bulk on a lost
+        # or intentional disconnect either: handle_connection_lost() and
+        # disconnect() snapshot every device's own still-active tokens
+        # in here first, the same way cancel_pending_move() does for one
+        # device, instead of clearing this dict alongside that one - see
+        # either method's own comment for why a cancellation recorded
+        # here has to outlive a disconnect that clears _moves_in_progress
+        # out from under it.
         self._move_cancel_requested: dict[str, set[object]] = {}
         # True only between a move's write and learning its outcome;
         # _handle_message's t1/tE branches only touch _move_ack_result/
@@ -705,8 +774,7 @@ class SchellenbergUsbApi:
         dict already preserves insertion order, and popping an existing
         key before reinserting it moves it back to the end, so the oldest
         remaining key (`next(iter(...))`) is always the one least recently
-        updated. Audit finding 13 - this dict previously had no validation
-        and no cap at all.
+        updated. This dict previously had no validation and no cap at all.
         """
         if normalize_status_identity(*identity) is None:
             return
@@ -1199,14 +1267,15 @@ class SchellenbergUsbApi:
         """Public entry point for multi-step sequences outside this module.
 
         config_flow.py's short motor test (async_step_test_motor) sends a
-        direction command via control_blind() and, after a brief hold,
-        follows it with a stop - the same "don't start the next RF write
-        before the previous one's t0" problem _wait_for_transmitter_idle()
-        already solves for teach/pairing/raw-transmit below. control_blind()
-        itself never awaits this (it is deliberately lock-free and
-        immediate - see its own docstring), so the caller is responsible
-        for waiting between its own two writes. Thin wrapper only: all the
-        actual waiting logic lives in _wait_for_transmitter_idle().
+        direction command via control_blind_exclusive() and, after a
+        brief hold, follows it with a stop - the same "don't start the
+        next RF write before the previous one's t0" problem
+        _wait_for_transmitter_idle() already solves for teach/pairing/
+        raw-transmit below. control_blind() itself never awaits this (it
+        is deliberately lock-free and immediate - see its own docstring),
+        so the caller is responsible for waiting between its own two
+        writes. Thin wrapper only: all the actual waiting logic lives in
+        _wait_for_transmitter_idle().
         """
         return await self._wait_for_transmitter_idle(reason, timeout=timeout)
 
@@ -1239,9 +1308,45 @@ class SchellenbergUsbApi:
 
     @callback
     def start_status_frame_capture(self, *, phase: str) -> None:
-        """Start one bounded receive-frame capture for pairing or calibration."""
+        """Start one bounded receive-frame capture for pairing or calibration.
+
+        Raises RuntimeError, without starting anything, when a different
+        capture is already open and still fresh - see
+        CalibrationFlowHandler._start_calibration_capture()'s own docstring
+        (options_flow_calibration.py) for why callers must not force their
+        way in on that RuntimeError.
+
+        A still-open capture older than
+        STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS (const.py) is reclaimed
+        here instead: nothing in Home Assistant's own flow-removal path
+        calls back into this integration to release a capture its owning
+        flow never finished, so a wizard closed, navigated away from, or
+        otherwise abandoned between claiming this buffer and its own next
+        await - start_status_frame_capture() succeeding is itself a plain,
+        synchronous @callback, not an await point - used to leak it
+        forever, refusing every later attempt (including retries of the
+        very same blind) with no way to tell a genuinely still-running
+        capture apart from a permanently abandoned one. See that constant's
+        own comment for the real-world report this fixes.
+        """
         if self._status_discovery_frames is not None:
-            raise RuntimeError("status frame capture is already active")
+            started_at = dt_util.parse_datetime(self._status_discovery_started_at or "")
+            age_seconds = (
+                (dt_util.now() - started_at).total_seconds()
+                if started_at is not None
+                else None
+            )
+            if (
+                age_seconds is None
+                or age_seconds < STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
+            ):
+                raise RuntimeError("status frame capture is already active")
+            _LOGGER.warning(
+                "Reclaiming a stale status-frame capture phase=%s age=%.1fs - "
+                "its owning flow never finished it",
+                self._status_discovery_phase,
+                age_seconds,
+            )
         self._status_discovery_frames = []
         self._status_discovery_phase = phase
         self._status_discovery_started_at = dt_util.now().isoformat()
@@ -1259,14 +1364,15 @@ class SchellenbergUsbApi:
         """Stop capture and return grouped candidates plus raw phase-labelled frames.
 
         exclude_device_ids: forwarded as-is to summarize_status_discovery_
-        frames() - see its own docstring. Empty by default, so the two
-        async_discover_status_identities() call sites below are unaffected
-        (that flow deliberately never scopes this - overwriting an
-        existing identity is its whole point); only the calibration flow
+        frames() - see its own docstring. Empty by default, so the one
+        async_discover_status_identities() call site (config_flow.py's
+        async_step_discover_status) is unaffected (that flow deliberately
+        never scopes this - overwriting an existing identity is its whole
+        point); only the calibration flow
         (options_flow_calibration.py's _finish_calibration_capture())
         currently passes a real set, to keep a different, already-paired
         blind's own ordinary movement during the capture window from
-        outscoring the blind actually being worked on - audit finding 9.
+        outscoring the blind actually being worked on.
         """
         frames = list(self._status_discovery_frames or [])
         started_at = self._status_discovery_started_at
@@ -1296,7 +1402,7 @@ class SchellenbergUsbApi:
             raise ValueError("status discovery timeout must be positive")
 
         self.start_status_frame_capture(phase="remote_discovery")
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Status discovery started timeout=%.1fs; listening for original remote",
             capture_duration,
         )
@@ -1308,7 +1414,7 @@ class SchellenbergUsbApi:
         result = self.finish_status_frame_capture(end_reason="capture_timeout_complete")
 
         primary = result["primary"]
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Status discovery completed frames=%d groups=%d primary=%s "
             "secondary_count=%d position_tracking=%s",
             len(result["frames"]),
@@ -1397,10 +1503,9 @@ class SchellenbergUsbApi:
                 finish_pair_command,
             )
 
-            # Both pairing entry points (pair_device and
-            # add_shutter_from_remote) share this one sequence: the 0x60
-            # teach command followed by the 0x40 finish/allow-pairing
-            # command.
+            # Every pairing attempt (async_step_user) sends this one
+            # sequence: the 0x60 teach command followed by the 0x40
+            # finish/allow-pairing command.
             pairing_phases = (
                 ("teach_60", pair_command),
                 ("finish_40", finish_pair_command),
@@ -1470,11 +1575,10 @@ class SchellenbergUsbApi:
         succeeded) is what caused the real bug this fix addresses: since
         _transmit_capability_block_reason() then blocks every future
         pairing attempt on "wrong_mode:unknown" until a full reconnect,
-        the pairing config flow step (for both "pair_device" and
-        "add_shutter_from_remote", which share this same cleanup) would
-        abort with the same "pairing_timeout" message again immediately
-        on the very next attempt, before any new wait for a device even
-        began. Trusting the write alone, the same way "hello" already
+        the pairing config flow step (async_step_user) would abort with
+        the same "pairing_timeout" message again immediately on the
+        very next attempt, before any new wait for a device even began.
+        Trusting the write alone, the same way "hello" already
         does, fixes that and also drops the now-pointless wait entirely:
         the worst case if the stick genuinely is still finishing up is
         one more pairing attempt that does not find a device in time,
@@ -1764,8 +1868,8 @@ class SchellenbergUsbApi:
             )
             return False
 
-        # Audit finding 24: send_command() already does this for every
-        # command it routes through _pending_retry_command/_last_transmit_
+        # send_command() already does this for every command it routes
+        # through _pending_retry_command/_last_transmit_
         # source, but this method's whole reason to exist (see its own
         # docstring) is writing straight to the transport instead,
         # bypassing send_command() - and with it, this assignment -
@@ -1919,12 +2023,18 @@ class SchellenbergUsbApi:
         not preempted mid-wait, only picked up afterwards - in practice
         that wait almost always resolves within about 1.2s (one transmit
         cycle), not its full 5s budget, so the realistic worst case is
-        short. Checked a second time, after this same loop has already
-        succeeded, right before each of MOVE_COMMAND_EXTRA_RESENDS' own
-        best-effort resends below - see that constant's own comment in
-        const.py for why a resend fired on its fixed schedule regardless
-        would otherwise be able to silently undo a stop requested for
-        this device in the meantime. Scoped to whichever calls for this
+        short. Cancellation alone - not the overall timeout, which has no
+        remaining meaning once this method has already returned - is
+        checked a second time, after this same loop has already
+        succeeded and this method has returned True: no longer here, but
+        inside _send_move_resends_and_cleanup() (this same call's own
+        detached background task, spawned the moment the write is
+        accepted - see its own docstring), immediately before each of
+        MOVE_COMMAND_EXTRA_RESENDS' own best-effort resends there
+        instead. See that constant's own comment in const.py for why a
+        resend fired on its fixed schedule regardless would otherwise be
+        able to silently undo a stop requested for this device in the
+        meantime. Scoped to whichever calls for this
         device_id are genuinely in flight at the moment
         cancel_pending_move() is called, never to one that starts only
         afterwards - see _move_cancel_requested's own comment in __init__
@@ -1971,6 +2081,10 @@ class SchellenbergUsbApi:
         self._moves_in_progress.setdefault(device_id, set()).add(move_call_token)
         requested_at = time.monotonic()
         retry_deadline = requested_at + MOVE_RETRY_OVERALL_TIMEOUT
+        # Set just before the one `return True` below that spawns
+        # _send_move_resends_and_cleanup() - see this method's own
+        # `finally` for why it needs to know.
+        resend_task_spawned = False
         try:
             while True:
                 if move_call_token in self._move_cancel_requested.get(device_id, ()):
@@ -2069,42 +2183,24 @@ class SchellenbergUsbApi:
                         device_id or "unknown",
                         action,
                     )
-                    # Mirrors control_blind_stop()'s own extra resend
-                    # after its primary stop is accepted - see
-                    # MOVE_COMMAND_EXTRA_RESENDS's own comment in
-                    # const.py for why this exists.
-                    #
-                    # Unlike the stop side's own version of this loop,
-                    # this one cannot rely on its caller awaiting the
-                    # whole call before anything else touches this same
-                    # device_id: async_open_cover()/async_close_cover()
-                    # do, but a *different* task for the very same device
-                    # - the background auto-stop-at-target loop, or a
-                    # brand new async_stop_cover() from the UI/Alexa -
-                    # can run concurrently and legitimately end this move
-                    # while this loop is still only sleeping between
-                    # writes (see control_blind_stop()'s own comment at
-                    # its mirror of this point for why that concern does
-                    # not apply symmetrically on its side). Both of those
-                    # already call cancel_pending_move() for exactly this
-                    # device_id before doing anything else - previously
-                    # only ever consulted at the top of the retry loop
-                    # above, never here, so a resend already past that
-                    # point had no way to learn a stop had just been
-                    # requested for the same device and would fire anyway,
-                    # silently undoing it a moment later. Checked fresh
-                    # before each write below, peeked rather than
-                    # discarded - same reasoning, and the same change, as
-                    # the retry loop's own check above.
-                    for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
-                        await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
-                        if move_call_token in self._move_cancel_requested.get(
-                            device_id, ()
-                        ):
-                            break
-                        await self.control_blind(
-                            device_enum, action, device_id=device_id, source=source
-                        )
+                    # The MOVE_COMMAND_EXTRA_RESENDS resends that used to
+                    # run right here, inline, now run in a detached
+                    # background task instead - see
+                    # _send_move_resends_and_cleanup()'s own docstring for
+                    # what they do and why, and for why this call's own
+                    # `finally` below must not clean up move_call_token
+                    # when that task has been spawned.
+                    self.hass.async_create_task(
+                        self._send_move_resends_and_cleanup(
+                            device_id,
+                            move_call_token,
+                            device_enum,
+                            action,
+                            source,
+                        ),
+                        name="schellenberg-move-resend",
+                    )
+                    resend_task_spawned = True
                     return True
                 # False (busy) or None (no reply at all, treated the
                 # same way - see the docstring) - retry, after the same
@@ -2123,6 +2219,136 @@ class SchellenbergUsbApi:
             # cancellation for as long as it is itself still live, with no
             # regard for whether this call's own token happened to be
             # cancelled too.
+            #
+            # Skipped whenever resend_task_spawned is True: the detached
+            # _send_move_resends_and_cleanup() task spawned above owns
+            # this exact same cleanup for this exact same token in that
+            # case instead, deferred until its own resends are actually
+            # done - see its own docstring for why doing it here too,
+            # immediately, would let a stop requested in the gap between
+            # this method's own return and that task's first resend go
+            # unseen by its cancellation check. (Deliberately not a bare
+            # `return` to skip this block - a `return` inside `finally`
+            # would silently replace this method's own `return True`/
+            # `return False` with `return None`.)
+            if not resend_task_spawned:
+                still_in_progress = self._moves_in_progress.get(device_id)
+                if still_in_progress is not None:
+                    still_in_progress.discard(move_call_token)
+                    if not still_in_progress:
+                        self._moves_in_progress.pop(device_id, None)
+                still_cancelled = self._move_cancel_requested.get(device_id)
+                if still_cancelled is not None:
+                    still_cancelled.discard(move_call_token)
+                    if not still_cancelled:
+                        self._move_cancel_requested.pop(device_id, None)
+
+    async def _send_move_resends_and_cleanup(
+        self,
+        device_id: str,
+        move_call_token: object,
+        device_enum: str,
+        action: str,
+        source: str,
+    ) -> None:
+        """Fire a just-accepted move's MOVE_COMMAND_EXTRA_RESENDS, detached
+        from control_blind_with_retry()'s own return, and retire that
+        call's bookkeeping once they're done.
+
+        Mirrors control_blind_stop()'s own extra resend after its primary
+        stop is accepted - see MOVE_COMMAND_EXTRA_RESENDS's own comment in
+        const.py for why this exists at all: best-effort RF reliability,
+        nothing more.
+
+        Spawned with hass.async_create_task() from
+        control_blind_with_retry() right when its own primary write is
+        confirmed accepted, instead of running inline there as before
+        this fix. That inline version blocked control_blind_with_retry()
+        from returning True for an extra MOVE_COMMAND_EXTRA_RESENDS *
+        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s) after the
+        primary write's own ack - and async_open_cover()/
+        async_close_cover() only stamp _move_start_time and call
+        _start_position_tracking() once that call returns. Unlike the
+        equivalent wait on the stop side - a one-time final freeze, using
+        a fresh time.monotonic() read, so control_blind_stop()'s own
+        comment at its mirror of this point is right that waiting there
+        is harmless - this delay instead pushed back the very baseline
+        every _update_position() call for the *entire rest of the move*
+        measures its own elapsed time from. Two real-world reports traced
+        to exactly this: a full up/down run landing on 92%/4% instead of
+        100%/0%, and a dashboard that visibly takes longer to start
+        updating than before this resend feature existed - both from the
+        same ~0.5s now eating into the margin by which software's own
+        elapsed-time clock used to lead the real motor's own physical
+        start (see _async_position_update_loop()'s own stop_lead_percent
+        derivation comment for that margin, and this fix's own CHANGELOG
+        entry for the full chain). Restoring an immediate return on
+        accept - while still actually sending the same resends, just no
+        longer blocking anything on them - fixes both at once, since both
+        came from the same shifted baseline.
+
+        This call cannot rely on its own caller awaiting it before
+        anything else touches this same device_id, any more than the old
+        inline loop could: async_open_cover()/async_close_cover() do
+        await control_blind_with_retry() itself, but a *different* task
+        for the very same device - the background auto-stop-at-target
+        loop, or a brand new async_stop_cover() from the UI/Alexa - can
+        run concurrently and legitimately end this move while this task
+        is still only sleeping between writes. Both of those already call
+        cancel_pending_move() for exactly this device_id before doing
+        anything else, so the cancellation check below, re-checked fresh
+        before each resend and peeked rather than discarded (a
+        cancellation is conceptually for the device, not for one
+        arbitrarily-chosen call among the several it may have been
+        snapshotted against - see _move_cancel_requested's own comment in
+        __init__), is what keeps a resend from firing after a stop has
+        already gone out and silently undoing it a moment later.
+
+        That check only works for as long as move_call_token is still
+        registered in _moves_in_progress - which is why this method, not
+        control_blind_with_retry()'s own `finally`, now owns discarding it
+        (see resend_task_spawned there). Cleaning it up the instant
+        control_blind_with_retry() itself returns, before this task has
+        gotten far enough to check for a cancellation or send anything -
+        it has already started by then, per Home Assistant's own eager
+        task scheduling (see _retry_command_after_delay's own comment on
+        this same point), just not yet past its own first
+        asyncio.sleep() - would let a stop requested in that gap find
+        nothing to snapshot and so never reach _move_cancel_requested at
+        all - this task would then have no way to learn about it and
+        would resend anyway.
+
+        Needs no explicit cancellation of its own on disconnect, unlike
+        _connect_task/_stop_pairing_task: control_blind() below already
+        refuses to transmit once disconnected (see its own docstring) and
+        returns False rather than raising, so a resend that wakes up after
+        a disconnect simply no-ops on its next write: this task exits and
+        cleans up on its own very next iteration regardless, exactly as it
+        already did while this loop still ran inline, before this split.
+
+        The cancellation check below stays meaningful across a disconnect
+        too, not merely irrelevant: handle_connection_lost() and
+        disconnect() snapshot this device's own in-flight tokens into
+        _move_cancel_requested rather than clearing it blindly, so a
+        cancellation already recorded - or one that disconnect itself now
+        stands in for - is still seen here on the very next check, even
+        though _moves_in_progress itself does get cleared across that
+        same disconnect. Without that snapshot, a reconnect fast enough
+        to land while this loop is still sleeping could have read a wiped
+        dict as "not cancelled" and resent a stale command; not reachable
+        today given RECONNECT_DELAY against this loop's own total
+        lifetime above, but closed either way rather than left resting on
+        that margin alone.
+        """
+        try:
+            for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
+                await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
+                if move_call_token in self._move_cancel_requested.get(device_id, ()):
+                    break
+                await self.control_blind(
+                    device_enum, action, device_id=device_id, source=source
+                )
+        finally:
             still_in_progress = self._moves_in_progress.get(device_id)
             if still_in_progress is not None:
                 still_in_progress.discard(move_call_token)
@@ -2140,8 +2366,13 @@ class SchellenbergUsbApi:
         *,
         device_id: str | None = None,
         source: str = "cover",
-    ) -> bool:
+    ) -> StopOutcome:
         """Stop a blind, served ahead of any blind's own pending move.
+
+        Returns a StopOutcome rather than a bare bool - see that class's
+        own docstring for why CONFIRMED and UNCONFIRMED must never be
+        collapsed into a single truthy result, the real bug this type
+        exists to make structurally impossible to reintroduce.
 
         async_stop_cover() used to call control_blind() directly for this -
         one immediate, unlocked write, same as open/close used to be before
@@ -2224,7 +2455,7 @@ class SchellenbergUsbApi:
                 )
                 if not sent:
                     self._move_awaiting_ack = False
-                    return False
+                    return StopOutcome.FAILED
                 # Snapshotted here, logged only below once this same write
                 # is confirmed accepted - not every attempt that merely
                 # transmitted and then got bounced "tE" (busy). A
@@ -2243,8 +2474,7 @@ class SchellenbergUsbApi:
                 # its own documented budget by up to that same margin.
                 # Never negative: asyncio.wait_for(timeout=0) still returns
                 # immediately (TimeoutError if not already set) rather
-                # than raising on its own - found during the lifecycle
-                # audit round.
+                # than raising on its own.
                 ack_wait_timeout = min(
                     MOVE_ACK_TIMEOUT, max(deadline - time.monotonic(), 0.0)
                 )
@@ -2292,12 +2522,25 @@ class SchellenbergUsbApi:
                 # small, fixed delay below is folded into the estimate
                 # exactly like any other stop latency already is, not
                 # left unaccounted for.
+                #
+                # Unconditional - every configured resend fires regardless
+                # of whether a real STOPPED status frame has already
+                # arrived for this device_id. An earlier revision (2026-
+                # 11-07 to 2026-11-08) skipped the remaining resends once
+                # one had, on the reasoning that they would only be
+                # reinforcing an already-confirmed stop; reverted at the
+                # project owner's own explicit request, since relying on
+                # that status frame for this decision was not reliable
+                # enough in practice. This never consulted the frame for
+                # anything else - StopOutcome.CONFIRMED here still means
+                # only "the stick accepted the write", exactly as before
+                # this revert.
                 for _ in range(STOP_COMMAND_EXTRA_RESENDS):
                     await asyncio.sleep(STOP_COMMAND_RESEND_DELAY_SECONDS)
                     await self.control_blind(
                         device_enum, CMD_STOP, device_id=device_id, source=source
                     )
-                return True
+                return StopOutcome.CONFIRMED
             await asyncio.sleep(0.1)
         _LOGGER.warning(
             "Giving up on stop after %.1fs with no accept, falling back to "
@@ -2306,9 +2549,15 @@ class SchellenbergUsbApi:
             source,
             device_id or "unknown",
         )
-        return await self.control_blind(
+        # This write is exactly as uncertain as the one STOP_RETRY_BUDGET
+        # just gave up waiting on - unlocked, unretried, no ack awaited -
+        # so even a truthy "bytes went on the wire" result here can only
+        # ever mean UNCONFIRMED, never CONFIRMED. See StopOutcome's own
+        # docstring for why collapsing this into a plain bool was the bug.
+        fallback_sent = await self.control_blind(
             device_enum, CMD_STOP, device_id=device_id, source=source
         )
+        return StopOutcome.UNCONFIRMED if fallback_sent else StopOutcome.FAILED
 
     async def control_blind_exclusive(
         self,
@@ -2333,8 +2582,8 @@ class SchellenbergUsbApi:
         different blind's real move or stop was still waiting on that
         same slot: a genuine asyncio race (two coroutines actually
         overlapping at a real await), confirmed reachable through every
-        one of these callers - see CHANGELOG.md's v1.3.0 entry for
-        audit finding 7.
+        one of these callers - see CHANGELOG.md's v1.3.0 entry on closing
+        the hub-wide move-ack slot to every caller that used to bypass it.
 
         Takes the lock ordinary (non-priority), exactly like an ordinary
         move - a test command is not the safety-critical operation
@@ -2385,27 +2634,51 @@ class SchellenbergUsbApi:
 
         Returns the next available device enumerator as a hex string (e.g., "10").
 
-        This is a stateless method that computes the next available enum
-        by finding the highest enum in registered devices and returning one higher.
-        """
-        if not self._registered_devices:
-            _LOGGER.debug(
-                "No registered devices found, starting enum at %s",
-                f"{PAIRING_DEVICE_ENUM_START:02X}",
-            )
-            return f"{PAIRING_DEVICE_ENUM_START:02X}"
+        Finds the highest enum already known to be in use - by a
+        registered device, or by any *earlier* call to this same method
+        on this same running connection, even one whose pairing attempt
+        was later aborted or simply never finished - and returns one
+        higher than that.
 
-        # Find the highest enum value from registered devices
-        max_enum = PAIRING_DEVICE_ENUM_START - 1
+        The "earlier call" half of that is deliberate, not an incidental
+        side effect. _registered_devices only gains an entry once a
+        pairing flow reaches _finish_pairing() (config_flow.py) and the
+        cover platform registers the saved subentry (cover.py's
+        async_setup_entry()/register_entity()) - but pair_device_and_wait()
+        transmits the real teach command for whatever enum this method
+        hands it well before that, and a physical motor can adopt it
+        right then. There is no "unteach" in this protocol (see
+        pair_device_and_wait()'s own comment) - only ever a fresh teach
+        to some other enum - so once that command has gone out, nothing
+        can recall it. Pairing a test blind, watching it move, and
+        aborting instead of saving it - a reasonable way to sanity-check
+        a blind before committing to it - used to leave this method with
+        no memory that the enum it had just handed out was already
+        taught to a real motor: the very next pairing attempt would
+        compute and re-teach that identical "next" enum to whatever motor
+        was next in programming mode, binding two different physical
+        motors to the same address with neither this method nor anything
+        else aware of the collision - every command to either one would
+        then move both. Remembering every enum issued here, not just
+        every one that made it into a saved subentry, closes that
+        specific window for as long as this connection stays up. It
+        cannot help across a hub reload/restart, since a fresh connection
+        has no way to know what an earlier one taught and then abandoned
+        - only a pairing that actually reaches _finish_pairing() is ever
+        durable.
+        """
+        highest_in_use = PAIRING_DEVICE_ENUM_START - 1
         for device_enum in self._registered_devices.values():
             try:
                 enum_value = int(device_enum, 16)
-                max_enum = max(max_enum, enum_value)
+                highest_in_use = max(highest_in_use, enum_value)
             except (ValueError, TypeError) as err:
                 _LOGGER.warning("Invalid enum value for device: %s", err)
+        if self._highest_issued_device_enum is not None:
+            highest_in_use = max(highest_in_use, self._highest_issued_device_enum)
 
-        # Next enum is 1 higher than the highest
-        next_enum = max_enum + 1
+        # Next enum is 1 higher than the highest known-in-use value.
+        next_enum = highest_in_use + 1
         if next_enum > 0xFF:
             next_enum = PAIRING_DEVICE_ENUM_START
             _LOGGER.warning(
@@ -2413,11 +2686,12 @@ class SchellenbergUsbApi:
                 f"{PAIRING_DEVICE_ENUM_START:02X}",
             )
 
+        self._highest_issued_device_enum = next_enum
         result = f"{next_enum:02X}"
         _LOGGER.debug(
-            "Computed next device enum as %s (highest existing: %s)",
+            "Computed next device enum as %s (highest known in use: %s)",
             result,
-            f"{max_enum:02X}",
+            f"{highest_in_use:02X}",
         )
         return result
 
@@ -2692,11 +2966,12 @@ class SchellenbergUsbApi:
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
         self._retry_task = None
-        # Audit finding 13: every other piece of per-connection state above
-        # is already cleared on a reconnect; this cache of the latest frame
+        # Every other piece of per-connection state above is already
+        # cleared on a reconnect; this cache of the latest frame
         # per status identity previously was not, so a stale pre-reconnect
-        # frame (and, before finding 13's other half, an unbounded number of
-        # them) could linger in diagnostics indefinitely.
+        # frame (and, before this cache was also given a cap of its own
+        # above, an unbounded number of them) could linger in diagnostics
+        # indefinitely.
         self._last_received_messages.clear()
 
         # Unstick a control_blind_with_retry() loop that may be waiting on
@@ -2708,8 +2983,32 @@ class SchellenbergUsbApi:
         if self._move_awaiting_ack:
             self._move_ack_result = False
             self._move_ack_event.set()
+        # Snapshot every device's own currently in-flight tokens into
+        # _move_cancel_requested before discarding _moves_in_progress,
+        # rather than a blind .clear() of both - the same snapshot
+        # cancel_pending_move() above already takes for one device,
+        # applied here to every device at once, since a lost connection
+        # cancels every move still in flight. A blind .clear() here
+        # would silently revoke a cancellation already recorded moments
+        # earlier, and would leave a call whose
+        # _send_move_resends_and_cleanup() task is still sleeping
+        # through its own detached resend loop - unlike a call still
+        # waiting on _move_ack_event above, nothing wakes that task for
+        # this - with no way to ever learn it should be treated as
+        # cancelled: on an eventual reconnect it would then read a
+        # wiped dict as "not cancelled" and resend a stale open/close
+        # that should have stayed cancelled. Not reachable today - see
+        # _send_move_resends_and_cleanup()'s own docstring for why that
+        # task always already exited, on its own, before a reconnect
+        # could complete - but kept closed anyway rather than left
+        # standing on that timing margin alone. Each token snapshotted
+        # here is still removed from _move_cancel_requested exactly as
+        # always, by its own owning call's `finally` (see
+        # resend_task_spawned there for which one that is), so nothing
+        # added here outlives the call it was snapshotted for.
+        for device_id, active in self._moves_in_progress.items():
+            self._move_cancel_requested.setdefault(device_id, set()).update(active)
         self._moves_in_progress.clear()
-        self._move_cancel_requested.clear()
 
         error = ConnectionError(f"serial connection lost: {exc}")
         for future in (
@@ -2914,8 +3213,7 @@ class SchellenbergUsbApi:
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
         self._retry_task = None
-        # Same reasoning as handle_connection_lost()'s own identical line -
-        # audit finding 13.
+        # Same reasoning as handle_connection_lost()'s own identical line.
         self._last_received_messages.clear()
         # Same reasoning as handle_connection_lost(): wake a
         # control_blind_with_retry() loop that may be waiting right now
@@ -2923,8 +3221,13 @@ class SchellenbergUsbApi:
         if self._move_awaiting_ack:
             self._move_ack_result = False
             self._move_ack_event.set()
+        # Same reasoning as handle_connection_lost()'s own identical
+        # block: snapshot every device's in-flight tokens into
+        # _move_cancel_requested before discarding _moves_in_progress,
+        # instead of a blind .clear() of both.
+        for device_id, active in self._moves_in_progress.items():
+            self._move_cancel_requested.setdefault(device_id, set()).update(active)
         self._moves_in_progress.clear()
-        self._move_cancel_requested.clear()
         stop_task = self._stop_pairing_task
         self._stop_pairing_task = None
         if (

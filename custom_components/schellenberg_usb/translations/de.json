@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Gerät hinzufügen",
-          "description": "Wählen Sie, wie Sie dieses Gerät einrichten möchten. Geeignet für Rollläden, elektronische Gurt-/Bandwickler, Markisenmotoren und andere Schellenberg-kompatible Motoren.",
-          "menu_options": {
-            "pair_device": "Gerät koppeln und kalibrieren",
-            "add_shutter_from_remote": "Gerät von Fernbedienung hinzufügen (empfohlen)"
-          }
-        },
-        "pair_device": {
-          "title": "Gerät koppeln und kalibrieren",
-          "description": "Drücken Sie innerhalb von 2 Minuten die Kopplungstaste oder die Kopplungstasten an Ihrem Gerät.",
-          "submit": "Koppeln"
-        },
-        "add_shutter_from_remote": {
-          "title": "Gerät von Fernbedienung hinzufügen",
-          "description": "Diese Kopplungsmethode wird für jedes kompatible Schellenberg-Funkgerät empfohlen, egal ob es sich um einen Rollladenmotor, einen elektronischen Gurt-/Bandwickler oder einen Markisenmotor handelt. Verwenden Sie nach dem Drücken auf Koppeln innerhalb von 2 Minuten eine bereits gekoppelte Original-Fernbedienung und wählen Sie den Kanal des Geräts aus. Drücken Sie die Programmiertaste Ihrer Fernbedienung, bis die Kanal-LED blinkt, und drücken Sie anschließend Stopp. Home Assistant erkennt das Telegramm und sendet den Anlernbefehl 60, gefolgt vom Abschlussbefehl 40 auf demselben Enum-Wert. Eine ACK-Bestätigung des USB-Sticks belegt nicht, dass das Gerät den Sender gelernt hat. Anschließend folgt ein kurzer Testlauf. Danach bestätigen Sie, ob sich der Rollladen tatsächlich bewegt hat.",
+          "title": "Gerät koppeln",
+          "description": "Drücken Sie unten auf Koppeln, und drücken Sie dann entweder die Kopplungstaste am Gerät ODER die Programmiertaste Ihrer bereits gekoppelten Fernbedienung und senden Sie anschließend über diese bereits gekoppelte Fernbedienung einen Stopp-Befehl an den Motor, den Sie koppeln möchten.",
           "submit": "Koppeln"
         },
         "name_device": {
@@ -55,6 +42,13 @@
           "description": "Ein Kopplungskandidat wurde erkannt, und der Anlernbefehl des USB-Sticks wurde für Geräte-ID {device_id} gesendet. Die ACK-Bestätigung des Sticks belegt nicht, dass das Gerät dies autorisiert hat. Benennen Sie das Gerät und prüfen Sie anschließend die tatsächliche Bewegung des Rollladens.",
           "data": {
             "device_name": "Gerätename"
+          }
+        },
+        "calibration_method_choice": {
+          "title": "Laufzeiten festlegen",
+          "menu_options": {
+            "test_motor": "Durch Bewegen des Rollladens kalibrieren",
+            "manual_times": "Laufzeiten manuell eingeben"
           }
         },
         "calibration_close": {
@@ -74,6 +68,14 @@
           "title": "Rollladen schließen",
           "description": "Jetzt messen wir, wie lange es dauert, {device_name} zu schließen. Drücken Sie Start **und dann** die Schließen-Taste an der Steuerung, um die Kalibrierung zu starten. Die Kalibrierung startet erst, wenn eine Abwärtsbewegungsnachricht vom Rollladen zu Home Assistant übermittelt wurde und danach von Home Assistant verarbeitet wurde.",
           "submit": "Start"
+        },
+        "calibration_timeout_choice": {
+          "title": "Keine Rückmeldung vom Rollladen",
+          "description": "Home Assistant hat die erwartete Bewegung nicht rechtzeitig erkannt. Versuchen Sie es erneut, oder geben Sie die Laufzeiten stattdessen manuell ein.",
+          "menu_options": {
+            "calibration_retry": "Erneut versuchen",
+            "manual_times": "Laufzeiten manuell eingeben"
+          }
         },
         "calibration_complete": {
           "title": "Kalibrierung abgeschlossen",
@@ -98,10 +100,8 @@
         },
         "test_success": {
           "title": "Befehlstest erfolgreich",
-          "menu_options": {
-            "calibration_close": "Weiter zur Kalibrierung",
-            "manual_times": "Gerätedaten im nächsten Menü manuell eintragen"
-          }
+          "description": "Der Befehlstest hat bestätigt, dass sich der Rollladen bewegt. Fahren Sie fort, um die Laufzeiten zu messen.",
+          "submit": "Weiter"
         },
         "manual_times": {
           "title": "Laufzeiten eingeben",
@@ -139,6 +139,13 @@
             "send_raw_command": "Rohes Funktelegramm an das Gerät senden"
           }
         },
+        "status_discovery_choice": {
+          "title": "Funkbefehle von einer Fernbedienung anlernen?",
+          "menu_options": {
+            "discover_status": "Von der Original-Fernbedienung anlernen (empfohlen)",
+            "skip_status_discovery": "Überspringen - Kopplung ohne dies abschließen"
+          }
+        },
         "discover_status": {
           "title": "Die Rollladenfunkbefehle von diesem Rollladen von einer Fernbedienung trainieren für besseres Erkennen der Rollladenbefehlsübermittlung beim Drücken der Fernbedienung",
           "description": "Ausgewähltes Gerät: {selected_blind}\nBefehls-/Sendeidentität: {command_identity}\n\nVerwenden Sie nach dem Drücken auf Empfang starten die Original-Schellenberg-Fernbedienung für diesen Kanal des Geräts: Drücken Sie AUF, STOPP, ZU, STOPP. Home Assistant lauscht 45 Sekunden lang und gruppiert jede empfangene Geräte-ID, jeden Enum-Wert, Befehl und Zeitstempel.",
@@ -151,7 +158,7 @@
         },
         "set_position_manual": {
           "title": "Die Rollladenposition manuell setzen",
-          "description": "Die aktuelle Position für {selected_blind} festlegen, ohne den Rollladen zu bewegen. Aktuell erfasste Position: {current_position}.",
+          "description": "Die aktuelle Position für {selected_blind} festlegen, ohne den Rollladen zu bewegen. Die aktuell erfasste Position: {current_position}. Die unten angezeigte Position ist für {selected_blind}.",
           "data": {
             "position": "Position"
           },
@@ -206,7 +213,7 @@
         "already_configured": "Dieses Gerät ist bereits konfiguriert.",
         "initial_state_required": "Bitte wählen Sie aus, ob der Rollladen aktuell vollständig geöffnet oder vollständig geschlossen ist, bevor Sie fortfahren.",
         "test_direction_required": "Bitte wählen Sie aus, welche Rolladenfahrtrichtung getestet werden soll, bevor Sie fortfahren.",
-        "calibration_timeout": "Der Kalibrierungstimer ist abgelaufen. Der Rollladen hat mehr als 5 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
+        "calibration_timeout": "Der Kalibrierungstimer ist abgelaufen. Der Rollladen hat mehr als 2 Minuten für die Bewegung benötigt. Bitte überprüfen Sie das Gerät und versuchen Sie es erneut.",
         "calibration_start_timeout": "Zeitüberschreitung beim Warten auf die Bewegung des Rollladens. Bitte stellen Sie sicher, dass das Gerät ordnungsgemäß angeschlossen ist, und versuchen Sie es erneut.",
         "unknown": "Ein unerwarteter Fehler ist während der Kalibrierung aufgetreten. Bitte versuchen Sie es erneut.",
         "command_failed": "Der serielle Befehl konnte nicht eingereiht werden. Prüfen Sie die USB-Verbindung und die Protokolle.",
@@ -215,8 +222,7 @@
         "invalid_status_identities": "Geben Sie jede zusätzliche Statusidentität als Gerät_ID/Enum ein, getrennt durch Kommas oder neue Zeilen (zum Beispiel F2B8D5/23).",
         "status_identity_incomplete": "Geben Sie beide primären Statusfelder ein oder lassen Sie beide leer.",
         "status_discovery_unavailable": "Der USB-Stick ist nicht verbunden. Verbinden Sie ihn erneut und versuchen Sie es noch einmal.",
-        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut.",
-        "calibration_capture_busy": "Die gemeinsame Aufzeichnung wird bereits von der Telegrammaufzeichnung eines anderen Rollladens verwendet. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
+        "status_discovery_busy": "Es läuft bereits eine andere Telegrammaufzeichnung. Warten Sie, bis diese abgeschlossen ist, und versuchen Sie es erneut."
       },
       "abort": {
         "pairing_timeout": "Kein Gerät hat innerhalb von 2 Minuten geantwortet. Bitte versuchen Sie es erneut.",
