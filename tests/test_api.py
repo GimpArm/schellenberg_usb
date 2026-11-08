@@ -3045,6 +3045,78 @@ async def test_pair_device_and_wait_timeout_leaves_stick_able_to_pair_again(
 
 
 # ---------------------------------------------------------------------------
+# initialize_next_device_enum(): the "next free enum" computation
+# pair_device_and_wait() calls to decide which address to teach a brand
+# new device. #225 (2026-11-08, "total kritisch"): a test blind's live
+# motor test, run immediately after teaching during an otherwise-ordinary
+# pairing attempt, moved a different, already-paired blind too, despite
+# the two having different configured primary IDs. See this method's own
+# docstring for the mechanism; the fix is exercised below.
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_next_device_enum_starts_at_pairing_start_with_nothing_registered(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    assert (
+        connected_api.initialize_next_device_enum()
+        == f"{PAIRING_DEVICE_ENUM_START:02X}"
+    )
+
+
+def test_initialize_next_device_enum_skips_past_the_highest_registered_device(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    connected_api.register_entity("AAAAAA", "10", "Living Room Blind")
+    connected_api.register_entity("BBBBBB", "15", "Bedroom Blind")
+
+    assert connected_api.initialize_next_device_enum() == "16"
+
+
+def test_initialize_next_device_enum_never_reissues_an_enum_from_an_abandoned_pairing(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """Regression test for #225.
+
+    Teaching a test blind, then aborting the pairing flow before it was
+    ever saved, used to leave this method with no memory that the enum
+    it had just handed out was already taught to a real motor over RF -
+    see its own docstring for why that teach cannot be undone. The very
+    next pairing attempt would then compute and re-teach that identical
+    enum to a second motor, binding two different physical blinds to the
+    same address - after which a command to either one moved both.
+
+    Simulated here exactly as it happens in practice: _registered_devices
+    stays completely empty across both calls, since neither attempt ever
+    reaches _finish_pairing() (config_flow.py) - the only thing that
+    would actually add an entry there.
+    """
+    first_issued = connected_api.initialize_next_device_enum()
+
+    second_issued = connected_api.initialize_next_device_enum()
+
+    assert second_issued != first_issued
+    assert int(second_issued, 16) == int(first_issued, 16) + 1
+
+
+def test_initialize_next_device_enum_resumes_from_whichever_is_higher(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """A registered device's own enum can still raise the floor after an
+    earlier issuance too, not just before one - e.g. a blind paired
+    through some other means, or restored from a subentry, whose enum
+    happens to be higher than anything this connection has itself handed
+    out so far.
+    """
+    first_issued = connected_api.initialize_next_device_enum()
+    assert first_issued == f"{PAIRING_DEVICE_ENUM_START:02X}"
+
+    connected_api.register_entity("AAAAAA", "50", "Living Room Blind")
+
+    assert connected_api.initialize_next_device_enum() == "51"
+
+
+# ---------------------------------------------------------------------------
 # send_raw_transmit(): Developer Tools' raw-payload escape hatch. Also only
 # ever exercised through config_flow.py's send_raw_command step before.
 # ---------------------------------------------------------------------------

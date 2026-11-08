@@ -366,6 +366,12 @@ class SchellenbergUsbApi:
         self._registered_devices: dict[
             str, str
         ] = {}  # Dict[device_id, device_enum] for registered entities
+        # The highest device_enum (as an int) initialize_next_device_enum()
+        # has ever handed out on this connection, regardless of whether
+        # that pairing attempt went on to register a device above - see
+        # that method's own comment for why this is tracked separately
+        # from _registered_devices.
+        self._highest_issued_device_enum: int | None = None
         self._registered_entity_keys: dict[
             StatusIdentity, _StatusIdentityRegistration
         ] = {}
@@ -2661,27 +2667,51 @@ class SchellenbergUsbApi:
 
         Returns the next available device enumerator as a hex string (e.g., "10").
 
-        This is a stateless method that computes the next available enum
-        by finding the highest enum in registered devices and returning one higher.
-        """
-        if not self._registered_devices:
-            _LOGGER.debug(
-                "No registered devices found, starting enum at %s",
-                f"{PAIRING_DEVICE_ENUM_START:02X}",
-            )
-            return f"{PAIRING_DEVICE_ENUM_START:02X}"
+        Finds the highest enum already known to be in use - by a
+        registered device, or by any *earlier* call to this same method
+        on this same running connection, even one whose pairing attempt
+        was later aborted or simply never finished - and returns one
+        higher than that.
 
-        # Find the highest enum value from registered devices
-        max_enum = PAIRING_DEVICE_ENUM_START - 1
+        The "earlier call" half of that is deliberate, not an incidental
+        side effect. _registered_devices only gains an entry once a
+        pairing flow reaches _finish_pairing() (config_flow.py) and the
+        cover platform registers the saved subentry (cover.py's
+        async_setup_entry()/register_entity()) - but pair_device_and_wait()
+        transmits the real teach command for whatever enum this method
+        hands it well before that, and a physical motor can adopt it
+        right then. There is no "unteach" in this protocol (see
+        pair_device_and_wait()'s own comment) - only ever a fresh teach
+        to some other enum - so once that command has gone out, nothing
+        can recall it. Pairing a test blind, watching it move, and
+        aborting instead of saving it - a reasonable way to sanity-check
+        a blind before committing to it - used to leave this method with
+        no memory that the enum it had just handed out was already
+        taught to a real motor: the very next pairing attempt would
+        compute and re-teach that identical "next" enum to whatever motor
+        was next in programming mode, binding two different physical
+        motors to the same address with neither this method nor anything
+        else aware of the collision - every command to either one would
+        then move both. Remembering every enum issued here, not just
+        every one that made it into a saved subentry, closes that
+        specific window for as long as this connection stays up. It
+        cannot help across a hub reload/restart, since a fresh connection
+        has no way to know what an earlier one taught and then abandoned
+        - only a pairing that actually reaches _finish_pairing() is ever
+        durable.
+        """
+        highest_in_use = PAIRING_DEVICE_ENUM_START - 1
         for device_enum in self._registered_devices.values():
             try:
                 enum_value = int(device_enum, 16)
-                max_enum = max(max_enum, enum_value)
+                highest_in_use = max(highest_in_use, enum_value)
             except (ValueError, TypeError) as err:
                 _LOGGER.warning("Invalid enum value for device: %s", err)
+        if self._highest_issued_device_enum is not None:
+            highest_in_use = max(highest_in_use, self._highest_issued_device_enum)
 
-        # Next enum is 1 higher than the highest
-        next_enum = max_enum + 1
+        # Next enum is 1 higher than the highest known-in-use value.
+        next_enum = highest_in_use + 1
         if next_enum > 0xFF:
             next_enum = PAIRING_DEVICE_ENUM_START
             _LOGGER.warning(
@@ -2689,11 +2719,12 @@ class SchellenbergUsbApi:
                 f"{PAIRING_DEVICE_ENUM_START:02X}",
             )
 
+        self._highest_issued_device_enum = next_enum
         result = f"{next_enum:02X}"
         _LOGGER.debug(
-            "Computed next device enum as %s (highest existing: %s)",
+            "Computed next device enum as %s (highest known in use: %s)",
             result,
-            f"{max_enum:02X}",
+            f"{highest_in_use:02X}",
         )
         return result
 
