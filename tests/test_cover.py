@@ -1226,6 +1226,54 @@ async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
     )
 
 
+async def test_async_stop_cover_failed_outcome_does_not_clobber_a_newer_target(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for the same bug class, in the FAILED branch.
+
+    A second independent review (2026-11-08) of the fix above found an
+    analogous, unconfirmed assumption a few lines away: the FAILED branch
+    restores self._target_position from previous_target_position
+    unconditionally, with no re-check that nothing else claimed the
+    target slot while control_blind_stop() above was suspended - exactly
+    the mistake #226/#227 fixed for is_opening/is_closing. Here, a
+    different, newer async_set_cover_position() call's own synchronous
+    write (self._target_position = target_position) lands during that
+    same await, before this stop's own write fails. The newer call's
+    target must survive completely untouched, not be overwritten with
+    this stale call's own, now-irrelevant previous target.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+
+    async def _fail_while_a_newer_target_already_landed(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a different, newer async_set_cover_position()
+        # call's own first, synchronous write landing while this stop's
+        # own control_blind_stop() is still suspended - see async_set_
+        # cover_position()'s own self._target_position = target_position.
+        cover._target_position = 30
+        return StopOutcome.FAILED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_fail_while_a_newer_target_already_landed
+    )
+    api.transmit_block_reason = "disconnected"  # stable code, see api.py
+    cover = _build_cover(hass, api)
+    cover._target_position = 50  # the target this stop call itself cleared
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_stop_cover()
+
+    assert cover._target_position == 30
+    assert any(
+        "a newer move already claimed its own target" in record.message
+        for record in caplog.records
+    )
+
+
 async def test_async_stop_cover_reports_unconfirmed_without_raising(
     hass: HomeAssistant,
     caplog: pytest.LogCaptureFixture,
@@ -1547,6 +1595,93 @@ async def test_position_loop_backstop_resets_after_a_retarget_mid_unconfirmed_re
     assert cover._pending_auto_stop_target == 25
     assert cover._pending_auto_stop_since == pytest.approx(
         1_000.0 + AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS - 1.0
+    )
+
+
+async def test_position_loop_backstop_exhaustion_does_not_clobber_a_retarget(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for the same bug class, in the backstop-exhaustion path.
+
+    A second independent review (2026-11-08) of #226/#227 found an
+    analogous gap here: unlike the sibling test above - a retarget landing
+    on some *earlier*, still-retrying attempt, which self-corrects on the
+    very next tick's own fresh target_when_stop_was_sent - nothing
+    protected the one attempt whose own clock.advance() happens to cross
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS itself. Before this fix, a
+    retarget landing in that exact attempt's own await fell straight into
+    the backstop-exhaustion branch's unconditional clear, wiping out the
+    brand new target (and is_closing/tracking) a retarget call had already
+    claimed moments earlier in that same await, and ending this task via
+    return with nothing left to track or auto-stop the new leg at all -
+    the #226/#227 bug class again, reached via 30s of sustained backstop
+    retries landing on the same tick as a retarget rather than a direction
+    reversal racing a manual stop.
+    """
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+    call_count = 0
+
+    async def _retarget_then_cross_the_backstop_on_the_same_attempt(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Stands in for a same-direction retarget (a fresh
+            # set_cover_position() call) landing during *this* attempt's
+            # own control_blind_stop() await - its own first synchronous
+            # write already pointed self._target_position at its own new
+            # value before this same attempt's own clock.advance() below
+            # crosses the backstop.
+            cover._target_position = 25
+            clock.advance(AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS)
+            return StopOutcome.UNCONFIRMED
+        raise _LoopKeptRunning
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_retarget_then_cross_the_backstop_on_the_same_attempt
+    )
+    cover = _build_cover(hass, api)
+    monkeypatch.setattr(
+        cover,
+        "_update_position",
+        lambda: setattr(cover, "_attr_current_cover_position", cover._target_position),
+    )
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 50
+    cover._target_position = 40  # the stale target this attempt was sent for
+    cover._move_start_time = clock()
+    cover._move_start_position = 50
+
+    with pytest.raises(_LoopKeptRunning):
+        await cover._async_position_update_loop()
+
+    # Reached a second attempt - against the new target - rather than
+    # returning from inside the first attempt's own backstop-exhaustion
+    # cleanup.
+    assert api.control_blind_stop.await_count == 2
+    # The retarget's own state must come through exactly as it set it -
+    # none of it read back from this attempt's own backstop-exhaustion
+    # cleanup, which was written for the stale 40 target this attempt
+    # actually sent a stop for, not the 25 that superseded it.
+    assert cover._target_position == 25
+    assert cover._attr_is_closing is True
+    assert cover._attr_current_cover_position == 25
+    assert cover._move_start_time == 1_000.0
+    assert cover._move_start_position == 50
+    assert any(
+        "a newer retarget already claimed this device" in record.message
+        for record in caplog.records
     )
 
 

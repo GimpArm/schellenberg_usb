@@ -1873,6 +1873,44 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                     time.monotonic() - self._pending_auto_stop_since
                                     >= AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS
                                 ):
+                                    # Re-check rather than trust the
+                                    # snapshot taken before *this attempt's*
+                                    # own await, same idiom as the
+                                    # CONFIRMED sibling check a few lines
+                                    # below - see its own comment. A same-
+                                    # direction retarget landing during
+                                    # this specific attempt's await already
+                                    # pointed self._target_position at its
+                                    # own new value; falling through to the
+                                    # unconditional clear below would wipe
+                                    # that still-live target out from under
+                                    # it and then end this task via the
+                                    # return below - the #226/#227 bug
+                                    # class again, reached this time via
+                                    # 30s of sustained backstop retries
+                                    # landing on the same tick as a
+                                    # retarget, rather than a direction
+                                    # reversal racing a manual stop.
+                                    if (
+                                        self._target_position
+                                        != target_when_stop_was_sent
+                                    ):
+                                        self._pending_auto_stop_since = None
+                                        self._pending_auto_stop_target = None
+                                        _LOGGER.debug(
+                                            "Device %s: auto-stop backstop "
+                                            "exhausted for target (%d%%), "
+                                            "but a newer retarget already "
+                                            "claimed this device in the "
+                                            "meantime - leaving its state "
+                                            "alone instead of overwriting "
+                                            "it with this now-stale "
+                                            "target's own backstop "
+                                            "cleanup",
+                                            self._device_name,
+                                            target_when_stop_was_sent,
+                                        )
+                                        continue
                                     _LOGGER.error(
                                         "Device %s: auto-stop at target "
                                         "position (%d%%) still unconfirmed "
@@ -2627,11 +2665,34 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # Nothing else has been touched yet - position tracking, if it
             # was running, still is, and is_opening/is_closing/
             # _move_start_time/_move_start_position are exactly as they
-            # were, so there is nothing to restore and nothing to restart -
-            # only the target this method itself cleared above needs
-            # putting back.
+            # were, so there is nothing to restore and nothing to restart
+            # for those.
+            #
+            # The target is different: this method actively mutated it
+            # (cleared to None, above) before the await that just ended, so
+            # restoring it unconditionally would repeat the exact mistake
+            # #226/#227 fixed a few lines below for is_opening/is_closing -
+            # re-check rather than trust the snapshot taken before the
+            # await, the same idiom was_opening_before_stop/was_closing_
+            # before_stop use there. If a different, newer async_set_cover_
+            # position()/async_open_cover()/async_close_cover() call
+            # already claimed the target slot for its own, genuinely live
+            # move while control_blind_stop() above was suspended, self.
+            # _target_position is no longer the None this method itself put
+            # there - restoring previous_target_position on top of it would
+            # clobber that newer call's own legitimate target with this
+            # stale, now-irrelevant one instead.
             self._pending_manual_stop_confirmation = None
-            self._target_position = previous_target_position
+            if self._target_position is None:
+                self._target_position = previous_target_position
+            else:
+                _LOGGER.debug(
+                    "Device %s: stop command failed to send, but a newer "
+                    "move already claimed its own target in the meantime "
+                    "- leaving it alone instead of restoring this now-"
+                    "stale stop's own target",
+                    self._device_name,
+                )
             reason = _translate_block_reason(
                 self.hass, self._api.transmit_block_reason
             ) or _runtime_translation_text(self.hass, "command_not_sent")
