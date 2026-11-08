@@ -1152,6 +1152,80 @@ async def test_async_stop_cover_falls_back_cleanly_when_no_motor_echo_arrives(
     )
 
 
+async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard for #226/#227.
+
+    A stop whose own motor echo never arrives - here because, standing in
+    for the real debug log that root-caused this, a different, newer
+    async_open_cover() call for this same device already set its own
+    is_opening/is_closing (its own very first line, no await of its own
+    first) while this call was still suspended waiting out MANUAL_STOP_
+    MOTOR_CONFIRMATION_GRACE_SECONDS - must not fall through to the
+    ordinary stick-ack-only cleanup below once that wait times out: doing
+    so clobbered the newer move's own is_opening/is_closing, move_start_*
+    and tracking task with state meant for the move this stop actually
+    targeted, freezing the dashboard until the next command. The newer
+    move's state (simulated here exactly as test_async_close_cover_skips_
+    reset_for_redundant_resend above does for its own already-in-progress
+    case) must come through this call completely untouched.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
+    monkeypatch.setattr(
+        "custom_components.schellenberg_usb.cover."
+        "MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS",
+        0.05,  # keep the test fast - the point is that nothing ever sets it
+    )
+
+    async def _stop_while_a_newer_open_already_took_over(
+        *_args: object, **_kwargs: object
+    ) -> StopOutcome:
+        # Stands in for a real dashboard "open" tap racing in while this
+        # stop is still in flight: async_open_cover()'s own very first
+        # lines (no await before them) flip these two and nothing else,
+        # before its own control_blind_with_retry() or tracking loop ever
+        # runs - exactly the window this test is closing.
+        cover._attr_is_opening = True
+        cover._attr_is_closing = False
+        return StopOutcome.CONFIRMED
+
+    api = MagicMock()
+    api.control_blind_stop = AsyncMock(
+        side_effect=_stop_while_a_newer_open_already_took_over
+    )
+    cover = _build_cover(hass, api)
+    cover._async_cancel_position_tracking = AsyncMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True  # the move this stop call was actually sent for
+    cover._attr_current_cover_position = 60
+
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    cover._position_update_task = fake_task  # the newer open's own tracking
+    cover._move_start_time = 999.0  # the newer open's own baseline
+    cover._move_start_position = 54
+
+    await cover.async_stop_cover()
+
+    # The newer move's state must come through exactly as it set it - none
+    # of it read back from this call's own fallback, which was written for
+    # the close this stop call actually targeted, not the open that
+    # superseded it.
+    assert cover._attr_is_opening is True
+    assert cover._attr_is_closing is False
+    assert cover._position_update_task is fake_task
+    assert cover._move_start_time == 999.0
+    assert cover._move_start_position == 54
+    assert cover._attr_current_cover_position == 60
+    cover._async_cancel_position_tracking.assert_not_awaited()
+    assert any(
+        "a newer move already started for this device" in record.message
+        for record in caplog.records
+    )
+
+
 async def test_async_stop_cover_reports_unconfirmed_without_raising(
     hass: HomeAssistant,
     caplog: pytest.LogCaptureFixture,

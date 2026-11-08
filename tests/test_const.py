@@ -88,9 +88,12 @@ def test_timeout_constants() -> None:
     """Test timeout constants are positive integers."""
     assert VERIFY_TIMEOUT == 5
     assert PAIRING_TIMEOUT == 120
-    # Lowered from 300 to 120 for Issue #77 (2026-11-07) - see
-    # CALIBRATION_TIMEOUT's own comment in const.py.
-    assert CALIBRATION_TIMEOUT == 120
+    # Briefly lowered to 120 for Issue #77 (2026-11-07), then raised back to
+    # its original 300 on the project owner's own real-world report that
+    # 120s was too tight under real RF interference - see
+    # CALIBRATION_TIMEOUT's own comment in const.py for why the shorter
+    # value was the wrong lever for Issue #77 in the first place.
+    assert CALIBRATION_TIMEOUT == 300
 
     assert VERIFY_TIMEOUT > 0
     assert PAIRING_TIMEOUT > 0
@@ -99,11 +102,14 @@ def test_timeout_constants() -> None:
 
 def test_timeout_relationships() -> None:
     """Test timeout relationships make sense."""
-    # Calibration and pairing are now deliberately equal (both 2 minutes) -
-    # see CALIBRATION_TIMEOUT's own comment in const.py for why calibration
-    # no longer needs the larger margin over pairing this test used to
-    # assert; it still must not end up *shorter*, since a fresh pairing
-    # offers no fallback once pairing itself has already succeeded.
+    # Calibration is back to its original, more generous margin over
+    # pairing (300s vs. 120s) - see CALIBRATION_TIMEOUT's own comment in
+    # const.py for why briefly making them equal for Issue #77 was the
+    # wrong lever. Asserted as >= rather than a fixed ratio so this keeps
+    # holding regardless of exactly how generous that margin is tuned to
+    # be - it must simply never end up *shorter* than pairing's own
+    # timeout, since a fresh pairing offers no fallback once pairing
+    # itself has already succeeded.
     assert CALIBRATION_TIMEOUT >= PAIRING_TIMEOUT
     # Pairing should be longer than verification
     assert PAIRING_TIMEOUT > VERIFY_TIMEOUT

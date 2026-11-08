@@ -2563,10 +2563,22 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         method does nothing further for that case beyond publishing state
         and logging which path was taken. On timeout - no frame, most
         plausibly real RF interference rather than any genuine failure -
-        this falls through to exactly the stick-ack-only handling below
-        that existed before this wait did, so a dropped motor echo can
-        never hang or skip a command, only cost this one extra piece of
-        confidence.
+        this falls through to the stick-ack-only handling below that
+        existed before this wait did, so a dropped motor echo can never
+        hang or skip a command, only cost this one extra piece of
+        confidence - except that it first re-checks, the same way
+        async_open_cover()/async_close_cover() already re-check their own
+        snapshots after their own awaits (see _has_live_tracking_in_
+        direction()'s docstring), whether a newer open/close call has
+        already taken this device over in the meantime (see was_opening_
+        before_stop/was_closing_before_stop below and the fallback
+        branch's own comment) - real RF interference is not the only way
+        this wait can time out, and the two are indistinguishable from
+        inside it. #226/#227: without that re-check, a stop whose own
+        echo lost the shared radio to a newer command's retransmissions -
+        exactly what reversing direction quickly enough to still be
+        inside this grace period causes - clobbered that newer command's
+        state once this wait finally gave up on it.
         """
         # First, and before any other statement: if this device has a move
         # retry loop still running (control_blind_with_retry(), in flight
@@ -2592,6 +2604,20 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # miss exactly that race and wait out the full grace period below
         # for a frame that, in truth, already arrived.
         self._pending_manual_stop_confirmation = asyncio.Event()
+        # Snapshot which direction (if any) this device was already
+        # reporting before the write and wait below - taken at this same
+        # "before any await" point as self._pending_manual_stop_
+        # confirmation just above, and for the same reason. The fallback
+        # branch near the end of this method (see its own comment there)
+        # compares against this afterwards to recognise when a different,
+        # newer async_open_cover()/async_close_cover() call has already
+        # taken over this device while this call was suspended below -
+        # that newer call sets self._attr_is_opening/self._attr_is_closing
+        # for itself at its own very first line, with no await of its own
+        # first, so this is observable the instant it happens even though
+        # its own tracking task is only created much later.
+        was_opening_before_stop = self._attr_is_opening
+        was_closing_before_stop = self._attr_is_closing
         stop_outcome = await self._api.control_blind_stop(
             self._command_enum, device_id=self._command_device_id
         )
@@ -2653,6 +2679,43 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # left to do here except publish whatever state that branch
             # already set.
             self.async_write_ha_state()
+            return
+
+        if (
+            self._attr_is_opening != was_opening_before_stop
+            or self._attr_is_closing != was_closing_before_stop
+        ):
+            # Regression guard for #226/#227: a different, newer
+            # async_open_cover()/async_close_cover() call already started
+            # for this same device while this call was suspended above
+            # waiting out MANUAL_STOP_MOTOR_CONFIRMATION_GRACE_SECONDS for
+            # an echo that never came - confirmed from a real debug log
+            # where the user reversed direction (tapped open again)
+            # within that same window, which is also exactly what starved
+            # this stop's own echo of a clear RF channel in the first
+            # place (the newer move's own retransmissions were going out
+            # on the same shared radio at that moment). That newer call
+            # has already set up its own is_opening/is_closing,
+            # _move_start_time/_move_start_position and tracking task for
+            # itself, and - if it has itself already completed - may also
+            # already have torn all of that back down again correctly on
+            # its own. Either way, falling through to the cleanup below
+            # regardless of which move it was originally written for
+            # would cancel tracking, clear is_opening/is_closing and
+            # move_start_*, and publish a position - all for whichever
+            # move happens to be current *now*, not the one this call was
+            # actually trying to stop. That silently froze the dashboard
+            # at a stale estimate until the next command, which is what
+            # read as the position "jumping" on every quick reversal.
+            # Nothing left for this call to do - the newer move already
+            # is, or will be, publishing its own correct state.
+            _LOGGER.debug(
+                "Device %s: stop confirmation timed out, but a newer "
+                "move already started for this device in the meantime - "
+                "leaving its state alone instead of overwriting it with "
+                "this now-stale stop's own fallback cleanup",
+                self._device_name,
+            )
             return
 
         # Only now, with a write actually done, is it safe to stop the
