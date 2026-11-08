@@ -2267,6 +2267,35 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             handler.async_step_calibration_complete(user_input)
         )
 
+    async def async_step_calibration_timeout_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to retry a timed-out calibration leg or switch
+        to entering travel times manually (Issue #77).
+
+        All four of `CalibrationFlowHandler`'s own timeout branches
+        (`options_flow_calibration.py`, open/close leg x movement-start/
+        stop wait) call `self.flow.async_show_menu(step_id=
+        "calibration_timeout_choice", ...)` directly on this flow, the
+        same way `async_step_name_device()` used to call this menu's own
+        `async_show_menu()` inline before `async_step_calibration_method_
+        choice()` existed - and needs the exact same fix for the exact
+        same reason: Home Assistant's flow manager validates every
+        emitted result's step_id against a real async_step_<id> method
+        on this handler, even for a menu, so without this method every
+        one of those four timeout branches would crash with UnknownStep
+        instead of ever showing the choice. See async_step_calibration_
+        method_choice()'s own docstring for the full explanation. Shown
+        again unchanged if the flow is ever resumed on this step; the
+        two options are dispatched straight to async_step_calibration_
+        retry()/async_step_manual_times() by Home Assistant itself, not
+        by this method.
+        """
+        return self.async_show_menu(
+            step_id="calibration_timeout_choice",
+            menu_options=["calibration_retry", "manual_times"],
+        )
+
     async def async_step_calibration_retry(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
