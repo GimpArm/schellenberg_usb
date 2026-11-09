@@ -59,7 +59,7 @@ lint = [
     "mypy~=2.4.0",
     "pre-commit~=4.7.0",
     "ruff~=0.17.1",
-    "types-PyYAML~=6.0.12.20260906",
+    "types-PyYAML~=6.0.12.20261103",
 ]
 
 
