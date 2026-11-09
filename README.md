@@ -435,7 +435,7 @@ an update.
 > [!IMPORTANT]
 > As of the version adding `MOVE_COMMAND_EXTRA_RESENDS`/`STOP_COMMAND_EXTRA_RESENDS`
 > (see `CHANGELOG.md`), the integration itself already re-sends a lost
-> open/close command once, re-sends a lost stop command once, and already
+> open/close command twice, re-sends a lost stop command twice, and already
 > widens its own stop-call timing when it detects another blind's command
 > using the radio at that moment — the same reliability problems the two
 > scripts below were written to work around. The scripts below have
@@ -460,14 +460,41 @@ an update.
 > a redundant stop is harmless the same way a manual double-press of a
 > physical stop button would be.
 >
-> `stop_latenz`'s fixed margin and the integration's own widening are a
-> different pair, solving the same queueing problem differently rather
-> than one superseding the other, so this one is unchanged below: the
-> integration only adds its own margin when contention is actually
-> detected at that moment, so it is normally more precise than a fixed
-> margin applied every time. Try lowering `stop_latenz` (or setting it to
-> `0`) after upgrading, and raise it again only if you still see overshoot
-> when commanding several blinds together.
+> `stop_latenz` and `korrektur_dauer` (the fixed margin shortening a timed
+> `stop_cover`'s own wait, and the extra wait added after driving into an
+> end stop) have now been removed from both scripts below too, at the
+> project owner's own request, to match their own current, real-world
+> copy of these scripts rather than this more elaborate variant. The
+> timing that remains — `start_ts` plus the `remaining_duration` correction
+> described in the first Note below the scripts — already accounts for
+> the open/close call's own actual duration, which matters more in
+> practice than the smaller, further delay a queued `stop_cover` call can
+> still see on top of that; `stop_latenz` only ever compensated for the
+> latter. If you command several blinds at once and an intermediate
+> target lands a percentage point or two short, that is most likely this
+> trade-off rather than a regression.
+>
+> If you're running a copy with `stop_latenz`/`korrektur_dauer` still in
+> place, replace it with the version below, or remove the pieces
+> yourself: both variables, the `korrektur_dauer`-vs-`stop_cover` branch
+> in the final `choose:`, and `stop_latenz`'s own subtraction inside
+> `remaining_duration`. The same "harmless while both run at once" reasoning
+> above applies here too.
+>
+> Every field and variable name in both scripts is now English
+> (`ziel`→`requested_position`, `helfer`→`helper`, `auf`→`open_seconds`,
+> `ab`→`close_seconds`, and the rest inside the scripts themselves), and
+> both scripts were renamed too (`interne_rollladenlogik_fuer_home_assistant`
+> → `internal_blind_position_logic`,
+> `rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen` →
+> `alexa_blind_position_logic`). If you're updating from an older copy,
+> replace *both* halves together: the scripts (Step 2) and the `data:`
+> blocks that call them from your template cover (Step 3/4). A template
+> cover still sending the old field names to a script expecting the new
+> ones fails outright - `UndefinedError`, the same failure mode the
+> `min_fahrzeit_doppel` fix further above already had to account for - not
+> just imprecisely, so update both halves in the same edit rather than one
+> at a time.
 
 This setup gives you two extra things on top of the integration's own cover
 entities:
@@ -505,48 +532,38 @@ switch it to YAML mode, and paste in everything from `alias:` down.
 
 | Field | Meaning |
 |---|---|
-| `ziel` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
-| `helfer` | The number helper for this blind, from step 1 |
-| `auf` | Measured seconds for a full **opening** run |
-| `ab` | Measured seconds for a full **closing** run |
-| `stop_latenz` | Optional, in seconds (default `1.3`): for an intermediate (not 0/100) target, how much earlier than the calculated time `stop_cover` is called, to absorb it sitting queued behind other blinds' own commands before it actually transmits — see the note below |
+| `requested_position` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
+| `helper` | The number helper for this blind, from step 1 |
+| `open_seconds` | Measured seconds for a full **opening** run |
+| `close_seconds` | Measured seconds for a full **closing** run |
 | `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
 
 **Script A — for normal use** (dashboards, automations). It does nothing if
 the requested position already matches the stored one:
 
 ```yaml
-interne_rollladenlogik_fuer_home_assistant:
-  alias: Interne Rollladenlogik für Home Assistant
+internal_blind_position_logic:
+  alias: Internal Blind Position Logic
   mode: parallel
   max: 12
   sequence:
     - condition: template
-      value_template: "{{ ziel | int != states(helfer) | int }}"
+      value_template: "{{ requested_position | int != states(helper) | int }}"
     - delay:
         milliseconds: "{{ range(0, 300) | random }}"
     - variables:
-        soll: "{{ ziel | float(0) }}"
-        ist: "{{ states(helfer) | float(0) }}"
-        f_auf: "{{ auf | float(25) }}"
-        f_ab: "{{ ab | float(25) }}"
-        stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
-        richtung_runter: "{{ soll > ist }}"
-        dauer: >
-          {% set diff = (ist - soll) | abs %} {% set faktor = f_ab if
-          richtung_runter else f_auf %} {{ ((diff / 100.0) * faktor) | round(2) }}
-        korrektur_dauer: |
-          {% if soll == 0 %}
-            {{ (ist / 100.0 * f_auf) | round(2) }}
-          {% elif soll == 100 %}
-            {{ ((100 - ist) / 100.0 * f_ab) | round(2) }}
-          {% else %}
-            0
-          {% endif %}
+        target_position: "{{ requested_position | float(0) }}"
+        current_position: "{{ states(helper) | float(0) }}"
+        open_time: "{{ open_seconds | float(25) }}"
+        close_time: "{{ close_seconds | float(25) }}"
+        moving_down: "{{ target_position > current_position }}"
+        duration: >
+          {% set diff = (current_position - target_position) | abs %} {% set factor = close_time if
+          moving_down else open_time %} {{ ((diff / 100.0) * factor) | round(2) }}
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ not richtung_runter }}"
+              value_template: "{{ not moving_down }}"
           sequence:
             - action: cover.open_cover
               target:
@@ -555,7 +572,7 @@ interne_rollladenlogik_fuer_home_assistant:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
             - condition: template
-              value_template: "{{ richtung_runter }}"
+              value_template: "{{ moving_down }}"
           sequence:
             - action: cover.close_cover
               target:
@@ -563,33 +580,21 @@ interne_rollladenlogik_fuer_home_assistant:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: |
-          {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
-          {% if soll | int == 0 or soll | int == 100 %}
-            {{ roh | round(2) }}
-          {% else %}
-            {{ ([0, roh - stop_latenz] | max) | round(2) }}
-          {% endif %}
-    - delay: "{{ rest_dauer }}"
+        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
+    - delay: "{{ remaining_duration }}"
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ soll | int != 0 and soll | int != 100 }}"
+              value_template: "{{ target_position | int != 0 and target_position | int != 100 }}"
           sequence:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ soll | int == 0 or soll | int == 100 }}"
-          sequence:
-            - delay:
-                seconds: "{{ korrektur_dauer }}"
     - action: input_number.set_value
       target:
-        entity_id: "{{ helfer }}"
+        entity_id: "{{ helper }}"
       data:
-        value: "{{ soll | float(0) }}"
+        value: "{{ target_position | float(0) }}"
 ```
 
 **Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
@@ -599,50 +604,41 @@ as an instruction to run a full close (target ≥ 50) or full open (target <
 50), so a repeated Alexa command still moves the blind:
 
 ```yaml
-rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
-  alias: Rollladenlogik fuer Alexasprachsteuerungen für Rollladen
+alexa_blind_position_logic:
+  alias: Blind Position Logic for Alexa Voice Control
   mode: parallel
   max: 12
   sequence:
     - delay:
         milliseconds: "{{ range(0, 300) | random }}"
     - variables:
-        soll: "{{ ziel | float(0) }}"
-        ist: "{{ states(helfer) | float(0) }}"
-        f_auf: "{{ auf | float(25) }}"
-        f_ab: "{{ ab | float(25) }}"
-        stop_latenz: "{{ stop_latenz | default(1.3) | float(1.3) }}"
-        reset_richtung_runter: "{{ soll >= 50 }}"
-        richtung_runter: |
-          {% if soll == ist %}
-            {{ reset_richtung_runter }}
+        target_position: "{{ requested_position | float(0) }}"
+        current_position: "{{ states(helper) | float(0) }}"
+        open_time: "{{ open_seconds | float(25) }}"
+        close_time: "{{ close_seconds | float(25) }}"
+        reset_moving_down: "{{ target_position >= 50 }}"
+        moving_down: |
+          {% if target_position == current_position %}
+            {{ reset_moving_down }}
           {% else %}
-            {{ soll > ist }}
+            {{ target_position > current_position }}
           {% endif %}
-        dauer: |
-          {% if soll == ist %}
-            {% if reset_richtung_runter %}
-              {{ f_ab }}
+        duration: |
+          {% if target_position == current_position %}
+            {% if reset_moving_down %}
+              {{ close_time }}
             {% else %}
-              {{ (ist / 100.0) * f_auf }}
+              {{ (current_position / 100.0) * open_time }}
             {% endif %}
           {% else %}
-            {% set diff = (ist - soll) | abs %}
-            {% set faktor = f_ab if richtung_runter else f_auf %}
-            {{ ((diff / 100.0) * faktor) | round(2) }}
-          {% endif %}
-        korrektur_dauer: |
-          {% if soll == 0 or (soll == ist and not reset_richtung_runter) %}
-            {{ (ist / 100.0 * f_auf) | round(2) }}
-          {% elif soll == 100 or (soll == ist and reset_richtung_runter) %}
-            {{ ((100 - ist) / 100.0 * f_ab) | round(2) }}
-          {% else %}
-            0
+            {% set diff = (current_position - target_position) | abs %}
+            {% set factor = close_time if moving_down else open_time %}
+            {{ ((diff / 100.0) * factor) | round(2) }}
           {% endif %}
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ not richtung_runter }}"
+              value_template: "{{ not moving_down }}"
           sequence:
             - action: cover.open_cover
               target:
@@ -651,7 +647,7 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
                 start_ts: "{{ now().timestamp() }}"
         - conditions:
             - condition: template
-              value_template: "{{ richtung_runter }}"
+              value_template: "{{ moving_down }}"
           sequence:
             - action: cover.close_cover
               target:
@@ -659,38 +655,26 @@ rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen:
             - variables:
                 start_ts: "{{ now().timestamp() }}"
     - variables:
-        rest_dauer: |
-          {% set roh = [0, dauer - (now().timestamp() - start_ts)] | max %}
-          {% if not (soll == ist) and (soll | int != 0 and soll | int != 100) %}
-            {{ ([0, roh - stop_latenz] | max) | round(2) }}
-          {% else %}
-            {{ roh | round(2) }}
-          {% endif %}
-    - delay: "{{ rest_dauer }}"
+        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
+    - delay: "{{ remaining_duration }}"
     - choose:
         - conditions:
             - condition: template
               value_template: >-
-                {{ not (soll == ist) and (soll | int != 0 and soll | int != 100) }}
+                {{ not (target_position == current_position) and (target_position | int != 0 and target_position | int != 100) }}
           sequence:
             - action: cover.stop_cover
               target:
                 entity_id: "{{ entity }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ (soll | int == 0 or soll | int == 100) or (soll == ist) }}"
-          sequence:
-            - delay:
-                seconds: "{{ korrektur_dauer }}"
     - action: input_number.set_value
       target:
-        entity_id: "{{ helfer }}"
+        entity_id: "{{ helper }}"
       data:
         value: |
-          {% if soll == ist %}
-            {{ 100 if reset_richtung_runter else 0 }}
+          {% if target_position == current_position %}
+            {{ 100 if reset_moving_down else 0 }}
           {% else %}
-            {{ soll | float(0) }}
+            {{ target_position | float(0) }}
           {% endif %}
 ```
 
@@ -711,28 +695,28 @@ template:
         unique_id: living_room_blind_percent
         position: "{{ states('input_number.helper_living_room_blind') | int(0) }}"
         set_cover_position:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: "{{ position }}"
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: "{{ position }}"
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         open_cover:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: 0
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 0
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         close_cover:
-          action: script.interne_rollladenlogik_fuer_home_assistant
+          action: script.internal_blind_position_logic
           data:
-            ziel: 100
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 100
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         stop_cover:
           action: cover.stop_cover
@@ -756,28 +740,28 @@ points at script B and reuses the **same** helper and the **same** real
         unique_id: living_room_blind_percent_alexa
         position: "{{ states('input_number.helper_living_room_blind') | int(0) }}"
         set_cover_position:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: "{{ position }}"
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: "{{ position }}"
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         open_cover:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: 0
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 0
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         close_cover:
-          action: script.rollladenlogik_fuer_alexasprachsteuerungen_fuer_rollladen
+          action: script.alexa_blind_position_logic
           data:
-            ziel: 100
-            helfer: input_number.helper_living_room_blind
-            auf: 12.00
-            ab: 11.50
+            requested_position: 100
+            helper: input_number.helper_living_room_blind
+            open_seconds: 12.00
+            close_seconds: 11.50
             entity: cover.living_room_blind
         stop_cover:
           action: cover.stop_cover
@@ -795,7 +779,7 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
 - The 0–100 scale used above is this helper's own convention (0 = open, 100
   = closed) and is independent of the position this integration tracks
   internally on the real `cover.*` entity — the two don't need to match.
-- `start_ts` and the second `rest_dauer` (recomputed right after the
+- `start_ts` and the second `remaining_duration` (recomputed right after the
   open/close `choose:` block, replacing the first, rougher estimate) measure
   how much time the open/close call above actually took, rather than
   assuming a fixed value — this corrects for whatever the stick's
@@ -803,24 +787,6 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   integration's own `cover.*` entity wait for the stick's reply before
   returning, and retry for as long as it answers busy, so neither call is
   always instant.
-- `stop_latenz` (default `1.3`, in seconds) shortens that same `rest_dauer`
-  further, but only for an intermediate target — one that still needs an
-  explicit `stop_cover` below, rather than driving into an end stop. A
-  `stop_cover` call can itself sit queued for a moment before it actually
-  reaches the stick (see the note on stop below) — measured on real
-  hardware, a bit over a second when another blind's own commands were
-  using the radio at the same time — during which the blind keeps moving
-  under its already-issued open/close command. Calling `stop_cover`
-  `stop_latenz` seconds earlier leaves that much headroom to absorb a
-  delayed send before it would otherwise overshoot the target. This is a
-  fixed, worst-case-ish margin, not a measurement of the delay actually
-  happening on any given run: raise it
-  if you regularly command several blinds at once and still see overshoot;
-  lower it toward `0` if your blinds are almost always moved one at a time
-  and you would rather have the extra precision than the margin. Either
-  way, an occasional full 0%/100% move (see the next note) corrects any
-  drift this leaves behind, the same way it already corrects drift from
-  other sources.
 - When the target is exactly 0 or 100, the scripts intentionally keep
   driving into the mechanical end stop instead of stopping at the
   calculated time, which corrects any position drift that built up over
@@ -831,8 +797,9 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   holds the radio, nor over another blind's own stop that asked for it
   first — falling back to an instant, unretried write if that brief
   window (a couple of seconds at most) runs out before its turn comes.
-  That queueing, when it happens, is exactly what `stop_latenz` above
-  compensates for. `open`/`close` are different: both wait (a few seconds
+  For an intermediate target, that queueing is the main source of the
+  small overshoot the note above (under Step 2) describes trading away
+  `stop_latenz` for. `open`/`close` are different: both wait (a few seconds
   at most, best-effort) for the stick to report itself idle before
   sending, and if the stick still answers that it is busy right as the
   command goes out (`Transmit error - stick busy`), they keep retrying -

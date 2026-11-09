@@ -21,6 +21,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_OPEN_TIME_SECONDS,
     CONF_SERIAL_PORT,
     DOMAIN,
+    MOVE_COMMAND_RESEND_DELAY_SECONDS,
     PAIRING_TIMEOUT,
     PLATFORMS,
     SIGNAL_CALIBRATION_COMPLETED,
@@ -29,6 +30,7 @@ from custom_components.schellenberg_usb.const import (
     SIGNAL_PAIRING_STARTED,
     SIGNAL_PAIRING_TIMEOUT,
     SIGNAL_STICK_STATUS_UPDATED,
+    STOP_COMMAND_RESEND_DELAY_SECONDS,
     VERIFY_TIMEOUT,
     resolve_direction_command,
 )
@@ -86,6 +88,11 @@ def test_timeout_constants() -> None:
     """Test timeout constants are positive integers."""
     assert VERIFY_TIMEOUT == 5
     assert PAIRING_TIMEOUT == 120
+    # Briefly lowered to 120 for Issue #77 (2026-11-07), then raised back to
+    # its original 300 on the project owner's own real-world report that
+    # 120s was too tight under real RF interference - see
+    # CALIBRATION_TIMEOUT's own comment in const.py for why the shorter
+    # value was the wrong lever for Issue #77 in the first place.
     assert CALIBRATION_TIMEOUT == 300
 
     assert VERIFY_TIMEOUT > 0
@@ -95,10 +102,31 @@ def test_timeout_constants() -> None:
 
 def test_timeout_relationships() -> None:
     """Test timeout relationships make sense."""
-    # Calibration should be longer than pairing
-    assert CALIBRATION_TIMEOUT > PAIRING_TIMEOUT
+    # Calibration is back to its original, more generous margin over
+    # pairing (300s vs. 120s) - see CALIBRATION_TIMEOUT's own comment in
+    # const.py for why briefly making them equal for Issue #77 was the
+    # wrong lever. Asserted as >= rather than a fixed ratio so this keeps
+    # holding regardless of exactly how generous that margin is tuned to
+    # be - it must simply never end up *shorter* than pairing's own
+    # timeout, since a fresh pairing offers no fallback once pairing
+    # itself has already succeeded.
+    assert CALIBRATION_TIMEOUT >= PAIRING_TIMEOUT
     # Pairing should be longer than verification
     assert PAIRING_TIMEOUT > VERIFY_TIMEOUT
+
+
+def test_resend_delay_constants() -> None:
+    """How long control_blind_with_retry()/control_blind_stop() (api.py)
+    wait after their own primary, accepted write before firing each extra
+    resend - see either constant's own comment in const.py for why both
+    are kept equal.
+    """
+    # Lowered from 0.3 to 0.25 (2026-11-07, project owner's own direction).
+    assert MOVE_COMMAND_RESEND_DELAY_SECONDS == 0.25
+    assert STOP_COMMAND_RESEND_DELAY_SECONDS == 0.25
+
+    assert MOVE_COMMAND_RESEND_DELAY_SECONDS > 0
+    assert STOP_COMMAND_RESEND_DELAY_SECONDS > 0
 
 
 def test_resolve_direction_command() -> None:

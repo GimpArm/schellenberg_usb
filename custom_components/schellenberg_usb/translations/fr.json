@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Ajouter un appareil",
-          "description": "Choisissez comment configurer cet appareil. Compatible avec les volets roulants, les enrouleurs de sangle électroniques, les moteurs de store banne et d'autres moteurs compatibles Schellenberg.",
-          "menu_options": {
-            "pair_device": "Appairer et calibrer",
-            "add_shutter_from_remote": "Ajouter un appareil depuis la télécommande (recommandé)"
-          }
-        },
-        "pair_device": {
-          "title": "Appairer l'appareil et calibrer",
-          "description": "Appuyez sur le bouton ou les boutons d'appairage de votre appareil dans les 2 minutes.",
-          "submit": "Appairer"
-        },
-        "add_shutter_from_remote": {
-          "title": "Ajouter un appareil depuis la télécommande",
-          "description": "Cette méthode d'appairage est recommandée pour tout appareil Schellenberg compatible par radiofréquence, qu'il s'agisse d'un moteur de volet, d'un enrouleur de sangle électronique ou d'un moteur de store banne. Après avoir appuyé sur Appairer, utilisez une télécommande d'origine déjà appairée dans les 2 minutes et sélectionnez le canal de l'appareil. Appuyez sur le bouton de programmation de la télécommande jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop. Home Assistant détectera la trame et enverra la commande d'apprentissage 60, suivie de la commande de fin 40 sur la même valeur d'énumération. Un accusé de réception ACK de la clé USB ne prouve pas que l'appareil a appris l'émetteur. Un court test suit. Ensuite, confirmez si le volet a réellement bougé.",
+          "title": "Appairer l'appareil",
+          "description": "Appuyez sur le bouton Appairer ci-dessous, puis appuyez soit sur le bouton d'appairage de l'appareil, SOIT sur le bouton de programmation de votre télécommande déjà appairée, puis envoyez une commande d'arrêt depuis cette télécommande déjà appairée au moteur que vous souhaitez appairer.",
           "submit": "Appairer"
         },
         "name_device": {
@@ -55,6 +42,13 @@
           "description": "Un candidat à l'appairage a été détecté et la commande d'apprentissage de la clé USB a été transmise pour l'ID d'appareil {device_id}. L'ACK de la clé ne prouve pas que l'appareil l'a autorisé. Nommez l'appareil, puis vérifiez le mouvement réel du volet.",
           "data": {
             "device_name": "Nom de l'appareil"
+          }
+        },
+        "calibration_method_choice": {
+          "title": "Définir les durées de course",
+          "menu_options": {
+            "test_motor": "Calibrer en déplaçant le volet",
+            "manual_times": "Saisir les durées de course manuellement"
           }
         },
         "calibration_close": {
@@ -74,6 +68,14 @@
           "title": "Fermer le volet",
           "description": "Nous allons maintenant mesurer le temps nécessaire pour fermer {device_name}. Appuyez sur Démarrer **puis** sur le bouton de fermeture de la commande pour lancer la calibration. La calibration ne démarre que lorsqu'un message de mouvement vers le bas du volet a été transmis à Home Assistant et ensuite traité par Home Assistant.",
           "submit": "Démarrer"
+        },
+        "calibration_timeout_choice": {
+          "title": "Aucune réponse du volet",
+          "description": "Home Assistant n'a pas détecté le mouvement attendu à temps. Réessayez, ou saisissez les durées de course manuellement.",
+          "menu_options": {
+            "calibration_retry": "Réessayer",
+            "manual_times": "Saisir les durées de course manuellement"
+          }
         },
         "calibration_complete": {
           "title": "Calibration terminée",
@@ -98,10 +100,8 @@
         },
         "test_success": {
           "title": "Test de commande réussi",
-          "menu_options": {
-            "calibration_close": "Continuer vers la calibration",
-            "manual_times": "Saisir manuellement les données de l'appareil dans le menu suivant"
-          }
+          "description": "Le test du moteur a confirmé que le volet se déplace. Continuez pour mesurer ses durées de course.",
+          "submit": "Continuer"
         },
         "manual_times": {
           "title": "Saisir les durées de course",
@@ -139,6 +139,13 @@
             "send_raw_command": "Envoyer une trame radio brute à l'appareil"
           }
         },
+        "status_discovery_choice": {
+          "title": "Apprendre les commandes radio depuis une télécommande ?",
+          "menu_options": {
+            "discover_status": "Apprendre depuis la télécommande d'origine (recommandé)",
+            "skip_status_discovery": "Ignorer - terminer le couplage sans cela"
+          }
+        },
         "discover_status": {
           "title": "Apprendre les commandes radio du volet pour ce volet à partir d'une télécommande pour une meilleure reconnaissance de la transmission des commandes du volet lors de l'appui sur la télécommande",
           "description": "Appareil sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_identity}\n\nAprès avoir appuyé sur Démarrer l'écoute, utilisez la télécommande Schellenberg d'origine pour ce canal d'appareil : appuyez sur HAUT, STOP, BAS, STOP. Home Assistant écoute pendant 45 secondes et regroupe chaque ID d'appareil, valeur d'énumération, commande et horodatage reçus.",
@@ -151,7 +158,7 @@
         },
         "set_position_manual": {
           "title": "Définir la position du volet manuellement",
-          "description": "Définissez la position actuelle pour {selected_blind} sans déplacer le volet. Position actuellement enregistrée : {current_position}.",
+          "description": "Définissez la position actuelle pour {selected_blind} sans déplacer le volet. Position actuellement enregistrée : {current_position}. La position indiquée ci-dessous concerne {selected_blind}.",
           "data": {
             "position": "Position"
           },
@@ -206,7 +213,7 @@
         "already_configured": "Cet appareil est déjà configuré.",
         "initial_state_required": "Veuillez indiquer si le volet est actuellement complètement ouvert ou complètement fermé avant de continuer.",
         "test_direction_required": "Veuillez indiquer quelle direction de mouvement du volet doit être testée avant de continuer.",
-        "calibration_timeout": "Le minuteur de calibration a expiré. Le volet a mis plus de 5 minutes pour effectuer le mouvement. Veuillez vérifier l'appareil et réessayer.",
+        "calibration_timeout": "Le minuteur de calibration a expiré. Le volet a mis plus de 2 minutes pour effectuer le mouvement. Veuillez vérifier l'appareil et réessayer.",
         "calibration_start_timeout": "Délai d'attente dépassé en attendant que le volet commence à bouger. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
         "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
         "command_failed": "La commande série n'a pas pu être mise en file d'attente. Vérifiez la connexion USB et les journaux.",
@@ -215,8 +222,7 @@
         "invalid_status_identities": "Saisissez chaque identité de statut supplémentaire sous la forme ID_appareil/énumération, séparée par des virgules ou de nouvelles lignes (par exemple F2B8D5/23).",
         "status_identity_incomplete": "Saisissez les deux champs de statut principal ou laissez-les tous les deux vides.",
         "status_discovery_unavailable": "La clé USB n'est pas connectée. Reconnectez-la et réessayez.",
-        "status_discovery_busy": "Un autre enregistrement de trames est déjà en cours. Attendez qu'il soit terminé et réessayez.",
-        "calibration_capture_busy": "Un autre volet utilise déjà l'enregistrement de trames partagé. Attendez qu'il soit terminé et réessayez."
+        "status_discovery_busy": "Un autre enregistrement de trames est déjà en cours. Attendez qu'il soit terminé et réessayez."
       },
       "abort": {
         "pairing_timeout": "Aucun appareil n'a répondu dans les 2 minutes. Veuillez réessayer.",

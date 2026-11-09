@@ -33,21 +33,8 @@
       },
       "step": {
         "user": {
-          "title": "Add a device",
-          "description": "Choose how to set up this device. Works for roller-shutter blinds, electronic belt/strap winders, awning motors, and other Schellenberg-compatible motors.",
-          "menu_options": {
-            "pair_device": "Pair and calibrate",
-            "add_shutter_from_remote": "Add device from remote (recommended)"
-          }
-        },
-        "pair_device": {
-          "title": "Pair device and calibrate",
-          "description": "Press the pairing button or pairing buttons on your device within 2 minutes.",
-          "submit": "Pair"
-        },
-        "add_shutter_from_remote": {
-          "title": "Add device from remote",
-          "description": "This pairing method is recommended for any compatible Schellenberg RF shutter, whether it is an RF shutter motor, an electronic belt/strap winder, or an awning motor. After pressing Pair, use an already paired original remote control within 2 minutes and select the device's channel. Press your remote control's programming button until the channel LED blinks, then press Stop. Home Assistant will detect the telegram and send teach command 60, followed by finish command 40 on the same enum value. A USB stick ACK confirmation does not prove that the device has learned the transmitter. A short test run follows. Afterwards, confirm whether the shutter actually moved.",
+          "title": "Pair Device",
+          "description": "Press the Pair button below, and then either press the pairing button on the device OR press the programming button on your already-paired remote control and afterwards send a stop command on your already-paired remote control to the motor you want to pair.",
           "submit": "Pair"
         },
         "name_device": {
@@ -55,6 +42,13 @@
           "description": "A pairing candidate was detected, and the USB stick teach command was sent for device ID {device_id}. The stick ACK does not prove that the device authorized this. Name the device and then check the actual movement of the shutter.",
           "data": {
             "device_name": "Device name"
+          }
+        },
+        "calibration_method_choice": {
+          "title": "Set travel times",
+          "menu_options": {
+            "test_motor": "Calibrate by moving the shutter",
+            "manual_times": "Enter travel times manually"
           }
         },
         "calibration_close": {
@@ -74,6 +68,14 @@
           "title": "Close the shutter",
           "description": "Now we will measure how long it takes to close {device_name}. Press Start **and then** the close button on the control to start the calibration. The calibration only starts when a downward movement message from the shutter has been transmitted to Home Assistant and subsequently processed by Home Assistant.",
           "submit": "Start"
+        },
+        "calibration_timeout_choice": {
+          "title": "No response from the shutter",
+          "description": "Home Assistant did not detect the expected movement in time. Try again, or enter the travel times manually instead.",
+          "menu_options": {
+            "calibration_retry": "Try again",
+            "manual_times": "Enter travel times manually"
+          }
         },
         "calibration_complete": {
           "title": "Calibration complete",
@@ -98,10 +100,8 @@
         },
         "test_success": {
           "title": "Command test successful",
-          "menu_options": {
-            "calibration_close": "Continue to calibration",
-            "manual_times": "Enter device data manually in the next menu"
-          }
+          "description": "The motor test confirmed the shutter moves. Continue to measure its travel times.",
+          "submit": "Continue"
         },
         "manual_times": {
           "title": "Enter travel times",
@@ -139,6 +139,13 @@
             "send_raw_command": "Send raw RF telegram to the device"
           }
         },
+        "status_discovery_choice": {
+          "title": "Train radio commands from a remote control?",
+          "menu_options": {
+            "discover_status": "Train from the original remote control (recommended)",
+            "skip_status_discovery": "Skip - finish pairing without this"
+          }
+        },
         "discover_status": {
           "title": "Train the shutter radio commands for this shutter from a remote control for better recognition of shutter command transmission when pressing the remote",
           "description": "Selected device: {selected_blind}\nCommand/transmit identity: {command_identity}\n\nAfter pressing Start listening, use the original Schellenberg remote control for this device channel: Press UP, STOP, DOWN, STOP. Home Assistant listens for 45 seconds and groups every received device ID, enum value, command, and timestamp.",
@@ -151,7 +158,7 @@
         },
         "set_position_manual": {
           "title": "Set shutter position manually",
-          "description": "Set the current position for {selected_blind} without moving the shutter. Currently recorded position: {current_position}.",
+          "description": "Set the current position for {selected_blind} without moving the shutter. Currently recorded position: {current_position}. The position shown below is for {selected_blind}.",
           "data": {
             "position": "Position"
           },
@@ -206,7 +213,7 @@
         "already_configured": "This device is already configured.",
         "initial_state_required": "Please select whether the shutter is currently fully open or fully closed before proceeding.",
         "test_direction_required": "Please select which shutter movement direction should be tested before proceeding.",
-        "calibration_timeout": "The calibration timer has expired. The shutter took more than 5 minutes for the movement. Please check the device and try again.",
+        "calibration_timeout": "The calibration timer has expired. The shutter took more than 2 minutes for the movement. Please check the device and try again.",
         "calibration_start_timeout": "Timeout waiting for the shutter to move. Please ensure the device is properly connected and try again.",
         "unknown": "An unexpected error occurred during calibration. Please try again.",
         "command_failed": "The serial command could not be queued. Check the USB connection and logs.",
@@ -215,8 +222,7 @@
         "invalid_status_identities": "Enter each additional status identity as device_ID/enum, separated by commas or new lines (for example F2B8D5/23).",
         "status_identity_incomplete": "Enter both primary status fields or leave both blank.",
         "status_discovery_unavailable": "The USB stick is not connected. Reconnect it and try again.",
-        "status_discovery_busy": "Another telegram recording is already running. Wait for it to complete and try again.",
-        "calibration_capture_busy": "Another shutter's telegram recording is already using the shared recording slot. Wait for it to finish and try again."
+        "status_discovery_busy": "Another telegram recording is already running. Wait for it to complete and try again."
       },
       "abort": {
         "pairing_timeout": "No device responded within 2 minutes. Please try again.",

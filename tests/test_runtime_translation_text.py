@@ -131,8 +131,7 @@ def test_translate_phrase_translates_the_two_previously_missing_phrases() -> Non
     not confirmed since restart" - cover.py's async_added_to_hass() sets
     both whenever a blind's startup position comes from a calibration that
     just completed - were present in English but missing from
-    _PHRASE_TRANSLATIONS for de/es/fr entirely, found during an independent
-    audit. Invisible to
+    _PHRASE_TRANSLATIONS for de/es/fr entirely. Invisible to
     test_phrase_translation_keys_match_across_all_languages above, which
     only checks the three non-English languages against each other: all
     three were missing both keys identically, so they stayed mutually

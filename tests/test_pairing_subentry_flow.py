@@ -92,10 +92,9 @@ def make_flow(hass: HomeAssistant) -> Any:
     api = MagicMock()
     api.control_blind = AsyncMock(return_value=True)
     # control_blind_exclusive() is what the developer-tools test-open/
-    # close/stop steps and the post-teach open+stop test actually call
-    # (audit finding 7) - control_blind itself stays mocked too, since
-    # this same api spy backs tests of other flow steps that still call
-    # it directly.
+    # close/stop steps and the post-teach open+stop test actually call -
+    # control_blind itself stays mocked too, since this same api spy
+    # backs tests of other flow steps that still call it directly.
     api.control_blind_exclusive = AsyncMock(return_value=True)
     api.reset_and_reconnect = AsyncMock(return_value=True)
     api.manual_sync_position = MagicMock(return_value=True)
@@ -206,9 +205,9 @@ async def test_developer_command_failed_when_control_blind_returns_false(
     hass: HomeAssistant,
 ) -> None:
     """control_blind_exclusive() refusing the write must be reported, not
-    silently dropped - this step actually calls control_blind_exclusive()
-    (audit finding 7), not control_blind() directly; overriding the latter
-    here was dead as of that fix, since make_flow()'s own default
+    silently dropped - this step actually calls control_blind_exclusive(),
+    not control_blind() directly; overriding the latter here was dead as
+    of that fix, since make_flow()'s own default
     control_blind_exclusive (return_value=True) was what this step's write
     still actually resolved against.
     """
@@ -506,6 +505,25 @@ async def test_send_raw_command_transmit_failed(hass: HomeAssistant) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "transmit_failed"}
+
+
+# --- Status discovery choice (skip option) ----------------------------------
+
+
+async def test_status_discovery_choice_shows_a_menu(hass: HomeAssistant) -> None:
+    """The new choice step (2026-11-08, project owner's own request) is a
+    plain two-option menu, not a form - so a person without their original
+    remote to hand, or who doesn't want to run discovery right now, is
+    never forced through async_step_discover_status()'s own "Start
+    listening" screen just to get past it.
+    """
+    flow = make_flow(hass)
+
+    result = await flow.async_step_status_discovery_choice()
+
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "status_discovery_choice"
+    assert result["menu_options"] == ["discover_status", "skip_status_discovery"]
 
 
 # --- Discover status from the original remote ------------------------------

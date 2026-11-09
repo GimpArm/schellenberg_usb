@@ -288,7 +288,7 @@ async def async_setup_entry(
         estimate but leaving this hub's shared serial connection itself
         open for the process teardown to close however it happened to,
         rather than the same clean, intentional close() a reload already
-        gets (audit finding 22).
+        gets.
         """
         await api.disconnect()
 

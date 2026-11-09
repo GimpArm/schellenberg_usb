@@ -263,7 +263,7 @@ def summarize_status_discovery_frames(
     blind actually being worked on and get stored as its identity instead -
     previously only guarded for the separate "movement detected" wait
     (handle_capture_event in options_flow_calibration.py), never for this,
-    the actual identity decision - found during the lifecycle audit round.
+    the actual identity decision.
     Empty by default: the first blind on a fresh hub (nothing else to
     exclude yet) and the manual "Discover status from original remote"
     flow (which never passes this at all - overwriting an existing

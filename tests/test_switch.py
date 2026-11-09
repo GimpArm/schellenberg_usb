@@ -285,7 +285,7 @@ async def test_added_to_hass_wires_up_the_status_update_signal(
 async def test_added_to_hass_does_not_race_the_restore_against_a_concurrent_reconnect(
     hass: HomeAssistant,
 ) -> None:
-    """Regression for audit finding 19: a brief, self-correcting LED flicker.
+    """Regression test: a brief, self-correcting LED flicker.
 
     async_get_last_state() suspends this coroutine - if the stick's own
     connect() finished while it was suspended, the status-update signal

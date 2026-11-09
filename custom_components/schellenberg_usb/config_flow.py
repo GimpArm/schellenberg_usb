@@ -270,8 +270,7 @@ def _foreign_capture_device_ids(
     on this same hub - without this, a second blind's RF traffic arriving
     while this one is being paired or recalibrated could silently satisfy
     this one's movement-start/stop wait instead, corrupting the open/close
-    time being measured - found during the independent audit alongside
-    the CHANGELOG entries above this one.
+    time being measured.
 
     Deliberately permissive otherwise: an id belonging to *nobody* yet -
     including this same blind's own not-yet-discovered or not-yet-
@@ -337,7 +336,24 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         # see that constant's own comment in cover.py.
         self._pending_initial_position: int | None = None
         self._pending_invert_direction = False
-        self._pairing_workflow = "legacy"
+        # Set only by CalibrationFlowHandler.async_step_calibration_complete()
+        # (options_flow_calibration.py), for a fresh pairing that went
+        # through *live* calibration rather than async_step_manual_times().
+        # That branch already has every field a finished subentry needs
+        # (open/close time, ending position, CONF_LAST_CALIBRATION, ...)
+        # assembled into its own `data` dict - this fully-built dict is
+        # stashed here rather than rebuilt from this flow's own
+        # `_pending_open_time`/`_pending_close_time`/`_pending_initial_
+        # position` (never populated on *this* object for that route; see
+        # `_pending_data()`'s own assertions) - so it can route through
+        # async_step_discover_status()/async_step_confirm_status_discovery()
+        # for a chance at a real primary/secondary status identity before
+        # finishing, the same as the manual-times route already does,
+        # instead of finishing pairing immediately with no identity
+        # discovery attempted at all. Consumed and reset to None the
+        # moment confirm_status_discovery() uses it.
+        self._pending_finish_data: dict[str, Any] | None = None
+        self._pairing_workflow = "pairing"
         # The direction chosen on the test_motor form (see
         # async_step_test_motor()) - "open" or "close" - remembered only so
         # did_motor_move's own description can report back what was just
@@ -374,40 +390,31 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Choose how to pair/calibrate a new device."""
-        return self.async_show_menu(
-            step_id="user",
-            menu_options=[
-                "pair_device",
-                "add_shutter_from_remote",
-            ],
-        )
+        """Pair a new device - the sole, unified pairing entry point.
 
-    async def async_step_pair_device(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Run the pair-then-calibrate workflow."""
-        self._pairing_workflow = "legacy"
-        return await self._async_pair_device("pair_device", user_input)
-
-    async def async_step_add_shutter_from_remote(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Pair a device by teaching the stick onto an existing remote's channel.
-
-        Captures whatever identity the person's already-paired physical
-        remote uses for the motor/channel they select, and teaches the
-        stick onto that same identity - rather than pair_device's own
-        fresh teach sequence. A short test move follows; see
-        async_step_did_motor_move()'s "hybrid" branch below.
+        Issue #78 discussion (2026-11-07): this used to be a menu
+        choosing between "Pair and calibrate" (no motor confirmation
+        afterward - the actually-redundant option, now gone) and "Add
+        device from remote" (recommended - taught the stick onto an
+        already-paired remote's channel, then confirmed with a short
+        test move). Both named choices are gone; this step's own
+        structure is what survives, just under a new, generic name,
+        since api.pair_device_and_wait() already listens for either
+        enrollment technique's own frame regardless of which old menu
+        option a person used to pick - see strings.json's "user" step
+        for the combined instructions that now cover both techniques
+        in one place. Every fresh pairing now gets the same motor-test
+        confirmation that only "Add device from remote" used to
+        require, via async_step_name_device()'s own now-unconditional
+        menu (calibration_method_choice's "test_motor" option, below).
         """
-        self._pairing_workflow = "hybrid"
-        return await self._async_pair_device("add_shutter_from_remote", user_input)
+        self._pairing_workflow = "pairing"
+        return await self._async_pair_device("user", user_input)
 
     async def _async_pair_device(
         self, step_id: str, user_input: dict[str, Any] | None
     ) -> SubentryFlowResult:
-        """Pair a device for either supported pairing workflow."""
+        """Pair a device for the single, unified pairing workflow."""
         _LOGGER.debug("Pairing step user input: %s", user_input)
         if user_input is None:
             _LOGGER.info("Showing pairing form")
@@ -421,7 +428,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         pairing_result = await api.pair_device_and_wait()
 
         if pairing_result is None:
-            # Audit finding 15's own deferred secondary observation: a
+            # A deferred secondary observation: a
             # hub-wide reload triggered by a *different* blind's own
             # subentry add/edit (or the hub unloading/Core stopping, or
             # an explicit stick reset) while this step was still waiting
@@ -444,6 +451,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_status_identity_source = STATUS_IDENTITY_SOURCE_UNKNOWN
         self._pending_secondary_status_identities = []
         self._pending_device_name = None
+        self._pending_finish_data = None
         return await self.async_step_name_device()
 
     @staticmethod
@@ -643,12 +651,13 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Ask whether the short command moved the motor.
 
-        Reached by async_step_test_motor() from two different places: the
-        "hybrid" add_shutter_from_remote workflow's own quick test right
-        after pairing, and the "existing" setup's re-test of an
-        already-paired blind. The default "legacy" (pair_device) workflow
-        never reaches this step at all - async_step_name_device() sends
-        it straight into calibration instead.
+        Reached by async_step_test_motor() from two different places: a
+        fresh pairing's own quick test, chosen via calibration_method_
+        choice's "test_motor" option (self._pairing_workflow == "pairing" -
+        see async_step_name_device()'s own comment; every fresh pairing
+        can reach this step now, as of the Issue #78 pairing-flow
+        unification, 2026-11-07), and the "existing" setup's re-test of
+        an already-paired blind.
         """
         if user_input is None:
             return self.async_show_form(
@@ -689,27 +698,33 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         if self._pairing_workflow == "existing":
             return self.async_abort(reason="command_test_successful")
-        # "hybrid" (add_shutter_from_remote) is the only workflow that can
-        # still be set here: "existing" already returned above, and the
-        # default "legacy" (pair_device) never reaches this step at all -
-        # async_step_name_device() sends it straight into calibration
-        # instead (see its own branch there).
+        # "pairing" is the only value that can still be set here -
+        # "existing" already returned above.
         return await self.async_step_test_success()
 
     async def async_step_test_success(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Offer calibration or manual timing after a successful motor test.
+        """Confirm continuing to calibration after a successful motor test.
 
-        Home Assistant requires a menu's step_id to match a real
-        async_step_<id>() handler on this class; a bare
-        async_show_menu(step_id="test_success", ...) call with no such
-        method raises UnknownStep as soon as the menu is shown.
+        No longer a real choice as of the Issue #78 pairing-flow
+        unification (2026-11-07): "Enter travel times manually" moved
+        earlier, to calibration_method_choice's own menu before the
+        motor test ever runs (see async_step_name_device()'s own
+        comment) - by the time a person reaches this step, the motor has
+        already been confirmed working, so there is nothing left to
+        offer manual entry as an alternative *to*. Kept as an explicit,
+        plain confirmation (not silently chaining straight into
+        calibration) since the person has just watched their shutter
+        move and should see that result acknowledged before anything
+        else starts - a form rather than a menu, since a single-option
+        menu would not be a real choice either.
         """
-        return self.async_show_menu(
-            step_id="test_success",
-            menu_options=["calibration_close", "manual_times"],
-        )
+        if user_input is None:
+            return self.async_show_form(
+                step_id="test_success", data_schema=vol.Schema({})
+            )
+        return await self.async_step_calibration_close(None)
 
     async def async_step_manual_times(
         self, user_input: dict[str, Any] | None = None
@@ -729,6 +744,20 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         pairing with this field just silently defaulted to "closed" would
         be exactly the kind of unverified, possibly-wrong position this
         whole CONF_INITIAL_POSITION fallback exists to avoid.
+
+        Reachable two ways: fresh, via calibration_method_choice, before
+        any live attempt has run - neither leg has a recorded time yet;
+        or mid-calibration, via calibration_timeout_choice, after one leg
+        already completed for real and only the *other* one timed out.
+        In that second case, whichever leg CalibrationFlowHandler.
+        recorded_leg_times() shows as already measured pre-fills that
+        field below instead of making the person re-enter or guess a
+        number Home Assistant already knows precisely - found and fixed
+        at the project owner's own request (2026-11-08), after the
+        calibration_timeout_choice fix above made this path reachable
+        for the first time. Each field stays fully editable regardless -
+        a real measured leg is still just a default, not forced, in case
+        the person has reason to distrust that particular run.
         """
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -745,13 +774,27 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 self._pending_open_time = float(user_input[CONF_OPEN_TIME_SECONDS])
                 self._pending_close_time = float(user_input[CONF_CLOSE_TIME_SECONDS])
                 self._pending_initial_position = pending_initial_position
-                return await self.async_step_discover_status()
+                return await self.async_step_status_discovery_choice()
+
+        recorded_open_time, recorded_close_time = (
+            self._get_calibration_handler().recorded_leg_times()
+        )
+        open_time_key: vol.Marker = (
+            vol.Required(CONF_OPEN_TIME_SECONDS, default=round(recorded_open_time, 2))
+            if recorded_open_time is not None
+            else vol.Required(CONF_OPEN_TIME_SECONDS)
+        )
+        close_time_key: vol.Marker = (
+            vol.Required(CONF_CLOSE_TIME_SECONDS, default=round(recorded_close_time, 2))
+            if recorded_close_time is not None
+            else vol.Required(CONF_CLOSE_TIME_SECONDS)
+        )
 
         return self.async_show_form(
             step_id="manual_times",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_OPEN_TIME_SECONDS): selector.NumberSelector(
+                    open_time_key: selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,
                             step=0.1,
@@ -759,7 +802,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),
-                    vol.Required(CONF_CLOSE_TIME_SECONDS): selector.NumberSelector(
+                    close_time_key: selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.1,
                             step=0.1,
@@ -844,16 +887,42 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             status_identity_source=self._pending_status_identity_source,
             invert_direction=self._pending_invert_direction,
         )
-        if self._pairing_workflow == "hybrid":
-            return await self.async_step_test_motor()
+        return await self.async_step_calibration_method_choice()
 
-        _LOGGER.debug(
-            "Starting calibration for paired device %s (%s) before creating subentry",
-            device_id,
-            device_name,
-        )
-        return await self._await_subentry_result(
-            handler.async_step_calibration_close(None)
+    async def async_step_calibration_method_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to calibrate live or enter travel times manually.
+
+        Every fresh pairing reaches the same choice now (Issue #78
+        discussion, 2026-11-07 - see async_step_user()'s own docstring
+        for why the old "legacy"/"hybrid" branch that used to live here
+        is gone): calibrate live - which, via the "test_motor" option
+        below, now also runs the same motor-test confirmation that only
+        the old "Add device from remote" workflow used to require
+        before calibrating - or enter travel times directly, with
+        nothing sent to the motor at all. Offering this choice *before*
+        committing to a live calibration also keeps Issue #77's own fix
+        meaningful here: that live calibration can still time out
+        (CALIBRATION_TIMEOUT, see its own comment in const.py) if the
+        person doesn't operate the shutter in time, and this upfront
+        alternative is the first of the two escapes calibration_timeout_
+        choice's own menu (options_flow_calibration.py) offers if it
+        does.
+
+        This needs its own step_id-matching method - unlike a plain
+        delegation target that only ever shows a form - because Home
+        Assistant's flow manager validates every result's step_id
+        against an async_step_<id> method on the handler, even for a
+        menu result; async_step_reconfigure()/async_step_developer_
+        tools() just below rely on the same self-referential pattern.
+        Delegated into from async_step_name_device() once a device has
+        just been named, and shown again unchanged if the flow is ever
+        resumed on this step.
+        """
+        return self.async_show_menu(
+            step_id="calibration_method_choice",
+            menu_options=["test_motor", "manual_times"],
         )
 
     async def async_step_reconfigure(
@@ -1415,6 +1484,63 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             "frame_count": str(len(result.get("frames", []))),
         }
 
+    async def async_step_status_discovery_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to run guided remote-identity discovery, or skip it.
+
+        Project owner's own explicit request (2026-11-08): a person
+        without their original remote to hand, who doesn't need
+        secondary-identity capture, or who simply wants pairing to
+        finish faster, must be able to skip the guided-remote-press step
+        entirely - without first landing on async_step_discover_status()'s
+        own "Start listening" screen and only then having to abandon the
+        *whole* pairing flow via the top-level cancel to get out of it.
+
+        Reachable from both fresh-pairing routes - async_step_manual_
+        times() above, and CalibrationFlowHandler.async_step_calibration_
+        complete() (options_flow_calibration.py) for live calibration -
+        the single, now-unified pairing path under "Add device" (Issue
+        #78's own unification, see async_step_user()'s docstring). Not
+        inserted in front of async_step_discover_status() itself, so the
+        dedicated, already-configured-blind "Discover status" Developer
+        Tools entry point (DEVELOPER_TOOLS_MENU_OPTIONS above) keeps
+        going straight there unchanged - that one's whole purpose is
+        deliberately (re)running discovery, so offering to skip it there
+        would make no sense.
+
+        Needs its own step_id-matching method for the same reason
+        async_step_calibration_method_choice()'s own docstring gives:
+        Home Assistant's flow manager validates every result's step_id
+        against an async_step_<id> method, even for a menu result.
+        """
+        return self.async_show_menu(
+            step_id="status_discovery_choice",
+            menu_options=["discover_status", "skip_status_discovery"],
+        )
+
+    async def async_step_skip_status_discovery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Finish pairing with no status identity, same as a "nothing found" discovery.
+
+        Deliberately does not call async_discover_status_identities() or
+        touch any of the _pending_status_*/_pending_secondary_status_
+        identities attributes at all - they are already at their
+        freshly-reset defaults for this pairing attempt (_async_pair_
+        device()'s own reset block; STATUS_IDENTITY_SOURCE_UNKNOWN, None,
+        and an empty list respectively), which is exactly the same state
+        a real discovery attempt that found nothing usable would leave
+        behind. Delegating straight into async_step_confirm_status_
+        discovery()'s own already-tested "finish" branches (both the
+        live-calibration _pending_finish_data one and the manual-entry
+        _pending_data() one already handle an unknown/empty status
+        identity correctly, since that is also what a declined/not-yet-
+        run Developer Tools discovery leaves them at) avoids duplicating
+        that finishing logic a second time here.
+        """
+        return await self.async_step_confirm_status_discovery(user_input={})
+
     async def async_step_discover_status(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -1501,9 +1627,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 # this fix, clicking "Save" anyway unconditionally popped
                 # the existing, already-working CONF_STATUS_DEVICE_ID/
                 # CONF_STATUS_ENUM with no warning at all, silently
-                # erasing a working identity mapping - found during the
-                # lifecycle audit round. Mirrors the kind of protection
-                # recalibration's own async_step_calibration_complete()
+                # erasing a working identity mapping. Mirrors the kind of
+                # protection recalibration's own
+                # async_step_calibration_complete()
                 # (options_flow_calibration.py) already has for its own,
                 # analogous "discovered nothing" case. Leave data
                 # untouched: keeps the existing identity exactly as it was.
@@ -1523,6 +1649,36 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
                 data.pop(CONF_STATUS_DEVICE_ID, None)
                 data.pop(CONF_STATUS_ENUM, None)
             return self.async_update_and_abort(entry, subentry, data=data)
+
+        if self._pending_finish_data is not None:
+            # The live-calibration pairing route (CalibrationFlowHandler.
+            # async_step_calibration_complete(), options_flow_calibration.py)
+            # already assembled a complete subentry `data` dict of its own
+            # before routing through here for an identity-discovery
+            # attempt - see `_pending_finish_data`'s own docstring in
+            # __init__. Layer whatever this discovery round found on top
+            # of it (same fields _pending_data() itself would set), rather
+            # than rebuilding `data` from this flow's own
+            # `_pending_open_time`/`_pending_close_time`/`_pending_
+            # initial_position`, which that route never populates.
+            if not self._pending_device_name:
+                return self.async_abort(reason="device_not_found")
+            data = self._pending_finish_data
+            self._pending_finish_data = None
+            data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+            data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                self._pending_secondary_status_identities
+            )
+            if (
+                self._pending_status_device_id is not None
+                and self._pending_status_enum is not None
+            ):
+                data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
+                data[CONF_STATUS_ENUM] = self._pending_status_enum
+            else:
+                data.pop(CONF_STATUS_DEVICE_ID, None)
+                data.pop(CONF_STATUS_ENUM, None)
+            return self._finish_pairing(title=self._pending_device_name, data=data)
 
         if (
             not self._pending_device_name
@@ -1716,11 +1872,11 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             raw, possibly-None previous_position/new_position straight
             into _t(...) instead, rendering the literal word "None" here
             for a freshly set up or just-restarted blind (nothing
-            recorded yet) where the live panel already showed "--"
-            (audit finding 21). Applied to current_estimated_position
-            too, just below - the same field as new_position, read a
-            second time for the confidence section, and wrong there for
-            the exact same reason.
+            recorded yet) where the live panel already showed "--".
+            Applied to current_estimated_position too, just below - the
+            same field as new_position, read a second time for the
+            confidence section, and wrong there for the exact same
+            reason.
             """
             return "--" if value is None else f"{value}%"
 
@@ -2242,4 +2398,54 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         handler = self._get_calibration_handler()
         return await self._await_subentry_result(
             handler.async_step_calibration_complete(user_input)
+        )
+
+    async def async_step_calibration_timeout_choice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose whether to retry a timed-out calibration leg or switch
+        to entering travel times manually (Issue #77).
+
+        All four of `CalibrationFlowHandler`'s own timeout branches
+        (`options_flow_calibration.py`, open/close leg x movement-start/
+        stop wait) call `self.flow.async_show_menu(step_id=
+        "calibration_timeout_choice", ...)` directly on this flow, the
+        same way `async_step_name_device()` used to call this menu's own
+        `async_show_menu()` inline before `async_step_calibration_method_
+        choice()` existed - and needs the exact same fix for the exact
+        same reason: Home Assistant's flow manager validates every
+        emitted result's step_id against a real async_step_<id> method
+        on this handler, even for a menu, so without this method every
+        one of those four timeout branches would crash with UnknownStep
+        instead of ever showing the choice. See async_step_calibration_
+        method_choice()'s own docstring for the full explanation. Shown
+        again unchanged if the flow is ever resumed on this step; the
+        two options are dispatched straight to async_step_calibration_
+        retry()/async_step_manual_times() by Home Assistant itself, not
+        by this method.
+        """
+        return self.async_show_menu(
+            step_id="calibration_timeout_choice",
+            menu_options=["calibration_retry", "manual_times"],
+        )
+
+    async def async_step_calibration_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Delegate to calibration handler.
+
+        The "retry" option on calibration_timeout_choice's own menu (Issue
+        #77) - Home Assistant's menu machinery calls this directly by name,
+        the same way it already calls async_step_test_motor()/async_step_
+        manual_times() for calibration_method_choice's own menu options (see
+        that method's own docstring for the full explanation of why a menu
+        needs this). Unlike async_step_test_success()'s own call into
+        async_step_calibration_close() - that is an ordinary Python call
+        this class makes from within one step's body, not Home Assistant
+        dispatching a menu option by name: test_success is a plain
+        confirmation form, not a menu, as its own docstring says.
+        """
+        handler = self._get_calibration_handler()
+        return await self._await_subentry_result(
+            handler.async_step_calibration_retry(user_input)
         )
