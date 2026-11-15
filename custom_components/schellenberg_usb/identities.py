@@ -250,12 +250,12 @@ def summarize_status_discovery_frames(
 
     exclude_device_ids: device ids positively confirmed to belong to some
     *other*, already-paired blind on this hub (see config_flow.py's
-    _foreign_capture_device_ids() for how calibration computes this).
-    Frames from one of these never form their own group and can never
-    become "primary"/"secondary"/appear in "groups" or "unknown_commands" -
-    excluded from identity *selection* entirely, not merely deprioritized -
-    while still counting toward the capture's own total frame count (kept
-    by finish_status_frame_capture()'s caller, outside this function's own
+    _foreign_capture_device_ids() for how calibration computes this). By
+    default these can never become "primary"/"secondary"/appear in
+    "groups" or "unknown_commands" - excluded from identity *selection*
+    entirely, not merely deprioritized - while still counting toward the
+    capture's own total frame count (kept by
+    finish_status_frame_capture()'s caller, outside this function's own
     return value) for diagnostic transparency. Without this, a capture
     window open for one blind that happens to overlap with a different,
     already-working blind's own ordinary movement (its own automation, its
@@ -264,6 +264,26 @@ def summarize_status_discovery_frames(
     previously only guarded for the separate "movement detected" wait
     (handle_capture_event in options_flow_calibration.py), never for this,
     the actual identity decision.
+
+    One exception (2026-11-15): an excluded identity whose own commands
+    fully reproduce the instructed remote-press order (a complete
+    _REMOTE_DISCOVERY_EXPECTED_SEQUENCE match - see below) is let back in
+    rather than dropped. Ambient motor traffic from an unrelated, already-
+    paired blind has no reason to reproduce that specific three-step
+    order, so a full match is strong, specific evidence that a person is
+    actually pressing a *shared* remote - one already linked to another
+    blind, now also being pressed for this one, a completely ordinary
+    setup (one physical remote commonly operates several blinds). A
+    partial match is deliberately not enough to lift the exclusion: an
+    ordinary move start alone already produces a bare "01", so treating
+    that as sufficient evidence would reopen exactly the cross-talk this
+    exclusion exists to prevent. Before this exception existed, pressing a
+    remote already linked to a different blind during this blind's own
+    calibration was indistinguishable from that other blind's own
+    ordinary traffic and always lost its frames outright, however
+    deliberately or clearly it was pressed - frames are still grouped
+    first regardless of exclusion (needed to even recognize this
+    sequence), only the later selection step tells the two cases apart.
     Empty by default: the first blind on a fresh hub (nothing else to
     exclude yet) and the manual "Discover status from original remote"
     flow (which never passes this at all - overwriting an existing
@@ -305,8 +325,6 @@ def summarize_status_discovery_frames(
         )
         if identity is None:
             continue
-        if identity[0] in exclude_device_ids:
-            continue
         command = str(frame.get("command", "")).strip().upper()
         if len(command) != 2 or any(
             character not in "0123456789ABCDEF" for character in command
@@ -346,8 +364,22 @@ def summarize_status_discovery_frames(
             _remote_discovery_sequence_match_length(group["commands"])
         )
 
+    # See this function's own docstring for why a foreign-flagged identity
+    # is let back in only on a full press-sequence match, never a partial
+    # one: maximum safety against cross-blind contamination while still
+    # recognizing a remote deliberately shared between two blinds.
+    full_sequence_length = len(_REMOTE_DISCOVERY_EXPECTED_SEQUENCE)
+    selectable_groups = [
+        group
+        for group in groups.values()
+        if group["device_id"] not in exclude_device_ids
+        or group["remote_discovery_sequence_match_length"] == full_sequence_length
+    ]
+
     candidates = [
-        group for group in groups.values() if recognized.intersection(group["commands"])
+        group
+        for group in selectable_groups
+        if recognized.intersection(group["commands"])
     ]
     primary = (
         max(
@@ -362,7 +394,7 @@ def summarize_status_discovery_frames(
         if candidates
         else None
     )
-    secondary = [group for group in groups.values() if group is not primary]
+    secondary = [group for group in selectable_groups if group is not primary]
     unknown_commands = [
         {
             "device_id": group["device_id"],
@@ -371,13 +403,13 @@ def summarize_status_discovery_frames(
                 command for command in group["commands"] if command not in recognized
             ],
         }
-        for group in groups.values()
+        for group in selectable_groups
         if any(command not in recognized for command in group["commands"])
     ]
     return {
         "primary": primary,
         "secondary": secondary,
-        "groups": list(groups.values()),
+        "groups": selectable_groups,
         "unknown_commands": unknown_commands,
         "position_tracking_available": primary is not None,
     }

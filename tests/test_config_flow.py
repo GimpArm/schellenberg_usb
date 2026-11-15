@@ -2277,8 +2277,40 @@ async def test_discover_status_success_confirms_and_updates_existing_blind(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A successful discovery run gives a blind its first confirmed status
+    identity.
+
+    Builds its own blind rather than using the shared _add_existing_blind()
+    fixture directly (2026-11-15): that fixture's own CONF_STATUS_DEVICE_ID/
+    CONF_STATUS_ENUM (matching DEVICE_ID/DEVICE_ENUM) now count as an
+    already-confirmed identity under today's conflict-protection fix (its
+    own CONF_STATUS_IDENTITY_SOURCE is unset, which - like
+    resolve_blind_identities()'s own "legacy" fallback elsewhere - this
+    flow treats as a real, confirmed identity, not an unknown one), so
+    reusing it here would collide with discovery's different "112233"/"01"
+    result instead of cleanly adopting it. That collision case is
+    test_discover_status_conflicting_primary_keeps_existing_and_adds_
+    secondary above; this test is about the ordinary case this one was
+    always meant to cover - a blind that has simply never had a status
+    identity confirmed before, explicit via STATUS_IDENTITY_SOURCE_UNKNOWN.
+    """
     entry = _build_hub_entry(hass, connected_api)
-    blind = _add_existing_blind(hass, entry)
+    blind = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                CONF_DEVICE_ID: DEVICE_ID,
+                CONF_DEVICE_ENUM: DEVICE_ENUM,
+                CONF_OPEN_TIME: 20.0,
+                CONF_CLOSE_TIME: 18.0,
+                CONF_INVERT_DIRECTION: False,
+                CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_UNKNOWN,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_BLIND,
+        title="Living Room Blind",
+        unique_id=DEVICE_ID,
+    )
+    hass.config_entries.async_add_subentry(entry, blind)
     discovery_result = {
         "primary": {
             "device_id": "112233",
@@ -2317,6 +2349,78 @@ async def test_discover_status_success_confirms_and_updates_existing_blind(
     updated = entry.subentries[blind.subentry_id]
     assert updated.data[CONF_STATUS_DEVICE_ID] == "112233"
     assert updated.data[CONF_STATUS_ENUM] == "01"
+
+
+async def test_discover_status_conflicting_primary_keeps_existing_and_adds_secondary(
+    hass: HomeAssistant,
+    connected_api: SchellenbergUsbApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A *different* device discovered via the remote must not replace an
+    already-working status identity - it is folded into the secondary
+    list instead, never used to replace anything.
+
+    Regression for a real report (2026-11-15): Developer Tools' own
+    "Discover status" dialog, run against an already-paired blind whose
+    status identity an electronic Gurtwickler's own motor echo had
+    already confirmed, found the *original remote*'s identity instead
+    (the same stick also hears it) and - before this fix - the branch
+    below ran unconditionally whenever discovery found anything,
+    replacing both the primary identity and the whole secondary list
+    with just this one run's result. The Gurtwickler's identity did not
+    even survive as a secondary, it simply vanished, leaving it producing
+    no reaction in Home Assistant afterward. Mirrors the identical
+    protection test_confirm_status_discovery_keeps_calibration_primary_
+    on_conflict (tests/test_pairing_subentry_flow.py) already has for the
+    sibling, fresh-pairing branch.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    blind = _add_existing_blind(hass, entry)
+    discovery_result = {
+        "primary": {
+            "device_id": "112233",
+            "enum": "01",
+            "commands": ["00", "01"],
+            "timestamps": ["10:00:00"],
+        },
+        "secondary": [{"device_id": "445566", "enum": "03"}],
+        "unknown_commands": [],
+        "frames": [{}, {}, {}],
+    }
+    monkeypatch.setattr(
+        connected_api,
+        "async_discover_status_identities",
+        AsyncMock(return_value=discovery_result),
+    )
+    result = await _start_reconfigure_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "developer_tools"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "discover_status"}
+    )
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["step_id"] == "confirm_status_discovery"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = entry.subentries[blind.subentry_id]
+    # The Gurtwickler's own, already-working primary survives untouched...
+    assert updated.data[CONF_STATUS_DEVICE_ID] == DEVICE_ID
+    assert updated.data[CONF_STATUS_ENUM] == DEVICE_ENUM
+    # ...and both the remote's own primary and its own secondary are
+    # folded into the secondary list instead of replacing anything.
+    assert updated.data[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "445566", "enum": "03"},
+        {"device_id": "112233", "enum": "01"},
+    ]
 
 
 async def test_discover_status_finding_nothing_keeps_the_existing_identity(

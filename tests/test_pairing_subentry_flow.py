@@ -631,6 +631,61 @@ async def test_confirm_status_discovery_updates_existing_subentry(
     assert result["reason"] == "reconfigure_successful"
 
 
+async def test_confirm_status_discovery_updates_existing_keeps_primary_on_conflict(
+    hass: HomeAssistant,
+) -> None:
+    """A *different* device discovered via the remote must not replace an
+    already-confirmed status identity on an already-paired blind - it is
+    folded into the secondary list instead, never used to replace
+    anything.
+
+    This is the _status_discovery_updates_existing=True branch's own
+    counterpart to test_confirm_status_discovery_keeps_calibration_
+    primary_on_conflict below, for the sibling, Developer-Tools/
+    reconfigure path (2026-11-15). Before this fix, the branch this test
+    exercises ran unconditionally whenever discovery found *anything*, so
+    the already-confirmed primary - and the whole secondary list along
+    with it - was simply replaced with whatever this one run found,
+    discarding the original device's identity entirely. Reported as an
+    electronic Gurtwickler's already-working status identity vanishing
+    (and the device producing no reaction in Home Assistant afterward)
+    the moment Developer Tools' "Discover status" was run with the
+    original remote instead.
+    """
+    flow = make_flow(hass)
+    existing_secondary = [{"device_id": "778899", "enum": "05"}]
+    flow._get_reconfigure_subentry = MagicMock(
+        return_value=make_subentry(
+            **{CONF_SECONDARY_STATUS_IDENTITIES: existing_secondary}
+        )
+    )
+    flow.async_update_and_abort = MagicMock(
+        return_value={"type": FlowResultType.ABORT, "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_discover_status()  # primes _pending_device_id etc.
+    flow._apply_remote_status_discovery(
+        {
+            "primary": {"device_id": "112233", "enum": "01"},
+            "secondary": [],
+        }
+    )
+
+    result = await flow.async_step_confirm_status_discovery(user_input={})
+
+    flow.async_update_and_abort.assert_called_once()
+    data = flow.async_update_and_abort.call_args.kwargs["data"]
+    # The already-confirmed primary survives untouched...
+    assert data[CONF_STATUS_DEVICE_ID] == DEVICE_ID
+    assert data[CONF_STATUS_ENUM] == DEVICE_ENUM
+    # ...and the newly discovered device is folded into the secondary
+    # list alongside what was already there, instead of replacing it.
+    assert data[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "778899", "enum": "05"},
+        {"device_id": "112233", "enum": "01"},
+    ]
+    assert result["reason"] == "reconfigure_successful"
+
+
 async def test_confirm_status_discovery_preserves_calibration_identity_when_skipped(
     hass: HomeAssistant,
 ) -> None:

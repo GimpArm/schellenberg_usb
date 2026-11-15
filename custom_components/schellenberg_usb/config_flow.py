@@ -1831,29 +1831,78 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             entry = self._get_entry()
             subentry = self._get_reconfigure_subentry()
             data = dict(subentry.data)
-            if (
-                self._pending_status_device_id is not None
+            existing_status_identity = normalize_status_identity(
+                data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
+            )
+            existing_status_confirmed = (
+                existing_status_identity is not None
+                and data.get(CONF_STATUS_IDENTITY_SOURCE)
+                != STATUS_IDENTITY_SOURCE_UNKNOWN
+            )
+            discovered_identity = (
+                normalize_status_identity(
+                    self._pending_status_device_id, self._pending_status_enum
+                )
+                if self._pending_status_device_id is not None
                 and self._pending_status_enum is not None
+                else None
+            )
+            if (
+                discovered_identity is not None
+                and existing_status_confirmed
+                and discovered_identity != existing_status_identity
             ):
-                # Discovery found something - this flow's whole purpose on
-                # an already-configured blind is to let the person
+                # Discovery found a *different* device than the one
+                # already confirmed for this blind - for example, this
+                # blind's own electronic Gurtwickler already has a
+                # working status identity from an earlier calibration,
+                # and this detour was run with the original remote
+                # instead, which this same stick also hears. Before this
+                # fix (2026-11-15), the branch below ran unconditionally
+                # whenever discovery found *anything*, replacing both the
+                # primary identity and the whole secondary list in one go
+                # - so the already-working identity did not even survive
+                # as a secondary, it simply vanished, and that device
+                # stopped producing any reaction in Home Assistant at
+                # all. Mirrors the identical protection the fresh-pairing
+                # branch below already has: keep the existing primary
+                # exactly as it is, and fold this run's own primary (plus
+                # whatever it separately saw as secondary) into the
+                # secondary list instead of replacing anything.
+                merged_secondary = list(
+                    normalize_status_identities(
+                        data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+                    )
+                )
+                additional_identities = list(
+                    normalize_status_identities(
+                        self._pending_secondary_status_identities
+                    )
+                )
+                additional_identities.append(discovered_identity)
+                for identity in additional_identities:
+                    if (
+                        identity != existing_status_identity
+                        and identity not in merged_secondary
+                    ):
+                        merged_secondary.append(identity)
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = serialize_status_identities(
+                    merged_secondary
+                )
+            elif discovered_identity is not None:
+                # Discovery found something, and either it matches the
+                # device already confirmed or there was nothing confirmed
+                # yet worth protecting - this flow's whole purpose on an
+                # already-configured blind is to let the person
                 # deliberately (re)set its status identity via the
-                # remote, so a clean result always applies, even if it
-                # differs from whatever was there before.
+                # remote, so a clean result applies.
                 data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
                 data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
                     self._pending_secondary_status_identities
                 )
                 data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
                 data[CONF_STATUS_ENUM] = self._pending_status_enum
-            elif (
-                normalize_status_identity(
-                    data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
-                )
-                is not None
-                and data.get(CONF_STATUS_IDENTITY_SOURCE)
-                != STATUS_IDENTITY_SOURCE_UNKNOWN
-            ):
+            elif existing_status_confirmed:
                 # Discovery found nothing usable - wrong button, pressed
                 # too fast, RF interference - which is an inconclusive
                 # attempt, not a deliberate "clear this" action. Before

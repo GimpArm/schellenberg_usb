@@ -405,6 +405,145 @@ def test_summarize_status_discovery_frames_sequence_match_breaks_a_tie() -> None
     assert result["primary"]["remote_discovery_sequence_match_length"] == 2
 
 
+def test_summarize_status_discovery_frames_excludes_foreign_identity_by_default() -> (
+    None
+):
+    """A device_id already claimed by a different, already-paired blind
+    (see config_flow.py's _foreign_capture_device_ids()) must not become
+    this capture's primary or secondary, or even appear in "groups" - no
+    matter how many raw frames it sent - unless it also shows the full
+    remote-press-order signal (see the two tests below). Baseline/
+    regression guard for the exclusion itself.
+    """
+    frames = [
+        # The foreign device: more raw frames than the real candidate
+        # below, but no deliberate press-order signal at all - exactly
+        # the kind of ambient motor traffic exclude_device_ids exists to
+        # keep out.
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        # This blind's own real candidate.
+        {
+            "device_id": "5D3E7C",
+            "enum": "01",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "5D3E7C",
+            "enum": "01",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "5D3E7C"
+    assert result["secondary"] == []
+    assert result["groups"] == [result["primary"]]
+
+
+def test_summarize_status_discovery_frames_full_sequence_admits_foreign_id() -> None:
+    """The one exception to the exclusion above (2026-11-15): a foreign
+    identity whose own commands fully reproduce the instructed press
+    order ("OPEN, STOP, CLOSE") is let back in, since ambient motor
+    traffic from an unrelated, already-paired blind has no reason to
+    reproduce that specific three-step order - strong, specific evidence
+    that a person is actually pressing a *shared* remote already linked
+    to that other blind (one physical remote commonly operates several
+    blinds).
+
+    Regression for a real report (2026-11-15): pressing a remote already
+    linked to a different, already-paired blind during this blind's own
+    calibration used to lose every one of its frames outright, however
+    deliberately or clearly it was pressed - reported as no secondary (or
+    even primary) status identity ever being captured during either a
+    fresh pairing's own calibration or a recalibration, despite genuinely
+    pressing the remote each time.
+    """
+    frames = [
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "02",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "FFFFFF"
+    assert result["primary"]["remote_discovery_sequence_match_length"] == 3
+
+
+def test_summarize_status_discovery_frames_partial_sequence_match_stays_excluded() -> (
+    None
+):
+    """Maximum safety: only a *complete* press-order match lifts the
+    exclusion above, never a partial one. An ordinary move start alone
+    already produces a bare "01", so treating a partial match as
+    sufficient evidence would reopen exactly the cross-blind cross-talk
+    exclude_device_ids exists to prevent.
+    """
+    frames = [
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is None
+    assert result["secondary"] == []
+    assert result["groups"] == []
+
+
 def test_summarize_status_discovery_frames_unphased_capture_is_unaffected() -> None:
     """The manual "discover status" remote-listening window labels every
     frame with the same constant phase throughout (e.g. "remote_
