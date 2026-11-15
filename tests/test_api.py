@@ -1626,7 +1626,7 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
 
 
 async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmission(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The Kuechenrolladen case: a stop must not collide with its own move's write.
 
@@ -1636,7 +1636,33 @@ async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmissio
     yet, it cannot un-send a write already on the wire - so the fix has to
     be control_blind_stop() itself waiting for the transmitter to clear
     before writing, exactly like a move already does.
+
+    asyncio.sleep patched to instant rather than disabling
+    STOP_COMMAND_EXTRA_RESENDS outright (2026-11-15, following that
+    constant's delay partner being raised 0.25 -> 0.9 - see
+    STOP_COMMAND_RESEND_DELAY_SECONDS' own comment in const.py): unlike
+    the two *other*, lock-ordering sibling tests in this file, which
+    disable the count because a real resend there would land an
+    unplanned extra write mid-sequence and corrupt their own precise
+    write-count/payload assertions between two competing calls, this
+    test makes no assertion at all after its own single stop is accepted
+    - so there is nothing for the real, production
+    STOP_COMMAND_EXTRA_RESENDS=2 resend loop to corrupt by actually
+    running here, only its real-time delay worth avoiding.
     """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` never actually yields to the event loop -
+        # see test_control_blind_stop_sends_two_extra_resends_after_being_
+        # accepted's own comment on this exact pitfall, which applies
+        # here identically: this task runs as a genuinely separate
+        # asyncio.Task, and the pumping loop below yields through this
+        # same patched asyncio.sleep.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
     # Simulate this blind's own close write still being in flight: nothing
     # needs to be awaiting ack for a bare "t1" to clear _transmitter_idle.
     connected_api._handle_message("t1")
