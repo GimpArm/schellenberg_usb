@@ -3613,7 +3613,7 @@ def test_status_discovery_choice_matches_discover_status_capture_wording() -> No
     )
     assert (
         _load_step("de", "status_discovery_choice")["menu_options"]["discover_status"]
-        == "Von der Original-Fernbedienung erfassen (empfohlen)"
+        == "von der Original-Fernbedienung erfassen (empfohlen)"
     )
 
 

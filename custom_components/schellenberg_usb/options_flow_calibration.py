@@ -827,11 +827,18 @@ class CalibrationFlowHandler:
         new subentry's data and - instead of finishing immediately -
         detours through async_step_status_discovery_choice() (config_
         flow.py) for a chance at a real remote-control identity first;
-        a recalibration instead updates the existing subentry in place,
-        taking care not to overwrite an already-confirmed status
-        identity with a differing one this run happened to discover
-        (see the _LOGGER.info() call below for exactly when that guard
-        fires).
+        a recalibration instead updates the existing subentry in
+        place, always adopting this run's own freshly captured status
+        identity - primary and secondary alike - over whatever was
+        persisted before, including clearing a previously stored
+        secondary identity (for example a remote control) that this
+        round's own capture did not reconfirm. A live calibration
+        run's self-echo capture is direct, first-hand evidence of
+        what is actually driving this blind right now, so it is
+        trusted outright rather than merged with stale data (see the
+        _LOGGER.info() call below, which documents when this changes
+        the previously confirmed identity, without guarding against
+        it).
         """
         if (
             self._selected_device is None
@@ -962,8 +969,13 @@ class CalibrationFlowHandler:
                     _LOGGER.info(
                         "Recalibration for %s discovered status identity %s/%s, "
                         "which differs from the already-configured %s/%s; "
-                        "keeping the existing one and discarding the newly "
-                        "discovered guess",
+                        "adopting the newly discovered identity, since this "
+                        "run's own live capture is direct evidence of what is "
+                        "actually driving this blind right now. Any "
+                        "previously stored secondary status identity not "
+                        "reconfirmed by this run (for example a remote "
+                        "control that was not pressed this time) is cleared "
+                        "along with it",
                         self._selected_device["name"]
                         if self._selected_device is not None
                         else "unknown device",
@@ -972,23 +984,23 @@ class CalibrationFlowHandler:
                         existing_status_identity[0],
                         existing_status_identity[1],
                     )
-                else:
-                    data_updates.update(
-                        {
-                            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
-                            CONF_STATUS_ENUM: self._pending_status_enum,
-                            CONF_STATUS_IDENTITY_SOURCE: (
-                                STATUS_IDENTITY_SOURCE_CALIBRATION
-                            ),
-                            CONF_SECONDARY_STATUS_IDENTITIES: list(
-                                self._pending_secondary_status_identities
-                            ),
-                        }
-                    )
+                data_updates.update(
+                    {
+                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
+                        CONF_STATUS_ENUM: self._pending_status_enum,
+                        CONF_STATUS_IDENTITY_SOURCE: (
+                            STATUS_IDENTITY_SOURCE_CALIBRATION
+                        ),
+                        CONF_SECONDARY_STATUS_IDENTITIES: list(
+                            self._pending_secondary_status_identities
+                        ),
+                    }
+                )
             return self.flow.async_update_and_abort(
                 self.flow._get_entry(),
                 self.flow._get_reconfigure_subentry(),
                 data_updates=data_updates,
+                reason="calibration_successful",
             )
 
         return self.flow.async_show_form(

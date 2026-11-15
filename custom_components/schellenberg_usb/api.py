@@ -2425,7 +2425,11 @@ class SchellenbergUsbApi:
         confirmed accepted, instead of running inline there as before
         this fix. That inline version blocked control_blind_with_retry()
         from returning True for an extra MOVE_COMMAND_EXTRA_RESENDS *
-        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s) after the
+        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s, both constants'
+        values at the time this was fixed - MOVE_COMMAND_RESEND_DELAY_
+        SECONDS has since been raised, see its own comment in const.py,
+        but this historical figure describes the fix being narrated here,
+        not the product of today's constants) after the
         primary write's own ack - and async_open_cover()/
         async_close_cover() only stamp _move_start_time and call
         _start_position_tracking() once that call returns. Unlike the

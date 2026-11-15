@@ -147,8 +147,8 @@
         "status_discovery_choice": {
           "title": "¿Captar comandos de radio desde un mando a distancia?",
           "menu_options": {
-            "discover_status": "Captar desde el mando a distancia original (recomendado)",
-            "skip_status_discovery": "Omitir - finalizar el emparejamiento sin esto"
+            "discover_status": "captar desde el mando a distancia original (recomendado)",
+            "skip_status_discovery": "omitir - finalizar el emparejamiento sin esto"
           }
         },
         "discover_status": {
@@ -238,6 +238,7 @@
         "pairing_interrupted_by_disconnect": "El emparejamiento se interrumpió porque la conexión con el stick USB se reinició o se recargó mientras se esperaba una respuesta (por ejemplo, al añadir o editar otra persiana, o al reiniciar Home Assistant). Por favor, inténtelo de nuevo.",
         "pairing_failed": "Error en el emparejamiento del dispositivo.",
         "reconfigure_successful": "La configuración del dispositivo se ha actualizado correctamente",
+        "calibration_successful": "La configuración se ha realizado correctamente.",
         "command_test_successful": "La prueba de comando del motor se ha realizado correctamente.",
         "device_not_found": "No se ha podido encontrar el dispositivo seleccionado. Inicie este paso de nuevo."
       }

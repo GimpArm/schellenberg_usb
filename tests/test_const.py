@@ -115,9 +115,12 @@ def test_resend_delay_constants() -> None:
     resend - see either constant's own comment in const.py for why both
     are kept equal.
     """
-    # Lowered from 0.3 to 0.25 (2026-11-07, project owner's own direction).
-    assert MOVE_COMMAND_RESEND_DELAY_SECONDS == 0.25
-    assert STOP_COMMAND_RESEND_DELAY_SECONDS == 0.25
+    # Lowered from 0.3 to 0.25 (2026-11-07), then raised from 0.25 to 0.9
+    # (2026-11-15) - both project owner's own direction. See either
+    # constant's own comment in const.py for why 0.9 still elapses well
+    # before this blind's own measured ~1.6-1.7s confirmation-echo delay.
+    assert MOVE_COMMAND_RESEND_DELAY_SECONDS == 0.9
+    assert STOP_COMMAND_RESEND_DELAY_SECONDS == 0.9
 
     assert MOVE_COMMAND_RESEND_DELAY_SECONDS > 0
     assert STOP_COMMAND_RESEND_DELAY_SECONDS > 0

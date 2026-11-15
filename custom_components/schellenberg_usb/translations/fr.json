@@ -147,8 +147,8 @@
         "status_discovery_choice": {
           "title": "Capter les commandes radio depuis une télécommande ?",
           "menu_options": {
-            "discover_status": "Capter depuis la télécommande d'origine (recommandé)",
-            "skip_status_discovery": "Ignorer - terminer le couplage sans cela"
+            "discover_status": "capter depuis la télécommande d'origine (recommandé)",
+            "skip_status_discovery": "ignorer - terminer le couplage sans cela"
           }
         },
         "discover_status": {
@@ -238,6 +238,7 @@
         "pairing_interrupted_by_disconnect": "L'appairage a été interrompu car la connexion à la clé USB a été réinitialisée ou rechargée en attendant une réponse (par exemple, par l'ajout ou la modification d'un autre volet, ou par un redémarrage de Home Assistant). Veuillez réessayer.",
         "pairing_failed": "Échec de l'appairage de l'appareil.",
         "reconfigure_successful": "La configuration de l'appareil a été mise à jour avec succès",
+        "calibration_successful": "La configuration a réussi.",
         "command_test_successful": "Le test de commande du moteur a réussi.",
         "device_not_found": "L'appareil sélectionné est introuvable. Veuillez redémarrer cette étape."
       }

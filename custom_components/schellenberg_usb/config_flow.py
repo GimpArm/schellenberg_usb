@@ -1906,13 +1906,81 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             # "don't erase a known-good identity with an inconclusive new
             # one" protection the branch above applies, and that
             # recalibration's own async_step_calibration_complete() has
-            # always had.
+            # always had. The follow-up fix just below (2026-11-15)
+            # protects the same already-confirmed identity a second way:
+            # from a *conclusive* but differing discovery result, not just
+            # an empty/skipped one.
             discovery_primary = (
                 self._status_discovery_result.get("primary")
                 if self._status_discovery_result is not None
                 else None
             )
-            if discovery_primary is not None:
+            # Whatever the calibration drive itself already confirmed as
+            # this blind's own primary is self-echo evidence (it heard its
+            # *own* just-sent command - see summarize_status_discovery_
+            # frames()'s own phase_confirmed_frame_count scoring,
+            # identities.py), at least as trustworthy as this detour's own
+            # press-order guess - so it must not simply be discarded just
+            # because this detour recognizes a *different* device as the
+            # one actually pressed. That difference is expected, not an
+            # error: the project owner's own report (2026-11-15) traced it
+            # to an electronic Gurtwickler whose motor echoes its own
+            # commanded moves under one identity while the original remote
+            # driving the same physical blind is heard under a different
+            # one entirely. Before this fix, the unconditional overwrite
+            # below ran whenever discovery found *anything*, replacing
+            # both the primary identity and the whole secondary list in
+            # one go - so the calibration-confirmed identity did not even
+            # survive as a secondary, it simply vanished. That is exactly
+            # what was reported as Erstkalibrierung swapping its primary
+            # and secondary identities, and never recognizing a secondary
+            # from the remote at all: the one identity that could have
+            # ended up there was the one being thrown away every time.
+            existing_status_identity = normalize_status_identity(
+                data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
+            )
+            existing_status_confirmed = (
+                existing_status_identity is not None
+                and data.get(CONF_STATUS_IDENTITY_SOURCE)
+                != STATUS_IDENTITY_SOURCE_UNKNOWN
+            )
+            discovered_identity = (
+                normalize_status_identity(
+                    self._pending_status_device_id, self._pending_status_enum
+                )
+                if discovery_primary is not None
+                else None
+            )
+            if (
+                discovered_identity is not None
+                and existing_status_confirmed
+                and discovered_identity != existing_status_identity
+            ):
+                # Keep the calibration-confirmed primary exactly as it is,
+                # and fold this detour's own primary (plus whatever it
+                # separately saw as secondary) into the secondary list
+                # instead of using either to replace anything.
+                merged_secondary = list(
+                    normalize_status_identities(
+                        data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+                    )
+                )
+                additional_identities = list(
+                    normalize_status_identities(
+                        self._pending_secondary_status_identities
+                    )
+                )
+                additional_identities.append(discovered_identity)
+                for identity in additional_identities:
+                    if (
+                        identity != existing_status_identity
+                        and identity not in merged_secondary
+                    ):
+                        merged_secondary.append(identity)
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = serialize_status_identities(
+                    merged_secondary
+                )
+            elif discovery_primary is not None:
                 data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
                 data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
                     self._pending_secondary_status_identities

@@ -706,7 +706,7 @@ async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
         unsub()
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "reconfigure_successful"
+    assert result["reason"] == "calibration_successful"
     updated = entry.subentries[blind.subentry_id]
     assert updated.data[CONF_OPEN_TIME] >= 0.1
     assert updated.data[CONF_CLOSE_TIME] >= 0.1
@@ -842,7 +842,7 @@ async def test_close_leg_first_then_open_leg_ends_at_open_position(
         unsub()
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "reconfigure_successful"
+    assert result["reason"] == "calibration_successful"
     updated = entry.subentries[blind.subentry_id]
     assert updated.data[CONF_OPEN_TIME] >= 0.1
     assert updated.data[CONF_CLOSE_TIME] >= 0.1
@@ -897,20 +897,27 @@ def _build_bare_handler(
     return handler, flow
 
 
-async def test_recalibration_keeps_existing_status_identity_when_discovered_differs(
+async def test_recalibration_adopts_discovered_status_identity_when_it_differs(
     hass: HomeAssistant,
 ) -> None:
-    """Regression for MEDIUM #2: don't let a recalibration clobber a good ID.
+    """Recalibration trusts this run's own live capture over stale data.
 
-    A recalibration run is normally about remeasuring travel times, not
-    re-discovering status identity - but a freshly captured "primary" can be
-    wrong (RF noise, a neighboring blind's remote, another blind sharing the
-    capture window) in ways the calibration code has no way to tell apart
-    from a genuine re-discovery. Before this fix, whatever the new run
-    happened to discover was applied unconditionally, silently overwriting
-    an already-working status identity with a possibly-wrong guess. Only a
-    *different* discovered identity needs protecting against - see the
-    sibling test right below for the "confirms the same one" case.
+    A real-world report (2026-11) traced the primary/secondary status
+    identities of a live blind being swapped back to exactly this code
+    path's previous behavior: a fresh pairing's live-calibration capture
+    correctly self-echo-confirmed the motor's own identity, but an earlier
+    version of *this* recalibration branch kept whatever identity was
+    already configured and silently discarded a differing fresh finding
+    entirely - so a later recalibration could never recover from a wrong
+    identity that had gotten persisted some other way. A live capture's
+    self-echo is direct, first-hand evidence of what is actually driving
+    this blind right now, so a genuinely different discovered identity is
+    now adopted outright instead - including this run's own secondary
+    list, which replaces whatever was stored before rather than staying
+    frozen at an earlier run's snapshot. See the sibling test right below
+    for the "confirms the same one" case, and
+    test_recalibration_clears_stale_secondary_identity_when_not_reconfirmed
+    below for the secondary-clearing consequence this enables.
     """
     handler, flow = _build_bare_handler(
         hass,
@@ -920,8 +927,8 @@ async def test_recalibration_keeps_existing_status_identity_when_discovered_diff
             CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_CALIBRATION,
         },
     )
-    # This run "discovers" a different identity than the one already
-    # configured above - the case that used to get silently applied.
+    # This run discovers a different identity than the one already
+    # configured above - previously discarded, now adopted outright.
     handler._pending_status_device_id = "112233"
     handler._pending_status_enum = "99"
     handler._pending_status_identity_source = STATUS_IDENTITY_SOURCE_CALIBRATION
@@ -935,10 +942,14 @@ async def test_recalibration_keeps_existing_status_identity_when_discovered_diff
     data_updates = flow.async_update_and_abort.call_args.kwargs["data_updates"]
     assert data_updates[CONF_OPEN_TIME] == 21.5
     assert data_updates[CONF_CLOSE_TIME] == 19.5
-    assert CONF_STATUS_DEVICE_ID not in data_updates
-    assert CONF_STATUS_ENUM not in data_updates
-    assert CONF_STATUS_IDENTITY_SOURCE not in data_updates
-    assert CONF_SECONDARY_STATUS_IDENTITIES not in data_updates
+    assert data_updates[CONF_STATUS_DEVICE_ID] == "112233"
+    assert data_updates[CONF_STATUS_ENUM] == "99"
+    assert (
+        data_updates[CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_CALIBRATION
+    )
+    assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "445566", "enum": "77"}
+    ]
 
 
 async def test_recalibration_applies_status_identity_when_it_matches_existing(
@@ -946,13 +957,13 @@ async def test_recalibration_applies_status_identity_when_it_matches_existing(
 ) -> None:
     """Confirming the same identity again is not "overwriting" - still applies.
 
-    Refinement of the regression test above: the protection only needs to
-    guard against a *different* discovered identity replacing a known-good
-    one. When this run's frame capture confirms the exact identity that was
-    already configured, applying the update is harmless - it is the same
-    identity either way - and still lets CONF_SECONDARY_STATUS_IDENTITIES
-    and CONF_STATUS_IDENTITY_SOURCE refresh from this run's own capture,
-    instead of being frozen at whatever an earlier run happened to see.
+    Sibling of the adoption test above, which covers a *differing*
+    discovered identity (now adopted outright, same as this one): this
+    covers the simpler case where this run's frame capture confirms the
+    exact identity that was already configured. Either way, this lets
+    CONF_SECONDARY_STATUS_IDENTITIES and CONF_STATUS_IDENTITY_SOURCE
+    refresh from this run's own capture, instead of being frozen at
+    whatever an earlier run happened to see.
     """
     handler, flow = _build_bare_handler(
         hass,
@@ -986,6 +997,60 @@ async def test_recalibration_applies_status_identity_when_it_matches_existing(
     assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == [
         {"device_id": "445566", "enum": "77"}
     ]
+
+
+async def test_recalibration_clears_stale_secondary_identity_when_not_reconfirmed(
+    hass: HomeAssistant,
+) -> None:
+    """No remote pressed this round -> its stored secondary ID is dropped,
+    even though this round's primary also conflicts with the persisted one.
+
+    Direct coverage for the project owner's own requirement: recalibrating
+    without using a remote control must clear that remote's secondary
+    status identity, rather than leaving it stuck at whatever an earlier
+    run (which did see the remote) had stored - specifically in the
+    conflicting-primary case this fix actually changes the behavior of.
+
+    An earlier version of this test used the *same* primary for both the
+    existing data and this round's fresh capture, which stays on the
+    unconditional "no conflict" branch both before and after this fix -
+    so it would have passed on the pre-fix code too, and never actually
+    exercised the new behavior at all; an independent review caught this.
+    DEVICE_ID/DEVICE_ENUM below is the stale, already-persisted primary;
+    "112233"/"99" - the same differing identity the sibling adoption test
+    above uses - is this round's fresh, genuinely conflicting capture.
+    """
+    handler, flow = _build_bare_handler(
+        hass,
+        existing_subentry_data={
+            CONF_STATUS_DEVICE_ID: DEVICE_ID,
+            CONF_STATUS_ENUM: DEVICE_ENUM,
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_CALIBRATION,
+            CONF_SECONDARY_STATUS_IDENTITIES: [{"device_id": "445566", "enum": "77"}],
+        },
+    )
+    # This round's self-echo capture found a different primary than the
+    # one already persisted - the conflicting case - and heard nothing
+    # else this time, unlike whatever earlier run had stored the stale
+    # secondary above.
+    handler._pending_status_device_id = "112233"
+    handler._pending_status_enum = "99"
+    handler._pending_status_identity_source = STATUS_IDENTITY_SOURCE_CALIBRATION
+    handler._pending_secondary_status_identities = []
+
+    await handler.async_step_calibration_complete(user_input={})
+
+    flow.async_update_and_abort.assert_called_once()
+    assert flow.async_update_and_abort.call_args.kwargs["reason"] == (
+        "calibration_successful"
+    )
+    data_updates = flow.async_update_and_abort.call_args.kwargs["data_updates"]
+    assert data_updates[CONF_STATUS_DEVICE_ID] == "112233"
+    assert data_updates[CONF_STATUS_ENUM] == "99"
+    assert (
+        data_updates[CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_CALIBRATION
+    )
+    assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == []
 
 
 async def test_recalibration_fills_status_identity_when_previously_unknown(

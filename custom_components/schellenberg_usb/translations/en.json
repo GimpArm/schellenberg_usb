@@ -147,8 +147,8 @@
         "status_discovery_choice": {
           "title": "Capture radio commands from a remote control?",
           "menu_options": {
-            "discover_status": "Capture from the original remote control (recommended)",
-            "skip_status_discovery": "Skip - finish pairing without this"
+            "discover_status": "capture from the original remote control (recommended)",
+            "skip_status_discovery": "skip - finish pairing without this"
           }
         },
         "discover_status": {
@@ -238,6 +238,7 @@
         "pairing_interrupted_by_disconnect": "Pairing was interrupted because the connection to the USB stick was reset or reloaded while waiting for a response (for example, by adding or editing a different shutter, or restarting Home Assistant). Please try again.",
         "pairing_failed": "Pairing of the device failed.",
         "reconfigure_successful": "Device configuration updated successfully",
+        "calibration_successful": "The configuration was successful.",
         "command_test_successful": "The motor command test was successful.",
         "device_not_found": "The selected device could not be found. Please restart this step."
       }
