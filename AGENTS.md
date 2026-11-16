@@ -2,12 +2,13 @@
 
 Follow these rules strictly when modifying code, managing git history, testing, or writing documentation in this repository.
 
-## 1. Git & Commit Discipline
+## 1. Git, Branching & Commit Discipline
 - **Do NOT commit after every file edit or incremental step.**
 - Group related changes into logical, atomic commits. A single feature, bug fix, or refactoring task should result in **1 to 3 meaningful commits**, never dozens or hundreds of micro-commits.
 - Only commit when a logical unit of work is complete, tested, and verified.
 - If you have made multiple small work-in-progress commits on a feature branch, squash or amend them into clean, logical commits before finishing your task or opening a pull request.
 - Write clear, concise commit messages summarizing *what* changed and *why*.
+- **Post-Merge Branch Hygiene:** Once a pull request is merged, **never continue committing new changes to that merged branch**. Immediately switch back to `main`, pull the latest changes, delete the merged branch (both locally and remotely if not auto-deleted), and create a fresh branch from `main` for any subsequent work.
 
 ## 2. Code Commenting Standards
 - **Keep inline code comments minimal, short, and to the point.**
