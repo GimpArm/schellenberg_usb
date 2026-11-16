@@ -79,7 +79,7 @@
         },
         "calibration_complete": {
           "title": "Calibration terminée",
-          "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
+          "description": "La calibration de {device_name} est terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
           "submit": "Terminé"
         },
         "test_motor": {
@@ -147,8 +147,8 @@
         "status_discovery_choice": {
           "title": "Capter les commandes radio depuis une télécommande ?",
           "menu_options": {
-            "discover_status": "Capter depuis la télécommande d'origine (recommandé)",
-            "skip_status_discovery": "Ignorer - terminer le couplage sans cela"
+            "discover_status": "capter depuis la télécommande d'origine (recommandé)",
+            "skip_status_discovery": "ignorer - terminer le couplage sans cela"
           }
         },
         "discover_status": {
@@ -210,9 +210,6 @@
           "submit": "Envoyer les données brutes"
         }
       },
-      "create_entry": {
-        "default": "La configuration a été créée"
-      },
       "error": {
         "required": "Ce champ est obligatoire.",
         "invalid_device_id": "L'ID de l'appareil doit contenir exactement 6 caractères hexadécimaux.",
@@ -238,6 +235,7 @@
         "pairing_interrupted_by_disconnect": "L'appairage a été interrompu car la connexion à la clé USB a été réinitialisée ou rechargée en attendant une réponse (par exemple, par l'ajout ou la modification d'un autre volet, ou par un redémarrage de Home Assistant). Veuillez réessayer.",
         "pairing_failed": "Échec de l'appairage de l'appareil.",
         "reconfigure_successful": "La configuration de l'appareil a été mise à jour avec succès",
+        "calibration_successful": "La configuration a réussi.",
         "command_test_successful": "Le test de commande du moteur a réussi.",
         "device_not_found": "L'appareil sélectionné est introuvable. Veuillez redémarrer cette étape."
       }

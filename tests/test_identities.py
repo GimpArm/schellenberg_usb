@@ -17,6 +17,9 @@ from custom_components.schellenberg_usb.const import (
     STATUS_IDENTITY_SOURCE_UNKNOWN,
 )
 from custom_components.schellenberg_usb.identities import (
+    _CLOSING_LEG_PHASES,
+    _OPENING_LEG_PHASES,
+    _PHASE_CONFIRMING_COMMANDS,
     normalize_status_identities,
     normalize_status_identity,
     parse_status_identities_text,
@@ -405,6 +408,339 @@ def test_summarize_status_discovery_frames_sequence_match_breaks_a_tie() -> None
     assert result["primary"]["remote_discovery_sequence_match_length"] == 2
 
 
+def test_summarize_status_discovery_frames_excludes_foreign_identity_by_default() -> (
+    None
+):
+    """A device_id already claimed by a different, already-paired blind
+    (see config_flow.py's _foreign_capture_device_ids()) must not become
+    this capture's primary or secondary, or even appear in "groups" - no
+    matter how many raw frames it sent - unless it also shows a full
+    remote-press-order signal or at least one phase-confirmed frame (see
+    the tests below). Baseline/regression guard for the exclusion itself.
+    """
+    frames = [
+        # The foreign device: more raw frames than the real candidate
+        # below, but no deliberate press-order signal at all - exactly
+        # the kind of ambient motor traffic exclude_device_ids exists to
+        # keep out.
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        # This blind's own real candidate.
+        {
+            "device_id": "5D3E7C",
+            "enum": "01",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "5D3E7C",
+            "enum": "01",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "5D3E7C"
+    assert result["secondary"] == []
+    assert result["groups"] == [result["primary"]]
+
+
+def test_summarize_status_discovery_frames_full_sequence_admits_foreign_id() -> None:
+    """The first exception to the exclusion above (2026-11-15): a foreign
+    identity whose own commands fully reproduce the instructed press
+    order ("OPEN, STOP, CLOSE") is let back in as a *secondary* identity,
+    since ambient motor traffic from an unrelated, already-paired blind
+    has no reason to reproduce that specific three-step order - strong,
+    specific evidence that a person is actually pressing a *shared*
+    remote already linked to that other blind (one physical remote
+    commonly operates several blinds).
+
+    Never primary, even here where nothing else was captured at all: see
+    this function's own docstring for why admitting an excluded identity
+    to primary is unsafe regardless of how strong the evidence is - a
+    device excluded by _foreign_capture_device_ids() is, by construction,
+    confirmed to belong to a *different* blind, so a full sequence match
+    only ever argues it is worth keeping as a secondary reference, never
+    that it should become this blind's own (here entirely absent) primary.
+
+    Regression for a real report (2026-11-15): pressing a remote already
+    linked to a different, already-paired blind during this blind's own
+    calibration used to lose every one of its frames outright, however
+    deliberately or clearly it was pressed - reported as no secondary (or
+    even primary) status identity ever being captured during either a
+    fresh pairing's own calibration or a recalibration, despite genuinely
+    pressing the remote each time.
+    """
+    frames = [
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "02",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is None
+    assert len(result["secondary"]) == 1
+    assert result["secondary"][0]["device_id"] == "FFFFFF"
+    assert result["secondary"][0]["remote_discovery_sequence_match_length"] == 3
+
+
+def test_summarize_status_discovery_frames_partial_sequence_match_stays_excluded() -> (
+    None
+):
+    """Maximum safety: only a *complete* press-order match lifts the
+    exclusion above, never a partial one. An ordinary move start alone
+    already produces a bare "01", so treating a partial match as
+    sufficient evidence would reopen exactly the cross-blind cross-talk
+    exclude_device_ids exists to prevent.
+    """
+    frames = [
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "01",
+            "phase": "remote_discovery",
+        },
+        {
+            "device_id": "FFFFFF",
+            "enum": "09",
+            "command": "00",
+            "phase": "remote_discovery",
+        },
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"FFFFFF"})
+    )
+
+    assert result["primary"] is None
+    assert result["secondary"] == []
+    assert result["groups"] == []
+
+
+def test_summarize_status_discovery_frames_phase_confirmation_admits_foreign_id() -> (
+    None
+):
+    """The second exception to the exclusion above (2026-11-15, added the
+    same day as the first, once a real recalibration log showed the first
+    one alone does not cover calibration's own real captures - see this
+    function's own docstring): a foreign identity with phase-confirmed
+    frames in *both* directions ("01" and "02" both present, not just
+    whichever leg happened to overlap with it) is let back in too, as a
+    *secondary* identity - never primary, however many such frames it has
+    (see below).
+
+    Regression for a real recalibration log (2026-11-15, Küchenrolladen,
+    device_id 5755AA/enum 08): a remote already linked to a different,
+    already-paired blind (7953A7/43) was held throughout this blind's own
+    ordinary full open-then-close calibration cycle - 18 "01" frames
+    throughout the open phase and 18 "02" frames throughout the close
+    phase (the log's own exact counts, reproduced here in full rather
+    than a smaller stand-in - see the next paragraph for why that matters),
+    and *no* "00" frame at all, since the blind's own end stops handle
+    stopping, not the remote. The first exception above needs a complete
+    "01", "00", "02" sequence to admit a foreign identity, so it can never
+    fire for a capture like this one - exactly why the secondary identity
+    kept disappearing despite the remote genuinely being pressed, even
+    though the first exception was already in place.
+
+    Also a regression for a flaw independent review found in the first
+    version of this very fix, before it was ever committed: that version
+    admitted an excluded device into the *same* candidate pool primary is
+    chosen from, and a smaller stand-in (3 foreign frames vs. this blind's
+    own 4) happened not to trigger the resulting bug. Re-run against the
+    real log's own frame volume, it did: a remote held down for a whole
+    leg retransmits continuously for RF reliability (36 frames here)
+    while a motor echoes only once per phase transition (4 frames for a
+    full cycle), so the excluded device's sheer volume won it primary
+    outright - silently handing this blind's live position tracking to
+    the *other* blind's remote. Both exceptions now admit a device for
+    secondary status only; primary is chosen only among never-excluded
+    groups (see this function's own docstring and the code below), so
+    this test uses the real log's full, lopsided frame counts specifically
+    to prove that asymmetry no longer matters.
+    """
+    frames = [
+        # --- this blind's own motor: one status echo per phase
+        # transition, exactly as a real motor sends it, same shape as
+        # test_summarize_status_discovery_frames_prefers_phase_confirmed_
+        # group's own real-candidate frames above ---
+        {"device_id": "5755AA", "enum": "08", "command": "01", "phase": "opening"},
+        {
+            "device_id": "5755AA",
+            "enum": "08",
+            "command": "00",
+            "phase": "opening_endstop",
+        },
+        {"device_id": "5755AA", "enum": "08", "command": "02", "phase": "closing"},
+        {
+            "device_id": "5755AA",
+            "enum": "08",
+            "command": "00",
+            "phase": "closing_endstop",
+        },
+        # --- a remote already linked to a different blind, genuinely
+        # held down throughout this blind's own real drive: 18+18 real
+        # frames, never a "00" - see the docstring above for why the full
+        # count (not a smaller stand-in) is the point of this test ---
+        *(
+            {"device_id": "7953A7", "enum": "43", "command": "01", "phase": "opening"}
+            for _ in range(18)
+        ),
+        *(
+            {"device_id": "7953A7", "enum": "43", "command": "02", "phase": "closing"}
+            for _ in range(18)
+        ),
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"7953A7"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "5755AA"
+    assert result["primary"]["phase_confirmed_frame_count"] == 4
+    assert len(result["secondary"]) == 1
+    assert result["secondary"][0]["device_id"] == "7953A7"
+    # Admitted on phase confirmation alone - never a full sequence match,
+    # since this capture has no "00" frame for the foreign device at all.
+    assert result["secondary"][0]["remote_discovery_sequence_match_length"] < 3
+    # Far more phase-confirmed frames than the real motor above (36 vs.
+    # 4) - the whole point of this test is that this volume, despite
+    # being admitted for secondary, must never win it primary instead.
+    assert result["secondary"][0]["phase_confirmed_frame_count"] == 36
+
+
+def test_summarize_status_discovery_frames_single_leg_overlap_stays_excluded() -> None:
+    """Phase confirmation in only *one* direction is deliberately not
+    enough to lift the exclusion above - see the second exception's own
+    docstring paragraph for why: it is indistinguishable from a
+    different, already-paired blind's own ordinary, coincidental
+    movement happening to overlap with just one of this blind's two
+    legs. This is a direct, function-level regression test for exactly
+    the real scenario
+    test_calibration_excludes_other_blinds_frames_from_identity_result
+    (tests/test_options_flow_calibration.py) already guards against
+    end-to-end - same device ids, reproduced here at this function's own
+    level: without also requiring "02" to be present, these three
+    single-leg frames (fewer than this blind's own real candidate's one)
+    would otherwise have been enough to admit the foreign device as a
+    secondary identity, reopening that already-fixed regression.
+    """
+    frames = [
+        # --- this blind's own motor: one genuine "up" frame ---
+        {"device_id": "ABCDEF", "enum": "10", "command": "01", "phase": "opening"},
+        # --- a different, already-paired blind, moving on its own
+        # remote/automation during this capture window - three frames,
+        # all during the same single leg, never during the other ---
+        {"device_id": "112233", "enum": "05", "command": "01", "phase": "opening"},
+        {"device_id": "112233", "enum": "05", "command": "01", "phase": "opening"},
+        {"device_id": "112233", "enum": "05", "command": "01", "phase": "opening"},
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"112233"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "ABCDEF"
+    assert result["secondary"] == []
+    assert result["groups"] == [result["primary"]]
+
+
+def test_summarize_status_discovery_frames_both_commands_one_leg_excluded() -> None:
+    """A narrower variant of the single-leg overlap above, caught by a
+    second independent review of this same exception: a foreign device
+    whose commands happen to include both "01" and "02" is *not* by
+    itself proof it was driven through both of this blind's own legs -
+    both frames can arrive during the *same* single leg (e.g. a "02" that
+    genuinely phase-confirms during "closing", alongside an unrelated
+    "01" that does not confirm anything there). An earlier version of
+    this exception checked "01"/"02" presence in the group's commands as
+    a whole, decoupled from which leg each confirming frame actually
+    belonged to, and admitted exactly this case - reopening the
+    single-leg cross-talk risk
+    test_calibration_excludes_other_blinds_frames_from_identity_result
+    (tests/test_options_flow_calibration.py) and the test above both
+    guard against, just via a different pair of commands. Fixed by
+    tracking phase-confirmed evidence *per leg*
+    (phase_confirmed_opening_frame_count/phase_confirmed_closing_frame_
+    count) and requiring both, rather than one aggregate count plus a
+    command-presence check that said nothing about which leg either
+    command's confirming frame (if any) came from.
+    """
+    frames = [
+        # --- this blind's own motor, correctly phased on both legs ---
+        {"device_id": "ABCDEF", "enum": "10", "command": "01", "phase": "opening"},
+        {
+            "device_id": "ABCDEF",
+            "enum": "10",
+            "command": "00",
+            "phase": "opening_endstop",
+        },
+        {"device_id": "ABCDEF", "enum": "10", "command": "02", "phase": "closing"},
+        {
+            "device_id": "ABCDEF",
+            "enum": "10",
+            "command": "00",
+            "phase": "closing_endstop",
+        },
+        # --- a different, already-paired blind: both its frames occur
+        # during our own single "closing" leg only, never during
+        # "opening" - one genuinely phase-confirms there ("02"), the
+        # other is just an unrelated "01" that happens not to ---
+        {"device_id": "112233", "enum": "05", "command": "02", "phase": "closing"},
+        {"device_id": "112233", "enum": "05", "command": "01", "phase": "closing"},
+    ]
+
+    result = summarize_status_discovery_frames(
+        frames, exclude_device_ids=frozenset({"112233"})
+    )
+
+    assert result["primary"] is not None
+    assert result["primary"]["device_id"] == "ABCDEF"
+    assert result["secondary"] == []
+    assert result["groups"] == [result["primary"]]
+
+
 def test_summarize_status_discovery_frames_unphased_capture_is_unaffected() -> None:
     """The manual "discover status" remote-listening window labels every
     frame with the same constant phase throughout (e.g. "remote_
@@ -458,6 +794,31 @@ def test_summarize_status_discovery_frames_without_a_phase_key_is_unaffected() -
 
     assert result["primary"]["device_id"] == "5D3E7C"
     assert result["primary"]["phase_confirmed_frame_count"] == 0
+
+
+def test_leg_phase_sets_fully_partition_phase_confirming_commands() -> None:
+    """_OPENING_LEG_PHASES and _CLOSING_LEG_PHASES are hand-maintained
+    alongside _PHASE_CONFIRMING_COMMANDS, with nothing in the production
+    code enforcing either half of this on its own (flagged by independent
+    review of the per-leg exclusion-exception commit). The two halves fail
+    in different directions, so both are checked explicitly rather than
+    trusting the three literals to keep agreeing by eye as they evolve:
+
+    - A phase added to _PHASE_CONFIRMING_COMMANDS but left out of both leg
+      sets fails *safe*: summarize_status_discovery_frames's own per-leg
+      exception (see its docstring) never sees evidence from that phase,
+      so an excluded identity that only ever phase-confirms there simply
+      stays excluded - confirmed during review via a monkeypatched extra
+      phase key, not merely asserted here.
+    - A phase accidentally added to *both* leg sets would fail the other
+      way: a single confirming frame could then satisfy both per-leg
+      counters at once, exactly the single-leg coincidence the
+      opening/closing split exists to rule out in the first place.
+    """
+    all_phases = set(_PHASE_CONFIRMING_COMMANDS)
+
+    assert all_phases == _OPENING_LEG_PHASES | _CLOSING_LEG_PHASES
+    assert _OPENING_LEG_PHASES.isdisjoint(_CLOSING_LEG_PHASES)
 
 
 # ---------------------------------------------------------------------------

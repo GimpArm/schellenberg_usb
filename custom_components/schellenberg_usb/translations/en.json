@@ -79,7 +79,7 @@
         },
         "calibration_complete": {
           "title": "Calibration complete",
-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times are used to accurately track the shutter's position.\n\nStatus detection from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Observed frames: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the shutter can still be controlled; its position will then be estimated based on the commands sent by Home Assistant.",
+          "description": "The calibration for {device_name} is complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times are used to accurately track the shutter's position.\n\nStatus detection from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Observed frames: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the shutter can still be controlled; its position will then be estimated based on the commands sent by Home Assistant.",
           "submit": "Done"
         },
         "test_motor": {
@@ -147,8 +147,8 @@
         "status_discovery_choice": {
           "title": "Capture radio commands from a remote control?",
           "menu_options": {
-            "discover_status": "Capture from the original remote control (recommended)",
-            "skip_status_discovery": "Skip - finish pairing without this"
+            "discover_status": "capture from the original remote control (recommended)",
+            "skip_status_discovery": "skip - finish pairing without this"
           }
         },
         "discover_status": {
@@ -210,9 +210,6 @@
           "submit": "Send raw data"
         }
       },
-      "create_entry": {
-        "default": "The configuration has been created"
-      },
       "error": {
         "required": "This field is required.",
         "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",
@@ -238,6 +235,7 @@
         "pairing_interrupted_by_disconnect": "Pairing was interrupted because the connection to the USB stick was reset or reloaded while waiting for a response (for example, by adding or editing a different shutter, or restarting Home Assistant). Please try again.",
         "pairing_failed": "Pairing of the device failed.",
         "reconfigure_successful": "Device configuration updated successfully",
+        "calibration_successful": "The configuration was successful.",
         "command_test_successful": "The motor command test was successful.",
         "device_not_found": "The selected device could not be found. Please restart this step."
       }

@@ -238,11 +238,19 @@ STOP_COMMAND_EXTRA_RESENDS = 2
 # window that cost it. Not tied to STOP_COMMAND_LATENCY_SECONDS - that
 # figure models a *delay already on the wire* (contention, transmit time),
 # this is a deliberately-introduced gap on an otherwise-idle transmitter,
-# a different thing being measured for a different reason. Short enough
-# that the blind has travelled only a negligible, sub-percent distance
-# past where the primary stop already landed it by the time the resend
-# goes out.
-STOP_COMMAND_RESEND_DELAY_SECONDS = 0.25
+# a different thing being measured for a different reason.
+#
+# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
+# direction, after being walked through the real measured confirmation-
+# echo timing: 7 samples of this blind's own primary-identity echo, all
+# 1.641-1.689s after the primary write, meaning even 0.9s still elapses
+# well before a real confirmation could ever arrive - raising this was
+# never going to let a resend observe one first. The resend's own
+# distance cost scales with this delay (the blind travels further past
+# where the primary stop already landed it before each extra frame goes
+# out), accepted here as a known, explicit trade-off rather than a
+# measured benefit.
+STOP_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # Total time _async_position_update_loop()'s auto-stop-at-target branch
 # keeps retrying control_blind_stop() for one target-reached episode
@@ -412,18 +420,20 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # tied to STOP_COMMAND_LATENCY_SECONDS, which applies here unchanged.
 # Kept equal to STOP_COMMAND_RESEND_DELAY_SECONDS deliberately: both
 # model the same kind of deliberately-introduced gap on an otherwise-idle
-# transmitter. Also still worth keeping short for the one case
-# MOVE_COMMAND_EXTRA_RESENDS's own comment above says this module cannot
-# actually close - an externally-originated (physical remote/Gurtwickler)
-# stop racing this resend has no floor to stay safely under, so the best
-# this delay can do for that case is simply not stay open any longer than
-# it has to; lengthening it would only widen that window for no offsetting
-# benefit, since the failure this resend targets (a single lost frame)
-# does not get any likelier to have happened the longer this waits.
+# transmitter.
 # No longer also stop_lead_percent's own baseline in cover.py (together
 # with MOVE_COMMAND_EXTRA_RESENDS above) - see that constant's own
 # comment for why.
-MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
+#
+# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
+# direction, mirroring the same change and the same reasoning on the stop
+# side above - see STOP_COMMAND_RESEND_DELAY_SECONDS's own comment for
+# the measured confirmation-echo timing this was weighed against). The
+# previously-documented case this module cannot actually close - an
+# externally-originated (physical remote/Gurtwickler) stop racing this
+# resend - widens proportionally with this delay, same trade-off as the
+# stop side, accepted here the same way.
+MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # How close cover.py's own elapsed-time position estimate must already be
 # to the edge it was heading toward (0 for closing, 100 for opening), AND
