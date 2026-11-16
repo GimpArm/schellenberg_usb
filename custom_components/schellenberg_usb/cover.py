@@ -6,7 +6,6 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 
 from homeassistant.components.cover import (
@@ -16,13 +15,12 @@ from homeassistant.components.cover import (
     CoverEntityFeature,
 )
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .api import SchellenbergUsbApi, StopOutcome
@@ -50,7 +48,6 @@ from .const import (
     EVENT_STOPPED,
     MAX_STOP_LEAD_PERCENT,
     NEAR_END_STOP_SNAP_TOLERANCE_PERCENT,
-    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
     SIGNAL_CALIBRATION_COMPLETED,
     SIGNAL_DEVICE_EVENT,
@@ -474,8 +471,8 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # set whenever any setup or confirmation path has recorded a known
         # position: a fresh pairing (async_step_user) regardless of which
         # calibration_method_choice option was picked - a live calibration
-        # run (options_flow_calibration.py's calibration_close step) sets
-        # it to the real ending position, manual entry sets it directly
+        # run (options_flow_calibration.py's calibration_initial_state step)
+        # sets it to the real ending position, manual entry sets it directly
         # from the person's own stated current position - recalibrating an
         # already-paired blind, or confirming a position via Developer
         # Tools' "Set position" sync (config_flow.py). None only for a
@@ -504,12 +501,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # leftover garbage to that check for as long as the leg's own write
         # is still queued behind another blind's transmission.
         self._command_in_flight = False
-        # Set only while an optimistic, direction-guessed dashboard state
-        # from a secondary identity's frame is pending its own withdrawal
-        # (see _handle_secondary_activity()/_clear_optimistic_secondary_
-        # move() below) - also doubles as the debounce that keeps repeated
-        # frames from the same held-down button from scheduling another.
-        self._optimistic_secondary_move_unsub: CALLBACK_TYPE | None = None
         self._position_update_source = "not recorded"
         self._position_source_kind = "startup default"
         self._position_confirmed_since_restart = False
@@ -748,23 +739,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 )
             )
 
-        # One subscription per secondary identity (an additional physical
-        # remote/wall-switch paired directly to the same motor, distinct
-        # from whichever identity is trusted as primary) - each routed to
-        # _handle_secondary_activity(), never to _handle_event(). This
-        # broadcast was never removed when the close+open elapsed-timer
-        # feature built on top of it was (see #116's own revert commits) -
-        # only cover.py's subscriber side was, which is why nothing has
-        # been listening for it since.
-        for secondary_device_id, secondary_enum in self._secondary_status_identities:
-            self.async_on_remove(
-                async_dispatcher_connect(
-                    self.hass,
-                    f"{SIGNAL_DEVICE_EVENT}_{secondary_device_id}_{secondary_enum}",
-                    self._handle_secondary_activity,
-                )
-            )
-
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -867,7 +841,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
 
         ending_position is whichever end stop the last-driven leg of the
         calibration (open or close - the person's own choice, see
-        options_flow_calibration.py's calibration_close step) reached.
+        options_flow_calibration.py's calibration_initial_state step) reached.
         """
         if device_id != self._device_id:
             return
@@ -977,9 +951,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # most removals - safe to call unconditionally, exactly like every
         # other cancel_pending_move() call site already does.
         self._api.cancel_pending_move(self._command_device_id)
-        if self._optimistic_secondary_move_unsub is not None:
-            self._optimistic_secondary_move_unsub()
-            self._optimistic_secondary_move_unsub = None
         await self._async_shutdown_position_tracking("entity removal or entry unload")
         await super().async_will_remove_from_hass()
 
@@ -994,7 +965,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         )
 
         if event in (EVENT_STARTED_MOVING_UP, EVENT_STARTED_MOVING_DOWN):
-            if not self._has_live_position_tracking() and not self._command_in_flight:
+            genuinely_idle = (
+                not self._has_live_position_tracking() and not self._command_in_flight
+            )
+            if genuinely_idle:
                 # Neither a tracking task nor a command of ours is in
                 # flight, so this echo can only be *reporting* a move this
                 # entity did not itself start - a paired remote control, a
@@ -1263,105 +1237,6 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 "Device %s received unknown event: %s", self._device_name, event
             )
 
-        self.async_write_ha_state()
-
-    @callback
-    def _handle_secondary_activity(self, _event: str) -> None:
-        """React to a secondary identity's frame with an optimistic guess.
-
-        Deliberately never inspects _event (the decoded command, if any):
-        a secondary frame's own command byte has been tried twice as a way
-        to learn its real direction/stop meaning, on real Gurtwickler-
-        remote hardware, and failed both times in sustained real-world use
-        after initially looking promising in a smaller sample (commits
-        e911236 and 1db9e69) - so that byte is no longer trusted for
-        anything here. All this reacts to is the fact that *something*
-        arrived at all, which needs no decoding and is never wrong.
-
-        With nothing decoded, the direction shown is a guess: toward the
-        farther end stop from the current known position, on the
-        assumption that a remote press most often means "finish the job"
-        (already mostly open -> guess closing; already mostly closed ->
-        guess opening) rather than a fine intermediate adjustment. This is
-        wrong often enough that it must never be allowed to stand
-        unconfirmed - which is exactly why it only ever touches
-        is_opening/is_closing, never _move_start_time/_move_start_position/
-        _target_position or the tracking task itself: _has_live_position_
-        tracking() and _command_in_flight therefore both still read exactly
-        as if nothing had happened, so when the primary identity's own
-        echo of this same physical move arrives - reliably decoded, as
-        always - _handle_event()'s STARTED_MOVING branch takes it over
-        with zero changes of its own, overwriting this guess with the
-        real direction and starting real tracking. If that echo never
-        arrives at all (the same real-world RF loss this project's own
-        debug logs have shown happens occasionally), _clear_optimistic_
-        secondary_move() below withdraws the guess on its own after
-        OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS instead of leaving it
-        standing forever.
-        """
-        if self._has_live_position_tracking() or self._command_in_flight:
-            # A real move (HA-issued or already picked up from the
-            # primary identity's own echo) already owns is_opening/
-            # is_closing - never guess over it.
-            return
-        if self._optimistic_secondary_move_unsub is not None:
-            # Already showing a guess for this same burst (a remote
-            # commonly repeats its frame every ~400ms while held) -
-            # the existing guess and its timeout stand as they are.
-            return
-        if self._attr_current_cover_position is None:
-            # No position baseline yet to guess a direction from.
-            return
-        guessed_opening = self._attr_current_cover_position < 50
-        self._attr_is_opening = guessed_opening
-        self._attr_is_closing = not guessed_opening
-        _LOGGER.info(
-            "Device %s secondary identity activity: optimistic guess "
-            "%s (position %d%%, to be confirmed or corrected by the "
-            "primary identity's own echo, or withdrawn after %.0fs if "
-            "none arrives)",
-            self._device_name,
-            "opening" if guessed_opening else "closing",
-            self._attr_current_cover_position,
-            OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
-        )
-        self._optimistic_secondary_move_unsub = async_call_later(
-            self.hass,
-            OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
-            self._clear_optimistic_secondary_move,
-        )
-        self.async_write_ha_state()
-
-    @callback
-    def _clear_optimistic_secondary_move(self, _now: datetime) -> None:
-        """Withdraw an optimistic guess that nothing ever confirmed."""
-        self._optimistic_secondary_move_unsub = None
-        if self._has_live_position_tracking() or self._command_in_flight:
-            # Either the primary identity's own echo already landed and
-            # _handle_event() replaced this guess with the real, decoded
-            # direction and started real tracking, or a genuine Home
-            # Assistant open/close for this same entity is itself still in
-            # flight and has already set its own optimistic is_opening/
-            # is_closing before this timeout fired. The second half
-            # matters just as much as the first, and for exactly the same
-            # reason _handle_event() itself checks both: async_open_
-            # cover()/async_close_cover() set that state synchronously,
-            # but their own tracking task only starts once control_blind_
-            # with_retry() actually succeeds (self._command_in_flight's
-            # own comment in __init__), so _has_live_position_tracking()
-            # alone can read False for a real stretch - hub-wide lock
-            # contention, the busy-retry wait - while that command's own
-            # optimistic state is still the genuinely current one.
-            # _handle_secondary_activity() already guards its own, initial
-            # guess against exactly this same window; checking only
-            # tracking liveness here, on the withdrawal side, would let
-            # this timeout fire mid-window and wrongly pull a real,
-            # in-flight command's state back down to idle a few seconds
-            # into it. Nothing of this guess's own is left to withdraw
-            # either way, so leave the real state alone and return.
-            return
-        self._attr_is_opening = False
-        self._attr_is_closing = False
         self.async_write_ha_state()
 
     def _has_live_position_tracking(self) -> bool:
@@ -2592,9 +2467,19 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         control_blind_stop()'s own CONFIRMED/UNCONFIRMED/FAILED
         distinction is unaffected by this revert and still reports
         exactly as honestly as it did while the extra wait existed; only
-        the independent motor-echo wait itself, and the matching skip-
-        remaining-resends check in control_blind_stop()'s own resend loop
-        (api.py), are gone.
+        the independent motor-echo wait itself is gone from this method.
+
+        The matching skip-remaining-resends check in control_blind_stop()'s
+        own resend loop (api.py) was reverted in that same commit, but was
+        later reinstated on its own, api.py-only: the project owner judged
+        the "ss" STOPPED status frame reliable enough to end that method's
+        own best-effort resend tail early, even though it was not judged
+        reliable enough to gate this method's wait on. See api.py's own
+        _stop_confirmed_at and control_blind_stop() docstring for that
+        current mechanism - it is unrelated to, and does not reopen, the
+        wait/race this method's own motor-echo wait was removed to close,
+        and it does not change the CONFIRMED/UNCONFIRMED/FAILED distinction
+        described above.
 
         was_opening_before_stop/was_closing_before_stop, and the fallback
         branch's own re-check against them a little further down, stay in

@@ -100,6 +100,12 @@ _RUNTIME_TRANSLATION_TEXT: dict[str, dict[str, str]] = {
             "The last attempt didn't confirm the shutter moved - choose a "
             "direction to try again."
         ),
+        "recalibration_notice": (
+            "\n\nNote: If a remote control is already indirectly linked to "
+            "this shutter in Home Assistant's Schellenberg USB integration, "
+            "it will only stay linked if you actually use it during this "
+            "upcoming calibration."
+        ),
         "notice_raw_sent": (
             "Raw payload {payload} was written. The stick's acknowledgements "
             "do not confirm motor movement."
@@ -256,6 +262,13 @@ _RUNTIME_TRANSLATION_TEXT: dict[str, dict[str, str]] = {
             "Der vorherige Versuch hat keine Bewegung des Rollladens "
             "bestätigt - wählen Sie eine Richtung, um es erneut zu "
             "versuchen."
+        ),
+        "recalibration_notice": (
+            "\n\nAchtung: Hatten Sie für diesen Rollladen bereits indirekt "
+            "eine Fernbedienung verbunden in der Schellenberg-USB "
+            "Integration in Home Assistant, bleibt diese nur erhalten, "
+            "wenn Sie sie bei dieser bevorstehenden Kalibrierung "
+            "tatsächlich benutzen."
         ),
         "notice_raw_sent": (
             "Rohdaten-Befehl {payload} wurde gesendet. Die Rückmeldungen des "
@@ -421,6 +434,12 @@ _RUNTIME_TRANSLATION_TEXT: dict[str, dict[str, str]] = {
             "El intento anterior no confirmó movimiento de la persiana - "
             "elija una dirección para intentarlo de nuevo."
         ),
+        "recalibration_notice": (
+            "\n\nAtención: si ya hay un mando a distancia vinculado "
+            "indirectamente a esta persiana en la integración Schellenberg "
+            "USB de Home Assistant, solo seguirá vinculado si realmente lo "
+            "utiliza durante esta próxima calibración."
+        ),
         "notice_raw_sent": (
             "Se envió la carga en bruto {payload}. Las confirmaciones del "
             "stick no acreditan movimiento del motor."
@@ -584,6 +603,12 @@ _RUNTIME_TRANSLATION_TEXT: dict[str, dict[str, str]] = {
         "test_motor_retry_notice": (
             "La tentative précédente n'a pas confirmé de mouvement du "
             "volet - choisissez une direction pour réessayer."
+        ),
+        "recalibration_notice": (
+            "\n\nAttention : si une télécommande est déjà liée indirectement "
+            "à ce volet dans l'intégration Schellenberg USB de Home "
+            "Assistant, elle ne restera liée que si vous l'utilisez "
+            "réellement pendant ce calibrage à venir."
         ),
         "notice_raw_sent": (
             "La charge utile brute {payload} a été envoyée. Les accusés de "

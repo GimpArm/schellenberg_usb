@@ -107,6 +107,9 @@ from custom_components.schellenberg_usb.const import (
 from custom_components.schellenberg_usb.options_flow_calibration import (
     CalibrationFlowHandler,
 )
+from custom_components.schellenberg_usb.runtime_translation_text import (
+    runtime_translation_text,
+)
 
 DEVICE_ID = "ABCDEF"
 DEVICE_ENUM = "10"
@@ -141,7 +144,7 @@ def _build_hub_with_blind(
 async def _start_calibrate_flow(
     hass: HomeAssistant, entry: MockConfigEntry, blind: ConfigSubentry
 ) -> SubentryFlowResult:
-    """Reach the calibration_close form via reconfigure -> calibrate."""
+    """Reach the calibration_initial_state form via reconfigure -> calibrate."""
     result = await hass.config_entries.subentries.async_init(
         (entry.entry_id, SUBENTRY_TYPE_BLIND),
         context={"source": "reconfigure", "subentry_id": blind.subentry_id},
@@ -152,7 +155,7 @@ async def _start_calibrate_flow(
         result["flow_id"], user_input={"next_step_id": "calibrate"}
     )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "calibration_close"
+    assert result["step_id"] == "calibration_initial_state"
     return result
 
 
@@ -215,7 +218,7 @@ async def _advance_through_open_leg(
     flow_id: str,
     wait_for_registration: Callable[[], Awaitable[None]],
 ) -> SubentryFlowResult:
-    """From calibration_close's form, drive through the whole open leg."""
+    """From calibration_initial_state's form, drive through the whole open leg."""
     result = await hass.config_entries.subentries.async_configure(
         flow_id, user_input={"initial_state": "closed"}
     )
@@ -262,10 +265,11 @@ async def test_submitting_without_a_real_choice_shows_an_error_and_stays_on_the_
 ) -> None:
     """Home Assistant's list-mode selector highlights its first option (the
     new "unselected" placeholder, see options_flow_calibration.py's
-    calibration_close schema comment) before anything has actually been
-    chosen. Pressing "Weiter" on that highlighted-but-unchosen state must not
-    be silently treated as either real answer; it must reshow this same form
-    with an explicit error, and a genuine choice afterwards must still work.
+    calibration_initial_state schema comment) before anything has actually
+    been chosen. Pressing "Weiter" on that highlighted-but-unchosen state
+    must not be silently treated as either real answer; it must reshow
+    this same form with an explicit error, and a genuine choice afterwards
+    must still work.
     """
     entry, blind = _build_hub_with_blind(hass, connected_api)
     result = await _start_calibrate_flow(hass, entry, blind)
@@ -275,7 +279,7 @@ async def test_submitting_without_a_real_choice_shows_an_error_and_stays_on_the_
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "calibration_close"
+    assert result["step_id"] == "calibration_initial_state"
     assert result["errors"] == {"base": "initial_state_required"}
 
     result = await hass.config_entries.subentries.async_configure(
@@ -521,20 +525,20 @@ async def test_calibration_excludes_other_blinds_frames_from_identity_result(
     # registration - so every frame injected below is captured and
     # phase-labelled exactly as a real motor's would be. Raw wire format
     # from api.py's _handle_message(): ss + enum(2) + device_id(6) +
-    # incrementor(4, ignored) + command(2) + padding(2, ignored) +
-    # signal(2, ignored). "01" is CMD_UP (const.py).
+    # command(2) + remainder(8, unparsed). "01" is CMD_UP (const.py).
 
     # This blind's own motor: one genuine "up" frame.
-    connected_api._handle_message("ss10ABCDEF0000010000")
+    connected_api._handle_message("ss10ABCDEF0100000000")
 
     # A different, already-paired blind on the same hub, moving on its own
     # remote/automation during this capture window - sends more matching
     # frames than the real blind above, which would otherwise win the
     # phase_confirmed_frame_count tiebreak and get stored as *this* blind's
-    # status identity.
-    connected_api._handle_message("ss051122330000010000")
-    connected_api._handle_message("ss051122330001010000")
-    connected_api._handle_message("ss051122330002010000")
+    # status identity. The trailing byte, part of the unparsed remainder,
+    # is merely bumped across the three so each is a distinct literal.
+    connected_api._handle_message("ss051122330100000000")
+    connected_api._handle_message("ss051122330100000001")
+    connected_api._handle_message("ss051122330100000002")
 
     async_dispatcher_send(
         hass, SIGNAL_DEVICE_EVENT_CAPTURE, DEVICE_ID, EVENT_STARTED_MOVING_UP
@@ -605,7 +609,7 @@ async def test_calibration_capture_survives_a_reload_mid_flow(
 
     # This blind's own motor, received while connected_api is still the
     # live, connected instance the capture actually started on.
-    connected_api._handle_message("ss10ABCDEF0000010000")
+    connected_api._handle_message("ss10ABCDEF0100000000")
 
     # Simulate the hub reloading mid-flow - exactly as __init__.py's
     # async_setup_entry() does on any subentry change, including some
@@ -702,7 +706,7 @@ async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
         unsub()
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "reconfigure_successful"
+    assert result["reason"] == "calibration_successful"
     updated = entry.subentries[blind.subentry_id]
     assert updated.data[CONF_OPEN_TIME] >= 0.1
     assert updated.data[CONF_CLOSE_TIME] >= 0.1
@@ -751,11 +755,13 @@ async def _advance_through_close_leg(
     flow_id: str,
     wait_for_registration: Callable[[], Awaitable[None]],
 ) -> SubentryFlowResult:
-    """From calibration_close's form, drive through the whole close leg first.
+    """From calibration_initial_state's form, drive through the whole close
+    leg first.
 
-    Mirrors _advance_through_open_leg above, but answers calibration_close
-    with initial_state="open", so the close leg (not the open leg) runs
-    first - and sends the DOWN/STOPPED pair that leg actually waits for.
+    Mirrors _advance_through_open_leg above, but answers
+    calibration_initial_state with initial_state="open", so the close leg
+    (not the open leg) runs first - and sends the DOWN/STOPPED pair that
+    leg actually waits for.
     """
     result = await hass.config_entries.subentries.async_configure(
         flow_id, user_input={"initial_state": "open"}
@@ -836,7 +842,7 @@ async def test_close_leg_first_then_open_leg_ends_at_open_position(
         unsub()
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "reconfigure_successful"
+    assert result["reason"] == "calibration_successful"
     updated = entry.subentries[blind.subentry_id]
     assert updated.data[CONF_OPEN_TIME] >= 0.1
     assert updated.data[CONF_CLOSE_TIME] >= 0.1
@@ -891,20 +897,27 @@ def _build_bare_handler(
     return handler, flow
 
 
-async def test_recalibration_keeps_existing_status_identity_when_discovered_differs(
+async def test_recalibration_adopts_discovered_status_identity_when_it_differs(
     hass: HomeAssistant,
 ) -> None:
-    """Regression for MEDIUM #2: don't let a recalibration clobber a good ID.
+    """Recalibration trusts this run's own live capture over stale data.
 
-    A recalibration run is normally about remeasuring travel times, not
-    re-discovering status identity - but a freshly captured "primary" can be
-    wrong (RF noise, a neighboring blind's remote, another blind sharing the
-    capture window) in ways the calibration code has no way to tell apart
-    from a genuine re-discovery. Before this fix, whatever the new run
-    happened to discover was applied unconditionally, silently overwriting
-    an already-working status identity with a possibly-wrong guess. Only a
-    *different* discovered identity needs protecting against - see the
-    sibling test right below for the "confirms the same one" case.
+    A real-world report (2026-11) traced the primary/secondary status
+    identities of a live blind being swapped back to exactly this code
+    path's previous behavior: a fresh pairing's live-calibration capture
+    correctly self-echo-confirmed the motor's own identity, but an earlier
+    version of *this* recalibration branch kept whatever identity was
+    already configured and silently discarded a differing fresh finding
+    entirely - so a later recalibration could never recover from a wrong
+    identity that had gotten persisted some other way. A live capture's
+    self-echo is direct, first-hand evidence of what is actually driving
+    this blind right now, so a genuinely different discovered identity is
+    now adopted outright instead - including this run's own secondary
+    list, which replaces whatever was stored before rather than staying
+    frozen at an earlier run's snapshot. See the sibling test right below
+    for the "confirms the same one" case, and
+    test_recalibration_clears_stale_secondary_identity_when_not_reconfirmed
+    below for the secondary-clearing consequence this enables.
     """
     handler, flow = _build_bare_handler(
         hass,
@@ -914,8 +927,8 @@ async def test_recalibration_keeps_existing_status_identity_when_discovered_diff
             CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_CALIBRATION,
         },
     )
-    # This run "discovers" a different identity than the one already
-    # configured above - the case that used to get silently applied.
+    # This run discovers a different identity than the one already
+    # configured above - previously discarded, now adopted outright.
     handler._pending_status_device_id = "112233"
     handler._pending_status_enum = "99"
     handler._pending_status_identity_source = STATUS_IDENTITY_SOURCE_CALIBRATION
@@ -929,10 +942,14 @@ async def test_recalibration_keeps_existing_status_identity_when_discovered_diff
     data_updates = flow.async_update_and_abort.call_args.kwargs["data_updates"]
     assert data_updates[CONF_OPEN_TIME] == 21.5
     assert data_updates[CONF_CLOSE_TIME] == 19.5
-    assert CONF_STATUS_DEVICE_ID not in data_updates
-    assert CONF_STATUS_ENUM not in data_updates
-    assert CONF_STATUS_IDENTITY_SOURCE not in data_updates
-    assert CONF_SECONDARY_STATUS_IDENTITIES not in data_updates
+    assert data_updates[CONF_STATUS_DEVICE_ID] == "112233"
+    assert data_updates[CONF_STATUS_ENUM] == "99"
+    assert (
+        data_updates[CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_CALIBRATION
+    )
+    assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == [
+        {"device_id": "445566", "enum": "77"}
+    ]
 
 
 async def test_recalibration_applies_status_identity_when_it_matches_existing(
@@ -940,13 +957,13 @@ async def test_recalibration_applies_status_identity_when_it_matches_existing(
 ) -> None:
     """Confirming the same identity again is not "overwriting" - still applies.
 
-    Refinement of the regression test above: the protection only needs to
-    guard against a *different* discovered identity replacing a known-good
-    one. When this run's frame capture confirms the exact identity that was
-    already configured, applying the update is harmless - it is the same
-    identity either way - and still lets CONF_SECONDARY_STATUS_IDENTITIES
-    and CONF_STATUS_IDENTITY_SOURCE refresh from this run's own capture,
-    instead of being frozen at whatever an earlier run happened to see.
+    Sibling of the adoption test above, which covers a *differing*
+    discovered identity (now adopted outright, same as this one): this
+    covers the simpler case where this run's frame capture confirms the
+    exact identity that was already configured. Either way, this lets
+    CONF_SECONDARY_STATUS_IDENTITIES and CONF_STATUS_IDENTITY_SOURCE
+    refresh from this run's own capture, instead of being frozen at
+    whatever an earlier run happened to see.
     """
     handler, flow = _build_bare_handler(
         hass,
@@ -980,6 +997,60 @@ async def test_recalibration_applies_status_identity_when_it_matches_existing(
     assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == [
         {"device_id": "445566", "enum": "77"}
     ]
+
+
+async def test_recalibration_clears_stale_secondary_identity_when_not_reconfirmed(
+    hass: HomeAssistant,
+) -> None:
+    """No remote pressed this round -> its stored secondary ID is dropped,
+    even though this round's primary also conflicts with the persisted one.
+
+    Direct coverage for the project owner's own requirement: recalibrating
+    without using a remote control must clear that remote's secondary
+    status identity, rather than leaving it stuck at whatever an earlier
+    run (which did see the remote) had stored - specifically in the
+    conflicting-primary case this fix actually changes the behavior of.
+
+    An earlier version of this test used the *same* primary for both the
+    existing data and this round's fresh capture, which stays on the
+    unconditional "no conflict" branch both before and after this fix -
+    so it would have passed on the pre-fix code too, and never actually
+    exercised the new behavior at all; an independent review caught this.
+    DEVICE_ID/DEVICE_ENUM below is the stale, already-persisted primary;
+    "112233"/"99" - the same differing identity the sibling adoption test
+    above uses - is this round's fresh, genuinely conflicting capture.
+    """
+    handler, flow = _build_bare_handler(
+        hass,
+        existing_subentry_data={
+            CONF_STATUS_DEVICE_ID: DEVICE_ID,
+            CONF_STATUS_ENUM: DEVICE_ENUM,
+            CONF_STATUS_IDENTITY_SOURCE: STATUS_IDENTITY_SOURCE_CALIBRATION,
+            CONF_SECONDARY_STATUS_IDENTITIES: [{"device_id": "445566", "enum": "77"}],
+        },
+    )
+    # This round's self-echo capture found a different primary than the
+    # one already persisted - the conflicting case - and heard nothing
+    # else this time, unlike whatever earlier run had stored the stale
+    # secondary above.
+    handler._pending_status_device_id = "112233"
+    handler._pending_status_enum = "99"
+    handler._pending_status_identity_source = STATUS_IDENTITY_SOURCE_CALIBRATION
+    handler._pending_secondary_status_identities = []
+
+    await handler.async_step_calibration_complete(user_input={})
+
+    flow.async_update_and_abort.assert_called_once()
+    assert flow.async_update_and_abort.call_args.kwargs["reason"] == (
+        "calibration_successful"
+    )
+    data_updates = flow.async_update_and_abort.call_args.kwargs["data_updates"]
+    assert data_updates[CONF_STATUS_DEVICE_ID] == "112233"
+    assert data_updates[CONF_STATUS_ENUM] == "99"
+    assert (
+        data_updates[CONF_STATUS_IDENTITY_SOURCE] == STATUS_IDENTITY_SOURCE_CALIBRATION
+    )
+    assert data_updates[CONF_SECONDARY_STATUS_IDENTITIES] == []
 
 
 async def test_recalibration_fills_status_identity_when_previously_unknown(
@@ -1138,7 +1209,7 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     assert result["step_id"] == "calibration_close_instruction"
 
 
-async def test_calibration_close_waits_out_busy_capture_without_stealing_it(
+async def test_calibration_initial_state_waits_out_busy_capture_without_stealing_it(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -1188,7 +1259,7 @@ async def test_calibration_close_waits_out_busy_capture_without_stealing_it(
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "calibration_close"
+    assert result["step_id"] == "calibration_initial_state"
     assert result["errors"] == {"base": "unknown"}
 
     # The other operation's capture must still be exactly as it was - not
@@ -1217,7 +1288,7 @@ async def test_open_retry_waits_out_busy_capture_without_stealing_it(
     STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS and
     CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS are shrunk the same way, and for
     the same reason, as in
-    test_calibration_close_waits_out_busy_capture_without_stealing_it
+    test_calibration_initial_state_waits_out_busy_capture_without_stealing_it
     above - see that test's own docstring.
     """
     monkeypatch.setattr(calibration_module, "CALIBRATION_TIMEOUT", 0.01)
@@ -1258,7 +1329,7 @@ async def test_open_retry_waits_out_busy_capture_without_stealing_it(
     assert connected_api._status_discovery_phase == "discovery"
 
 
-async def test_calibration_close_proceeds_once_a_busy_capture_is_released(
+async def test_calibration_initial_state_proceeds_once_a_busy_capture_is_released(
     hass: HomeAssistant,
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
@@ -1317,14 +1388,64 @@ async def test_calibration_close_proceeds_once_a_busy_capture_is_released(
     assert connected_api._status_discovery_phase == "opening"
 
 
-async def test_calibration_close_step_aborts_without_a_selected_device() -> None:
+async def test_calibration_initial_state_aborts_without_a_selected_device() -> None:
     """Defensive guard: every step must abort cleanly if never wired up."""
     flow = MagicMock()
     handler = CalibrationFlowHandler(flow)
 
-    await handler.async_step_calibration_close(None)
+    await handler.async_step_calibration_initial_state(None)
 
     flow.async_abort.assert_called_once_with(reason="device_not_found")
+
+
+async def test_calibration_initial_state_omits_notice_for_fresh_pairing() -> None:
+    """The recalibration_notice placeholder must stay empty for a fresh
+    pairing's own live calibration.
+
+    There is no previously-connected remote identity to warn about yet on
+    a brand-new blind, and self._create_subentry_after_calibration is True
+    for exactly this route - enable_subentry_creation() is what the
+    "create subentry" (fresh pairing) branch calls, mirroring how a real
+    pairing flow reaches this step via async_step_test_success().
+    """
+    flow = MagicMock()
+    handler = CalibrationFlowHandler(flow)
+    handler.enable_subentry_creation(
+        device_id=DEVICE_ID, device_enum=DEVICE_ENUM, device_name="Living room"
+    )
+    handler.set_selected_device({"name": "Living room"})
+
+    await handler.async_step_calibration_initial_state(None)
+
+    placeholders = flow.async_show_form.call_args.kwargs["description_placeholders"]
+    assert placeholders["recalibration_notice"] == ""
+
+
+async def test_calibration_initial_state_shows_notice_for_recalibration() -> None:
+    """The same placeholder must carry the real warning text during a
+    recalibration of an already-paired blind.
+
+    disable_subentry_creation() is exactly what async_step_calibrate()
+    (config_flow.py) calls before reaching this step, so
+    self._create_subentry_after_calibration is False here - the user's
+    own real-world report (an already-confirmed remote identity not
+    surviving a recalibration where it was not used) is why this notice
+    exists at all; see runtime_translation_text.py's "recalibration_notice"
+    entries and CHANGELOG.md.
+    """
+    flow = MagicMock()
+    flow.hass = None
+    handler = CalibrationFlowHandler(flow)
+    handler.disable_subentry_creation()
+    handler.set_selected_device({"name": "Living room"})
+
+    await handler.async_step_calibration_initial_state(None)
+
+    placeholders = flow.async_show_form.call_args.kwargs["description_placeholders"]
+    assert placeholders["recalibration_notice"] == runtime_translation_text(
+        None, "recalibration_notice"
+    )
+    assert placeholders["recalibration_notice"] != ""
 
 
 async def test_calibration_complete_step_aborts_without_recorded_times() -> None:

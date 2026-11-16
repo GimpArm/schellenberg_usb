@@ -195,6 +195,7 @@ class _PriorityLock:
     """
 
     def __init__(self) -> None:
+        """Start unlocked, with both waiter queues empty."""
         self._locked = False
         self._priority_waiters: deque[asyncio.Future[None]] = deque()
         self._waiters: deque[asyncio.Future[None]] = deque()
@@ -239,11 +240,28 @@ class _PriorityLock:
         return any(not fut.cancelled() for fut in self._priority_waiters)
 
     def _has_live_waiters(self) -> bool:
+        """Return True while either queue still holds a non-cancelled waiter.
+
+        Checked by acquire() alongside self._locked itself: a woken
+        waiter that has not yet resumed to remove itself from its queue
+        (see the class docstring's note on why release() leaves it
+        there) must still be queued behind - acquire() cannot treat the
+        lock as free to take directly just because self._locked happens
+        to read False in that gap.
+        """
         return any(
             not fut.cancelled() for fut in (*self._priority_waiters, *self._waiters)
         )
 
     def _wake_up_first(self) -> None:
+        """Resolve the oldest live waiter's future, priority queue first.
+
+        Mirrors CPython's own asyncio.Lock._wake_up_first() (see the
+        class docstring): deliberately does not remove the future from
+        its queue here - whichever acquire() call is waiting on it
+        removes itself, once it actually resumes, in its own `finally`
+        block.
+        """
         for queue in (self._priority_waiters, self._waiters):
             if queue:
                 fut = queue[0]
@@ -252,10 +270,12 @@ class _PriorityLock:
                 return
 
     async def __aenter__(self) -> _PriorityLock:
+        """Acquire the lock, as an ordinary (non-priority) waiter."""
         await self.acquire()
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
+        """Release the lock on leaving the `async with` block."""
         self.release()
 
 
@@ -287,6 +307,50 @@ def _interpret_status_command(command: str) -> str:
         CMD_UP: "open",
         CMD_DOWN: "close",
     }.get(command.upper(), "unknown")
+
+
+# The four values ever confirmed to appear in a real "ss" status frame's
+# command field, at either candidate byte position - see
+# _resolve_status_command()'s own docstring for why there are two.
+_KNOWN_STATUS_COMMAND_BYTES = frozenset({CMD_STOP, CMD_UP, CMD_DOWN, CMD_ALLOW_PAIRING})
+
+
+def _resolve_status_command(message: str) -> str:
+    """Return a "ss" status frame's command byte, trying both known layouts.
+
+    Issue #85's fix reads this field at message[10:12], confirmed against
+    141 real captured frames (Debug_Protokoll.xlsx) from two trigger
+    sources where the previous message[14:16] slice was unstable. A
+    real debug log gathered later from different hardware (two devices,
+    both reporting under enum 09) shows the opposite: message[10:12] is
+    a fixed, never-changing "1F" regardless of the real action, while
+    message[14:16] matches the real action exactly, every time, across
+    dozens of frames spanning several minutes - 1F is never a command
+    (a command byte by definition varies with the action), so for that
+    hardware the Issue #85 position is reading the wrong field, not an
+    unstable one.
+
+    Both data sets are real captures, so rather than pick one position
+    and risk breaking the other hardware class, this trusts message[10:12]
+    whenever it is itself one of the four values any real frame has ever
+    been confirmed to carry, and only tries message[14:16] when it is
+    not - which is exactly the situation the second log shows. This
+    differs from the secondary-identity command-byte fallback reverted in
+    1db9e69 (api.py history): that fallback's second field was a
+    per-transmission sequence counter which could coincidentally match a
+    real command byte on any given press, so validating against the known
+    set couldn't reliably tell real commands apart from counter noise.
+    Here, the first field is either a real command or a constant that
+    never varies with the action, so the same validation is decisive
+    rather than coincidental.
+    """
+    primary = message[10:12].upper()
+    if primary in _KNOWN_STATUS_COMMAND_BYTES:
+        return primary
+    fallback = message[14:16].upper()
+    if fallback in _KNOWN_STATUS_COMMAND_BYTES:
+        return fallback
+    return primary
 
 
 def _normalize_protocol_enum(value: object) -> str:
@@ -380,6 +444,37 @@ class SchellenbergUsbApi:
         self._last_primary_tracking_messages: dict[StatusIdentity, dict[str, Any]] = {}
         self._last_position_updates: dict[str, dict[str, Any]] = {}
         self._last_manual_position_syncs: dict[str, dict[str, Any]] = {}
+        # command_device_id -> time.monotonic() of the most recent real
+        # STOPPED status frame seen for it, regardless of which status
+        # identity actually reported it (resolved through _registered_
+        # entity_keys below, same as the position-tracking path above).
+        # control_blind_stop()'s own resend loop checks this to skip a
+        # resend once independent confirmation the motor already stopped
+        # has arrived, rather than always firing every configured resend
+        # unconditionally - see that method's own comment for the full
+        # reasoning. Briefly reverted (2026-11-08, commit a96a8d1) at the
+        # project owner's own request over reliability concerns, then
+        # reinstated at their own later, explicit request once real-world
+        # use showed that concern did not actually hold up in practice.
+        self._stop_confirmed_at: dict[str, float] = {}
+        # (command_device_id, command) -> time.monotonic() of the most
+        # recent real STARTED_MOVING status frame seen for that exact
+        # device/direction pair, regardless of which status identity
+        # actually reported it - same resolution path as _stop_confirmed_
+        # at just above. Keyed additionally by command (CMD_UP/CMD_DOWN),
+        # unlike the stop side, because a move has two directions and a
+        # Down echo must never be read as confirming an Up resend (or vice
+        # versa). _send_move_resends_and_cleanup()'s own resend loop
+        # checks this to skip its remaining best-effort resends once this
+        # exact move is independently confirmed, mirroring how control_
+        # blind_stop()'s own resend loop uses _stop_confirmed_at - see
+        # that method's own comment for the full reasoning, which applies
+        # here unchanged. Requested directly (2026-11-14, project owner's
+        # own request, mirroring the stop side's precedent) once resend-
+        # loop-vs-genuine-echo was pointed out as the same category of
+        # needless-resend-after-independent-confirmation the stop side
+        # already handles.
+        self._move_echo_confirmed_at: dict[tuple[str, str], float] = {}
         # One-shot handoff from a "Pair and calibrate" flow that just
         # finished to the brand-new cover entity it is about to create.
         # That entity doesn't exist yet when calibration completes, so it
@@ -1013,20 +1108,22 @@ class SchellenbergUsbApi:
             return
 
         # Handle Schellenberg device messages
-        # Format: ssXXYYYYYYZZZZCCPPRR
+        # Format: ssXXYYYYYYCCRRRRRRRR (20 chars total)
         # ss = prefix (2 chars)
         # XX = device enum (2 chars)
         # YYYYYY = device ID (6 chars)
-        # ZZZZ = message incrementor (4 chars, ignored)
-        # CC = command (2 chars)
-        # PP = padding (2 chars, ignored)
-        # RR = signal strength (2 chars, ignored)
+        # CC = command (2 chars). Which 2 characters this actually is has
+        # been confirmed, by two different real captures, to differ by
+        # hardware: see _resolve_status_command()'s docstring above for
+        # both data sets and why this reads the field through that
+        # function instead of a single fixed slice.
+        # RRRRRRRR = remaining 8 chars (positions 12:20) - not conclusively
+        # reverse-engineered, and not read anywhere else in this codebase.
         if message.startswith("ss") and len(message) >= 18:
             try:
                 device_enum = message[2:4]
                 device_id = message[4:10]
-                # Skip message incrementor at positions 10:14
-                command = message[14:16]
+                command = _resolve_status_command(message)
 
                 _LOGGER.debug(
                     "Parsed: enum=%s, id=%s, cmd=%s", device_enum, device_id, command
@@ -1037,6 +1134,43 @@ class SchellenbergUsbApi:
                 identity = (normalized_device_id, normalized_device_enum)
                 registration = self._registered_entity_keys.get(identity)
                 interpretation = _interpret_status_command(normalized_command)
+                if registration is not None and interpretation == "stop":
+                    # Real-world evidence this blind's motor has actually
+                    # stopped, independent of and often well after the
+                    # stick's own one-hop accept for whichever write this
+                    # is a response to - see _stop_confirmed_at's own
+                    # comment in __init__ for how control_blind_stop()
+                    # uses this. Keyed by command_device_id, exactly like
+                    # _last_position_updates/_last_manual_position_syncs
+                    # above, since a resend is sent (and so must be
+                    # matched here) by command identity, regardless of
+                    # which status identity actually reported it.
+                    self._stop_confirmed_at[registration.command_device_id] = (
+                        time.monotonic()
+                    )
+                elif registration is not None and interpretation in ("open", "close"):
+                    # Same idea as the stop branch just above, but for a
+                    # move: real-world evidence this blind's motor has
+                    # actually started moving in this exact direction,
+                    # independent of the stick's own one-hop accept for
+                    # whichever write this is a response to - see
+                    # _move_echo_confirmed_at's own comment in __init__
+                    # for how _send_move_resends_and_cleanup() uses this.
+                    # Keyed by (command_device_id, command), not status
+                    # device_id/enum, for the same reason the stop branch
+                    # is keyed by command_device_id alone - a resend is
+                    # sent (and so must be matched here) by command
+                    # identity, regardless of which status identity
+                    # actually reported it - and additionally by the raw
+                    # command value itself (normalized_command, i.e.
+                    # CMD_UP/CMD_DOWN's own "01"/"02"), not just the
+                    # interpretation string, so this dict's key can be
+                    # compared directly against the same action value the
+                    # resend loop already carries, with no reverse lookup
+                    # back from "open"/"close" to a command needed.
+                    self._move_echo_confirmed_at[
+                        (registration.command_device_id, normalized_command)
+                    ] = time.monotonic()
                 identity_role = (
                     "primary"
                     if registration is not None and registration.primary
@@ -2197,6 +2331,7 @@ class SchellenbergUsbApi:
                             device_enum,
                             action,
                             source,
+                            requested_at,
                         ),
                         name="schellenberg-move-resend",
                     )
@@ -2250,6 +2385,7 @@ class SchellenbergUsbApi:
         device_enum: str,
         action: str,
         source: str,
+        requested_at: float,
     ) -> None:
         """Fire a just-accepted move's MOVE_COMMAND_EXTRA_RESENDS, detached
         from control_blind_with_retry()'s own return, and retire that
@@ -2260,12 +2396,40 @@ class SchellenbergUsbApi:
         const.py for why this exists at all: best-effort RF reliability,
         nothing more.
 
+        Also mirrors control_blind_stop()'s own echo-based early exit
+        (_stop_confirmed_at, see that method's own comment for the full
+        reasoning): once a real STARTED_MOVING status frame for this
+        exact device_id *and* this exact action (CMD_UP/CMD_DOWN) has
+        arrived since requested_at, every remaining resend below is
+        skipped instead of always firing all of them unconditionally -
+        _move_echo_confirmed_at, checked below, is this method's own
+        equivalent of that dict, see its own comment in __init__.
+        requested_at itself is this call's own original request time,
+        passed through from control_blind_with_retry() rather than a
+        fresh time.monotonic() read taken here, for the same reason
+        control_blind_stop() uses its own requested_at rather than a
+        later one: a frame that arrived while that original call was
+        still waiting on the lock or retrying a busy stick must still
+        count, not be wrongly treated as stale just because this
+        detached task started later. Requested directly (2026-11-14,
+        project owner's own request, mirroring the stop side's existing
+        precedent) to close the same needless-resend-after-independent-
+        confirmation gap on the move side. If no such echo ever arrives,
+        both configured resends still fire regardless, exactly as before
+        this change - this only ever skips resends once there is real,
+        independent evidence they are no longer needed, never on a mere
+        guess.
+
         Spawned with hass.async_create_task() from
         control_blind_with_retry() right when its own primary write is
         confirmed accepted, instead of running inline there as before
         this fix. That inline version blocked control_blind_with_retry()
         from returning True for an extra MOVE_COMMAND_EXTRA_RESENDS *
-        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s) after the
+        MOVE_COMMAND_RESEND_DELAY_SECONDS seconds (~0.5s, both constants'
+        values at the time this was fixed - MOVE_COMMAND_RESEND_DELAY_
+        SECONDS has since been raised, see its own comment in const.py,
+        but this historical figure describes the fix being narrated here,
+        not the product of today's constants) after the
         primary write's own ack - and async_open_cover()/
         async_close_cover() only stamp _move_start_time and call
         _start_position_tracking() once that call returns. Unlike the
@@ -2344,6 +2508,11 @@ class SchellenbergUsbApi:
             for _ in range(MOVE_COMMAND_EXTRA_RESENDS):
                 await asyncio.sleep(MOVE_COMMAND_RESEND_DELAY_SECONDS)
                 if move_call_token in self._move_cancel_requested.get(device_id, ()):
+                    break
+                if (
+                    self._move_echo_confirmed_at.get((device_id, action), 0.0)
+                    >= requested_at
+                ):
                     break
                 await self.control_blind(
                     device_enum, action, device_id=device_id, source=source
@@ -2523,20 +2692,43 @@ class SchellenbergUsbApi:
                 # exactly like any other stop latency already is, not
                 # left unaccounted for.
                 #
-                # Unconditional - every configured resend fires regardless
-                # of whether a real STOPPED status frame has already
-                # arrived for this device_id. An earlier revision (2026-
-                # 11-07 to 2026-11-08) skipped the remaining resends once
-                # one had, on the reasoning that they would only be
-                # reinforcing an already-confirmed stop; reverted at the
-                # project owner's own explicit request, since relying on
-                # that status frame for this decision was not reliable
-                # enough in practice. This never consulted the frame for
-                # anything else - StopOutcome.CONFIRMED here still means
-                # only "the stick accepted the write", exactly as before
-                # this revert.
+                # Skipped, from here on, once a real STOPPED status frame
+                # for this same device_id has actually arrived since this
+                # call started (_stop_confirmed_at, set in _handle_
+                # message() - project owner's own request, 2026-11-07):
+                # at that point every remaining resend in this loop would
+                # only ever be reinforcing a stop the motor has already
+                # independently confirmed, not covering for one that
+                # might not have landed. device_id is only ever None for
+                # callers with no single device to check - see this
+                # method's own device_id parameter - so this never skips
+                # for them; requested_at, not this attempt's own more
+                # recent transmit_wait, is the right floor, so a frame
+                # that arrived while this call was still waiting out lock
+                # contention or a busy retry still counts instead of
+                # being wrongly treated as stale.
+                #
+                # Briefly reverted (2026-11-08, commit a96a8d1) on the
+                # argument that this status frame was not a reliable
+                # enough signal for the decision; reinstated at the
+                # project owner's own later, explicit request, since in
+                # practice that unreliability shows up only extremely
+                # rarely - rare enough that always sending the full,
+                # unconditional set of resends costs more (needless RF
+                # traffic, and the edge case this whole method exists for
+                # in the first place: two command sources fighting over
+                # the stick's one transmitter) than the rare miss here
+                # ever would. StopOutcome.CONFIRMED still means only "the
+                # stick accepted the write" either way; this never
+                # consults the frame for anything else.
                 for _ in range(STOP_COMMAND_EXTRA_RESENDS):
                     await asyncio.sleep(STOP_COMMAND_RESEND_DELAY_SECONDS)
+                    if (
+                        device_id is not None
+                        and self._stop_confirmed_at.get(device_id.upper(), 0.0)
+                        >= requested_at
+                    ):
+                        break
                     await self.control_blind(
                         device_enum, CMD_STOP, device_id=device_id, source=source
                     )
