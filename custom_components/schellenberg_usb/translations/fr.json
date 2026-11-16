@@ -79,7 +79,7 @@
         },
         "calibration_complete": {
           "title": "Calibration terminée",
-          "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
+          "description": "La calibration de {device_name} est terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
           "submit": "Terminé"
         },
         "test_motor": {
@@ -211,7 +211,7 @@
         }
       },
       "create_entry": {
-        "default": "La configuration a été créée"
+        "default": "La configuration a été créée."
       },
       "error": {
         "required": "Ce champ est obligatoire.",

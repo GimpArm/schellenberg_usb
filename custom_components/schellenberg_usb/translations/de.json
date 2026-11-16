@@ -79,7 +79,7 @@
         },
         "calibration_complete": {
           "title": "Kalibrierung abgeschlossen",
-          "description": "Kalibrierung für {device_name} abgeschlossen!\n\nGemessene Zeiten:\n- Öffnungszeit: {open_time} Sekunden\n- Schließzeit: {close_time} Sekunden\n\nDiese Zeiten werden verwendet, um die Rollladenposition genau zu verfolgen.\n\nStatuserkennung aus der Kalibrierung:\n- Primäre Statusidentität: {primary_status_identity}\n- Verwendete primäre Befehle: {primary_frames}\n- Sekundäre Identitäten: {secondary_status_identities}\n- Beobachtete Telegramme: {observed_frame_count}\n- Abbruchgrund: {calibration_end_reason}\n- Positionsverfolgung: {position_tracking}\n\nWenn keine Empfangs-/Statusidentität erkannt wurde, kann der Rollladen weiterhin gesteuert werden; seine Position wird dann anhand der gesendeten Befehle von Home Assistant geschätzt.",
+          "description": "Die Kalibrierung für {device_name} ist abgeschlossen!\n\nGemessene Zeiten:\n- Öffnungszeit: {open_time} Sekunden\n- Schließzeit: {close_time} Sekunden\n\nDiese Zeiten werden verwendet, um die Rollladenposition genau zu verfolgen.\n\nStatuserkennung aus der Kalibrierung:\n- Primäre Statusidentität: {primary_status_identity}\n- Verwendete primäre Befehle: {primary_frames}\n- Sekundäre Identitäten: {secondary_status_identities}\n- Beobachtete Telegramme: {observed_frame_count}\n- Abbruchgrund: {calibration_end_reason}\n- Positionsverfolgung: {position_tracking}\n\nWenn keine Empfangs-/Statusidentität erkannt wurde, kann der Rollladen weiterhin gesteuert werden; seine Position wird dann anhand der gesendeten Befehle von Home Assistant geschätzt.",
           "submit": "Fertig"
         },
         "test_motor": {
@@ -211,7 +211,7 @@
         }
       },
       "create_entry": {
-        "default": "Die Konfiguration wurde erstellt"
+        "default": "Die Konfiguration wurde erstellt."
       },
       "error": {
         "required": "Dieses Feld ist erforderlich.",

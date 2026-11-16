@@ -79,7 +79,7 @@
         },
         "calibration_complete": {
           "title": "Calibration complete",
-          "description": "Calibration for {device_name} complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times are used to accurately track the shutter's position.\n\nStatus detection from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Observed frames: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the shutter can still be controlled; its position will then be estimated based on the commands sent by Home Assistant.",
+          "description": "The calibration for {device_name} is complete!\n\nMeasured times:\n- Open time: {open_time} seconds\n- Close time: {close_time} seconds\n\nThese times are used to accurately track the shutter's position.\n\nStatus detection from calibration:\n- Primary status identity: {primary_status_identity}\n- Primary commands used: {primary_frames}\n- Secondary identities: {secondary_status_identities}\n- Observed frames: {observed_frame_count}\n- End reason: {calibration_end_reason}\n- Position tracking: {position_tracking}\n\nIf no receive/status identity was discovered, the shutter can still be controlled; its position will then be estimated based on the commands sent by Home Assistant.",
           "submit": "Done"
         },
         "test_motor": {
@@ -211,7 +211,7 @@
         }
       },
       "create_entry": {
-        "default": "The configuration has been created"
+        "default": "The configuration has been created."
       },
       "error": {
         "required": "This field is required.",

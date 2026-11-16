@@ -3746,7 +3746,51 @@ def test_blind_subentry_create_entry_has_its_own_confirmation_text() -> None:
     for language in ("strings", "en", "de", "es", "fr"):
         assert _load_create_entry(language)["default"], language
 
-    assert _load_create_entry("de")["default"] == "Die Konfiguration wurde erstellt"
+    assert _load_create_entry("de")["default"] == "Die Konfiguration wurde erstellt."
+
+
+def _load_calibration_complete_description(language: str) -> str:
+    integration_dir = (
+        Path(__file__).parent.parent / "custom_components" / "schellenberg_usb"
+    )
+    path = (
+        integration_dir / "strings.json"
+        if language == "strings"
+        else integration_dir / "translations" / f"{language}.json"
+    )
+    with path.open(encoding="utf-8") as handle:
+        doc = json.load(handle)
+    return cast(
+        str,
+        doc["config_subentries"]["blind"]["step"]["calibration_complete"][
+            "description"
+        ],
+    )
+
+
+def test_calibration_complete_description_opens_with_a_grammatical_sentence() -> None:
+    """Reported directly against a live screenshot, by comparison with the
+    blind subentry's own confirmation text just above (create_entry.default,
+    now "Die Konfiguration wurde erstellt." / "The configuration has been
+    created."): this step's own first line was the same kind of bare noun
+    phrase with no article or verb - "Kalibrierung für {device_name}
+    abgeschlossen!" / "Calibration for {device_name} complete!" - unlike
+    every other step's description in these same translation files. Covers
+    only the opening line; the rest of the description (measured times,
+    status detection, position-tracking note) is unchanged. The German
+    wording is the person's own exact words, not a paraphrase.
+    """
+    expected_openings = {
+        "strings": "The calibration for {device_name} is complete!\n\n",
+        "en": "The calibration for {device_name} is complete!\n\n",
+        "de": "Die Kalibrierung für {device_name} ist abgeschlossen!\n\n",
+        "es": "¡La calibración de {device_name} se ha completado!\n\n",
+        "fr": "La calibration de {device_name} est terminée !\n\n",
+    }
+    for language, expected_opening in expected_openings.items():
+        assert _load_calibration_complete_description(language).startswith(
+            expected_opening
+        ), language
 
 
 def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None:
