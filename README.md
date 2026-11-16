@@ -43,7 +43,7 @@ Please keep these limitations in mind:
 - Guided pairing and motor teach-in
 - Automatic travel-time calibration
 - Status identity discovery during calibration
-- Guided **Discover status from original remote** action
+- Guided **Capture remote-control signals** action
 - Support for secondary RF identities
 - Estimated position tracking
 - Manual position sync: fully open, fully closed, or any value from 0–100%
@@ -129,7 +129,7 @@ blind, the motor must learn and authorize it.
 
 Use the original Schellenberg remote or the product manual to put the correct motor
 or remote channel into learning mode. Then run the integration's pairing or
-**Teach motor / activate USB transmitter** action. The integration sends the
+**Pair a new shutter and overwrite it with this shutter's data** action. The integration sends the
 required teach sequence and performs a short Open/Stop test.
 
 If the motor moves during the test, pairing was probably successful. Always confirm
@@ -174,16 +174,18 @@ closed. Home Assistant uses those times to estimate its position:
 
 During calibration:
 
-1. Start with the blind completely closed.
-2. Press the Open/Up control when the dialog asks you to start.
-3. The integration measures the physical open travel time until the blind stops.
-4. Follow the prompt to move the blind completely closed.
-5. Press the Close/Down control when asked; the integration measures the physical close travel time.
+1. Tell Home Assistant whether the shutter is currently open or closed.
+2. Press Start, then the matching control, for the first leg - the direction that moves the shutter away from its current state.
+3. The integration measures that leg's physical travel time until the shutter stops.
+4. Follow the prompt to move the shutter the other way.
+5. Press Start, then the matching control, for the second leg; the integration measures that travel time too.
 6. Review and save the measured times.
 
-Calibration always measures physical Open first and physical Close second. The
-normal `invert_direction` setting does not reverse these two calibration legs.
-The optional pairing instructions do not require waiting for an additional motor signal.
+Calibration measures whichever direction moves the shutter away from its current
+state first, and the other direction second - so Open is measured first only if
+you start from closed, and Close first only if you start from open. The normal
+`invert_direction` setting does not change this order. The optional pairing
+instructions do not require waiting for an additional motor signal.
 
 Calibration does not install or detect an absolute position sensor. It measures
 travel time and may also discover useful RF status messages.
@@ -196,19 +198,19 @@ identity. If it hears a clear Open, Close, and Stop stream, it saves that group 
 the primary status identity. Companion groups can be saved as secondary identities
 for diagnostics without affecting position.
 
-## Status discovery from the original remote
+## Capture remote-control signals
 
-Use **Discover status from original remote** when:
+Use **Capture remote-control signals** when:
 
 - Home Assistant can move the blind, but using the physical remote does not update
   the estimated position.
 - Diagnostics says that no matching frame has been received.
 - Calibration did not discover a primary status identity.
 
-To run discovery:
+To capture signals:
 
 1. Open the blind's configuration menu.
-2. Choose **Developer tools > Discover status from original remote**.
+2. Choose **Developer tools > Capture the remote control's radio signals for the shutter**.
 3. Select the correct shutter channel on the original remote.
 4. Press **Open**.
 5. Press **Stop**.
@@ -239,7 +241,7 @@ remote channels, at once - that's a property of the motor's own hardware, not a
 limit of this integration. Home Assistant's own position tracking is narrower
 than that: it only recognizes the specific RF identities it has actually
 discovered and saved as the primary (and optional secondary) status identity,
-during calibration or **Discover status from original remote**.
+during calibration or **Capture remote-control signals**.
 
 In practice:
 
@@ -250,8 +252,8 @@ In practice:
   seen a recognized frame from - still moves the blind normally, but Home
   Assistant has no way to notice. The estimated position will drift until a
   manual position sync or the next Home Assistant-initiated move corrects it.
-- If you regularly use more than one remote on the same motor, run **Discover
-  status from original remote** once per remote. A frame stream that doesn't
+- If you regularly use more than one remote on the same motor, run **Capture
+  remote-control signals** once per remote. A frame stream that doesn't
   match the primary identity is kept as a secondary identity (visible in
   [Diagnostics](#diagnostics)) instead of being mixed into position tracking.
 - Pressing a remote or wall switch that *is* saved as a secondary identity still
@@ -329,7 +331,7 @@ device identifiers, so review the output before posting it publicly.
 
 ### The blind moves from Home Assistant but remote position updates are missing
 
-- Run **Discover status from original remote**.
+- Run **Capture remote-control signals**.
 - Check diagnostics for a primary status identity and a last primary tracking
   frame.
 - Position can still be estimated from Home Assistant commands even without remote
