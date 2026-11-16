@@ -380,6 +380,47 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             self.calibration_handler = CalibrationFlowHandler(self)
         return self.calibration_handler
 
+    def async_remove(self) -> None:
+        """Release a still-open calibration capture the instant this flow
+        goes away, instead of leaving it to time out on its own.
+
+        Home Assistant calls this whenever the flow itself is being torn
+        down - the person closing the dialog or navigating away being the
+        common case - including mid-step, while a calibration leg's own
+        form (async_step_calibration_open_instruction/_close_instruction)
+        is still standing between the two drives waiting for the person's
+        next action. Until now, nothing told CalibrationFlowHandler that
+        had happened: _capture_active/_capture_api stayed set exactly as
+        if the flow were still there, so the hub-wide status-frame capture
+        buffer it had claimed (_start_calibration_capture(), options_flow_
+        calibration.py) stayed claimed too - blocking any other blind's
+        own calibration or status-discovery flow from claiming it in turn
+        - right up until api.py's own STATUS_FRAME_CAPTURE_STALE_TIMEOUT_
+        SECONDS staleness reclaim finally let a later claimant steal it.
+
+        _finish_calibration_capture() is already a safe no-op when no
+        capture is active (self.calibration_handler._capture_api is None)
+        - see its own early return - so this never needs to check capture
+        state itself, only that a handler exists at all: calibration_
+        handler stays None until _get_calibration_handler() first lazily
+        creates it, which a flow removed before ever reaching a
+        calibration step never does.
+
+        Deliberately a plain, non-async override despite its own name:
+        its only call, _finish_calibration_capture(), is itself
+        synchronous, so there is nothing here to await. An `async def`
+        version would still run fine at the one real call site either
+        way, but mypy flags it regardless - the base FlowHandler.
+        async_remove() in Home Assistant's own data_entry_flow.py is
+        itself typed as a plain `-> None`, not `Coroutine[Any, Any,
+        None]`, so an `async def` override is a Liskov violation as far
+        as mypy's --strict override check is concerned. Staying
+        non-async here sidesteps that mismatch outright instead of
+        suppressing it.
+        """
+        if self.calibration_handler is not None:
+            self.calibration_handler._finish_calibration_capture("flow_removed")
+
     async def _await_subentry_result(
         self,
         step_coro: Awaitable[ConfigFlowResult | SubentryFlowResult],
@@ -534,8 +575,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         chosen - but in its "list" (radio) rendering it visibly highlights
         the first option before anything is picked, which looks exactly
         like a considered answer and reintroduces the original problem
-        (see options_flow_calibration.py's calibration_close step, where
-        the same thing was found and fixed first). A third, clearly
+        (see options_flow_calibration.py's calibration_initial_state step,
+        where the same thing was found and fixed first). A third, clearly
         non-answer placeholder option now occupies that highlighted first
         slot instead; async_step_test_motor rejects submitting it (or
         anything other than "open"/"close") with an explicit on-screen
@@ -646,6 +687,58 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             )
         return await self.async_step_did_motor_move()
 
+    def _did_motor_move_placeholders(self) -> dict[str, str]:
+        """Build the description placeholders for the did_motor_move form."""
+        return {
+            "device_id": self._pending_device_id
+            or _translate_phrase(self.hass, "unknown"),
+            "device_enum": self._pending_device_enum
+            or _translate_phrase(self.hass, "unknown"),
+            "test_action": _translate_phrase(
+                self.hass, self._pending_test_direction or "unknown"
+            ),
+        }
+
+    @staticmethod
+    def _motor_moved_result_schema(*, allow_wrong_motor: bool) -> vol.Schema:
+        """Build the required, no-default motor-moved-result field.
+
+        Shared by both did_motor_move workflows, as of the 2026-11-14
+        unification - "existing" used to keep its own, original plain
+        BooleanSelector(default=True) here, which carried the exact risk
+        this select was written to avoid in the first place: a defaulted
+        field looks like a considered answer whether or not one was
+        actually made (same reasoning as _test_direction_schema() above).
+
+        The two callers differ only in which outcomes are actually on
+        offer, via allow_wrong_motor: a fresh "pairing" gets all three -
+        see async_step_did_motor_move()'s own docstring for what each one
+        means. "existing" only ever gets "yes"/"no": a wrong-motor retry
+        re-pairs at a fresh address (async_step_wrong_motor_reset_notice()),
+        and an already-paired blind being re-tested has no "fresh address"
+        to retry at - there being nothing for that option to actually do
+        is exactly why it stays pairing-only rather than becoming a third,
+        non-functional choice on every re-test. Same non-answer-placeholder
+        pattern as _test_direction_schema() above either way, for the same
+        reason: a required "list" (radio) select still visibly highlights
+        its first real option before anything is chosen, which looks
+        exactly like a considered answer.
+        """
+        options = ["unselected", "yes", "no"]
+        if allow_wrong_motor:
+            options.append("wrong_motor")
+        return vol.Schema(
+            {
+                vol.Required("motor_moved_result"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.LIST,
+                        translation_key="motor_moved_result",
+                    )
+                )
+            }
+        )
+
     async def async_step_did_motor_move(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -658,49 +751,153 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         can reach this step now, as of the Issue #78 pairing-flow
         unification, 2026-11-07), and the "existing" setup's re-test of
         an already-paired blind.
+
+        Both workflows ask the same required, no-default question here
+        (_motor_moved_result_schema()) - unified on 2026-11-14, when
+        "existing" gave up its own original plain BooleanSelector(default
+        =True) for exactly the reason that schema's own docstring gives.
+        They differ only in which outcomes are actually on offer. A fresh
+        "pairing" gets all three: the test moved the new blind as
+        expected; nothing moved, probably just a lost command, worth
+        retrying the *same* address first (the common, mundane case); or
+        no blind reacted correctly at all, or an additional/different,
+        already-paired one also moved - which keeps its own separate
+        option rather than collapsing into "nothing moved" above, because
+        only the person watching the physical blinds can tell these
+        symptoms apart; this integration cannot (see
+        async_step_wrong_motor_reset_notice()'s own docstring for why not,
+        and for what that option actually does). "existing" only ever
+        gets "yes"/"no" - see _motor_moved_result_schema()'s own
+        docstring for why a wrong-motor retry has nothing to do there.
         """
+        allow_wrong_motor = self._pairing_workflow != "existing"
         if user_input is None:
             return self.async_show_form(
                 step_id="did_motor_move",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("motor_moved", default=True): (
-                            selector.BooleanSelector()
-                        )
-                    }
+                data_schema=self._motor_moved_result_schema(
+                    allow_wrong_motor=allow_wrong_motor
                 ),
-                description_placeholders={
-                    "device_id": self._pending_device_id
-                    or _translate_phrase(self.hass, "unknown"),
-                    "device_enum": self._pending_device_enum
-                    or _translate_phrase(self.hass, "unknown"),
-                    "test_action": _translate_phrase(
-                        self.hass, self._pending_test_direction or "unknown"
-                    ),
-                },
+                description_placeholders=self._did_motor_move_placeholders(),
             )
 
-        if not user_input["motor_moved"]:
+        valid_results = (
+            ("yes", "no", "wrong_motor") if allow_wrong_motor else ("yes", "no")
+        )
+        motor_moved_result = user_input.get("motor_moved_result")
+        if motor_moved_result not in valid_results:
+            # "unselected" (or anything else) was submitted - see
+            # _motor_moved_result_schema()'s own comment for why this is
+            # reachable despite the field being required.
+            return self.async_show_form(
+                step_id="did_motor_move",
+                data_schema=self._motor_moved_result_schema(
+                    allow_wrong_motor=allow_wrong_motor
+                ),
+                description_placeholders=self._did_motor_move_placeholders(),
+                errors={"base": "motor_moved_result_required"},
+            )
+
+        if motor_moved_result == "yes":
             if self._pairing_workflow == "existing":
+                return self.async_abort(reason="command_test_successful")
+            return await self.async_step_test_success()
+        if motor_moved_result == "no":
+            if self._pairing_workflow == "existing":
+                # Same handling as before this option existed: an already-
+                # configured blind with a known cover entity has a more
+                # useful next step than an open-ended retry loop.
                 return await self.async_step_edit()
-            # "No movement" doesn't necessarily mean the pairing failed -
-            # the blind may simply already have been sitting at the end
-            # stop in the direction just chosen. Show a fresh
-            # async_step_test_motor() form so the person explicitly chooses
-            # a direction again (the same one, or the other one) before
-            # anything more is sent - for as long as they keep saying it
-            # didn't move. There is no attempt limit and no fallback to
-            # manual entry here: the person can always leave the wizard if
-            # the blind genuinely isn't responding, but the flow itself
-            # never gives up on their behalf.
+            # Same handling as before this option existed: no movement
+            # doesn't necessarily mean the pairing failed - the blind may
+            # simply already have been sitting at the end stop in the
+            # direction just chosen, or the command was just lost in the
+            # ether. Show a fresh async_step_test_motor() form so the
+            # person explicitly chooses a direction again (the same one,
+            # or the other one) before anything more is sent, at the same
+            # address - for as long as they keep saying it didn't move.
+            # There is no attempt limit and no fallback to manual entry
+            # here: the person can always leave the wizard if the blind
+            # genuinely isn't responding, but the flow itself never gives
+            # up on their behalf.
             self._test_motor_retry_attempted = True
             return await self.async_step_test_motor()
+        # Only "wrong_motor" left, and only reachable when allow_wrong_motor
+        # was True - i.e. never for "existing" (see valid_results above):
+        # either no blind reacted correctly, or a different/additional,
+        # already-paired one also moved - see
+        # async_step_wrong_motor_reset_notice()'s own docstring for why
+        # both symptoms get the same treatment.
+        return await self.async_step_wrong_motor_reset_notice()
 
-        if self._pairing_workflow == "existing":
-            return self.async_abort(reason="command_test_successful")
-        # "pairing" is the only value that can still be set here -
-        # "existing" already returned above.
-        return await self.async_step_test_success()
+    async def async_step_wrong_motor_reset_notice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Confirm the other motor has been reset, then re-pair at a fresh address.
+
+        Reached only from async_step_did_motor_move()'s "wrong_motor"
+        option, itself only ever offered during a fresh pairing (never
+        from the "existing" workflow's own re-test - see that step's own
+        comment) - when the person reports that the test command moved no
+        blind correctly, or moved an additional/different, already-paired
+        one instead of (or alongside) the new one. Both symptoms point at
+        the same underlying cause: nothing stops a *different*, already-
+        taught motor from also reacting to a teach/test command aimed at
+        some other address - a hardware/RF-firmware behavior of the motor
+        itself, not something this integration can detect or prevent. The
+        only reliable recovery is a fresh attempt at a different address,
+        which is what this step does once confirmed.
+
+        Nothing has been saved to Home Assistant yet at this point -
+        _finish_pairing() only ever runs after a *successful* motor test,
+        much later, once calibration finishes - so there is no subentry
+        or config entry to delete here, despite how that might look from
+        the outside. What this step actually abandons is purely in-
+        memory: the raw RF teach command already sent for the old
+        (device_id, device_enum) pair cannot be recalled (there is no
+        "un-teach" in this protocol), so whatever motor just wrongly
+        adopted that identity keeps it. Simply never referencing that
+        pair again from here on - which api.initialize_next_device_enum()'s
+        own already-issued-enum tracking makes safe, since it never hands
+        out an address this flow already asked for, even one it never
+        finished using - is both the safest and the only thing actually
+        achievable in software.
+
+        The notice itself exists because bumping the address alone is not
+        sufficient: the *other* motor that just wrongly reacted stays
+        receptive to a teach/test command on its own already-registered
+        address(es) regardless of what address this flow asks for next -
+        it has to be taken out of listening range of a fresh attempt by
+        the person physically resetting it first. See strings.json's own
+        wrong_motor_reset_notice description for the exact, user-approved
+        wording.
+        """
+        if user_input is None:
+            return self.async_show_form(
+                step_id="wrong_motor_reset_notice", data_schema=vol.Schema({})
+            )
+
+        api = self._get_entry().runtime_data
+        pairing_result = await api.pair_device_and_wait()
+        if pairing_result is None:
+            # Same handling as _async_pair_device()'s own original pairing
+            # attempt - see that method's own comment for why this needs
+            # the disconnect-vs-timeout distinction at all.
+            if api.pairing_interrupted_by_disconnect:
+                return self.async_abort(reason="pairing_interrupted_by_disconnect")
+            return self.async_abort(reason="pairing_timeout")
+
+        device_id, device_enum = pairing_result
+        assert self._pending_device_name is not None
+        self._apply_paired_device_identity(
+            device_id, device_enum, device_name=self._pending_device_name
+        )
+        # A fresh address is a fresh start, not a continuation of whatever
+        # confusion the old one caused - the retry_notice this would show
+        # was specifically about *that* old address (see
+        # _test_motor_placeholders()'s own comment), and no longer applies
+        # to this new one.
+        self._test_motor_retry_attempted = False
+        return await self.async_step_test_motor()
 
     async def async_step_test_success(
         self, user_input: dict[str, Any] | None = None
@@ -724,14 +921,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             return self.async_show_form(
                 step_id="test_success", data_schema=vol.Schema({})
             )
-        return await self.async_step_calibration_close(None)
+        return await self.async_step_calibration_initial_state(None)
 
     async def async_step_manual_times(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Collect travel times and current position after a successful motor test.
 
-        Unlike the calibration_close/open_instruction/close_instruction
+        Unlike the calibration_initial_state/open_instruction/close_instruction
         route (options_flow_calibration.py), nothing here actually drives
         the blind through a measured leg to a confirmed end stop - the
         person is just typing in numbers they already know. So the
@@ -822,6 +1019,72 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             errors=errors,
         )
 
+    def _apply_paired_device_identity(
+        self, device_id: str, device_enum: str, *, device_name: str
+    ) -> None:
+        """Record (device_id, device_enum) as this blind's pending raw-teach identity.
+
+        Factored out of what async_step_name_device() used to do inline,
+        so a later retry of the same raw pairing handshake at a freshly
+        bumped identity (async_step_wrong_motor_reset_notice(), reached
+        when the wrong motor reacted during test_motor/did_motor_move -
+        see that step's own docstring) can apply its own new identity the
+        exact same way, instead of drifting out of step with it. Two
+        separate pieces of state both describe this identity and both
+        need to agree: self._pending_device_id/_pending_device_enum
+        themselves (which _pending_data() reads directly, at call time,
+        to build the eventual subentry's own data dict), and
+        CalibrationFlowHandler's own parallel copy (set_selected_device()/
+        enable_subentry_creation(), options_flow_calibration.py) that live
+        calibration's own status-identity capture and discovery read
+        instead. They only ever diverge by being updated separately, one
+        at a time, by hand - which is exactly what this method rules out.
+
+        Deliberately out of scope: every *other* pending_* field (the
+        status identity a live calibration drive discovers, the open/
+        close travel times, invert_direction, ...) - none of those
+        describe the raw RF teach identity itself, and at every point
+        this method is ever called from (name_device's own first call, or
+        a wrong-motor retry - both strictly before calibration can ever
+        start, see async_step_test_motor()/async_step_did_motor_move())
+        the status-identity fields are still exactly the blank/unknown
+        values _async_pair_device() itself set them to, with nothing in
+        between able to have touched them - so there is nothing of theirs
+        to refresh yet either way.
+        """
+        self._pending_device_id = device_id
+        self._pending_device_enum = device_enum
+        handler = self._get_calibration_handler()
+        handler.set_selected_device(
+            {
+                # Pairing identity is used transiently to preserve the existing
+                # calibration listener; it is not persisted as primary status.
+                "id": device_id,
+                "entity_id": device_id,
+                "name": device_name,
+                "enum": device_enum,
+                # This is a brand-new pairing, so there is no subentry of its
+                # own yet to exclude - every *other* blind already on this
+                # hub is a candidate to exclude from the capture-wide
+                # fallback below (see _foreign_capture_device_ids()'s own
+                # docstring).
+                "foreign_capture_device_ids": _foreign_capture_device_ids(
+                    self._get_entry()
+                ),
+            }
+        )
+        handler.enable_subentry_creation(
+            blind_id=self._pending_blind_id,
+            device_id=device_id,
+            device_enum=device_enum,
+            device_name=device_name,
+            status_device_id=self._pending_status_device_id,
+            status_enum=self._pending_status_enum,
+            secondary_status_identities=(self._pending_secondary_status_identities),
+            status_identity_source=self._pending_status_identity_source,
+            invert_direction=self._pending_invert_direction,
+        )
+
     async def async_step_name_device(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
@@ -854,38 +1117,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             self.hass, "device_fallback_name", device_id=device_id
         )
         self._pending_device_name = device_name
-
-        handler = self._get_calibration_handler()
-
-        # Provide minimal device to handler
-        handler.set_selected_device(
-            {
-                # Pairing identity is used transiently to preserve the existing
-                # calibration listener; it is not persisted as primary status.
-                "id": device_id,
-                "entity_id": device_id,
-                "name": device_name,
-                "enum": device_enum,
-                # This is a brand-new pairing, so there is no subentry of its
-                # own yet to exclude - every *other* blind already on this
-                # hub is a candidate to exclude from the capture-wide
-                # fallback below (see _foreign_capture_device_ids()'s own
-                # docstring).
-                "foreign_capture_device_ids": _foreign_capture_device_ids(
-                    self._get_entry()
-                ),
-            }
-        )
-        handler.enable_subentry_creation(
-            blind_id=self._pending_blind_id,
-            device_id=device_id,
-            device_enum=device_enum,
-            device_name=device_name,
-            status_device_id=self._pending_status_device_id,
-            status_enum=self._pending_status_enum,
-            secondary_status_identities=(self._pending_secondary_status_identities),
-            status_identity_source=self._pending_status_identity_source,
-            invert_direction=self._pending_invert_direction,
+        self._apply_paired_device_identity(
+            device_id, device_enum, device_name=device_name
         )
         return await self.async_step_calibration_method_choice()
 
@@ -1598,29 +1831,78 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             entry = self._get_entry()
             subentry = self._get_reconfigure_subentry()
             data = dict(subentry.data)
-            if (
-                self._pending_status_device_id is not None
+            existing_status_identity = normalize_status_identity(
+                data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
+            )
+            existing_status_confirmed = (
+                existing_status_identity is not None
+                and data.get(CONF_STATUS_IDENTITY_SOURCE)
+                != STATUS_IDENTITY_SOURCE_UNKNOWN
+            )
+            discovered_identity = (
+                normalize_status_identity(
+                    self._pending_status_device_id, self._pending_status_enum
+                )
+                if self._pending_status_device_id is not None
                 and self._pending_status_enum is not None
+                else None
+            )
+            if (
+                discovered_identity is not None
+                and existing_status_confirmed
+                and discovered_identity != existing_status_identity
             ):
-                # Discovery found something - this flow's whole purpose on
-                # an already-configured blind is to let the person
+                # Discovery found a *different* device than the one
+                # already confirmed for this blind - for example, this
+                # blind's own electronic Gurtwickler already has a
+                # working status identity from an earlier calibration,
+                # and this detour was run with the original remote
+                # instead, which this same stick also hears. Before this
+                # fix (2026-11-15), the branch below ran unconditionally
+                # whenever discovery found *anything*, replacing both the
+                # primary identity and the whole secondary list in one go
+                # - so the already-working identity did not even survive
+                # as a secondary, it simply vanished, and that device
+                # stopped producing any reaction in Home Assistant at
+                # all. Mirrors the identical protection the fresh-pairing
+                # branch below already has: keep the existing primary
+                # exactly as it is, and fold this run's own primary (plus
+                # whatever it separately saw as secondary) into the
+                # secondary list instead of replacing anything.
+                merged_secondary = list(
+                    normalize_status_identities(
+                        data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+                    )
+                )
+                additional_identities = list(
+                    normalize_status_identities(
+                        self._pending_secondary_status_identities
+                    )
+                )
+                additional_identities.append(discovered_identity)
+                for identity in additional_identities:
+                    if (
+                        identity != existing_status_identity
+                        and identity not in merged_secondary
+                    ):
+                        merged_secondary.append(identity)
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = serialize_status_identities(
+                    merged_secondary
+                )
+            elif discovered_identity is not None:
+                # Discovery found something, and either it matches the
+                # device already confirmed or there was nothing confirmed
+                # yet worth protecting - this flow's whole purpose on an
+                # already-configured blind is to let the person
                 # deliberately (re)set its status identity via the
-                # remote, so a clean result always applies, even if it
-                # differs from whatever was there before.
+                # remote, so a clean result applies.
                 data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
                 data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
                     self._pending_secondary_status_identities
                 )
                 data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
                 data[CONF_STATUS_ENUM] = self._pending_status_enum
-            elif (
-                normalize_status_identity(
-                    data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
-                )
-                is not None
-                and data.get(CONF_STATUS_IDENTITY_SOURCE)
-                != STATUS_IDENTITY_SOURCE_UNKNOWN
-            ):
+            elif existing_status_confirmed:
                 # Discovery found nothing usable - wrong button, pressed
                 # too fast, RF interference - which is an inconclusive
                 # attempt, not a deliberate "clear this" action. Before
@@ -1651,33 +1933,109 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             return self.async_update_and_abort(entry, subentry, data=data)
 
         if self._pending_finish_data is not None:
-            # The live-calibration pairing route (CalibrationFlowHandler.
-            # async_step_calibration_complete(), options_flow_calibration.py)
-            # already assembled a complete subentry `data` dict of its own
-            # before routing through here for an identity-discovery
-            # attempt - see `_pending_finish_data`'s own docstring in
-            # __init__. Layer whatever this discovery round found on top
-            # of it (same fields _pending_data() itself would set), rather
-            # than rebuilding `data` from this flow's own
-            # `_pending_open_time`/`_pending_close_time`/`_pending_
-            # initial_position`, which that route never populates.
             if not self._pending_device_name:
                 return self.async_abort(reason="device_not_found")
             data = self._pending_finish_data
             self._pending_finish_data = None
-            data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
-            data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
-                self._pending_secondary_status_identities
+            # `data` already carries whatever the live calibration drive
+            # itself found (CalibrationFlowHandler.
+            # async_step_calibration_complete(), options_flow_calibration.py
+            # - a *different* instance from this flow; see
+            # `_pending_finish_data`'s own docstring in __init__). The
+            # self._pending_status_*/_pending_secondary_status_identities
+            # fields below are *this* flow's own copies, updated only by
+            # async_step_discover_status() via _apply_remote_status_
+            # discovery() - so they're only trustworthy once a guided
+            # discovery attempt actually ran and found a primary identity
+            # this round. Before this fix, they overwrote `data`
+            # unconditionally, so skipping discovery (the common case, see
+            # async_step_skip_status_discovery()) or an inconclusive
+            # attempt silently discarded the calibration drive's own,
+            # often more complete, findings every time. Mirrors the
+            # "don't erase a known-good identity with an inconclusive new
+            # one" protection the branch above applies, and that
+            # recalibration's own async_step_calibration_complete() has
+            # always had. The follow-up fix just below (2026-11-15)
+            # protects the same already-confirmed identity a second way:
+            # from a *conclusive* but differing discovery result, not just
+            # an empty/skipped one.
+            discovery_primary = (
+                self._status_discovery_result.get("primary")
+                if self._status_discovery_result is not None
+                else None
+            )
+            # Whatever the calibration drive itself already confirmed as
+            # this blind's own primary is self-echo evidence (it heard its
+            # *own* just-sent command - see summarize_status_discovery_
+            # frames()'s own phase_confirmed_frame_count scoring,
+            # identities.py), at least as trustworthy as this detour's own
+            # press-order guess - so it must not simply be discarded just
+            # because this detour recognizes a *different* device as the
+            # one actually pressed. That difference is expected, not an
+            # error: the project owner's own report (2026-11-15) traced it
+            # to an electronic Gurtwickler whose motor echoes its own
+            # commanded moves under one identity while the original remote
+            # driving the same physical blind is heard under a different
+            # one entirely. Before this fix, the unconditional overwrite
+            # below ran whenever discovery found *anything*, replacing
+            # both the primary identity and the whole secondary list in
+            # one go - so the calibration-confirmed identity did not even
+            # survive as a secondary, it simply vanished. That is exactly
+            # what was reported as Erstkalibrierung swapping its primary
+            # and secondary identities, and never recognizing a secondary
+            # from the remote at all: the one identity that could have
+            # ended up there was the one being thrown away every time.
+            existing_status_identity = normalize_status_identity(
+                data.get(CONF_STATUS_DEVICE_ID), data.get(CONF_STATUS_ENUM)
+            )
+            existing_status_confirmed = (
+                existing_status_identity is not None
+                and data.get(CONF_STATUS_IDENTITY_SOURCE)
+                != STATUS_IDENTITY_SOURCE_UNKNOWN
+            )
+            discovered_identity = (
+                normalize_status_identity(
+                    self._pending_status_device_id, self._pending_status_enum
+                )
+                if discovery_primary is not None
+                else None
             )
             if (
-                self._pending_status_device_id is not None
-                and self._pending_status_enum is not None
+                discovered_identity is not None
+                and existing_status_confirmed
+                and discovered_identity != existing_status_identity
             ):
+                # Keep the calibration-confirmed primary exactly as it is,
+                # and fold this detour's own primary (plus whatever it
+                # separately saw as secondary) into the secondary list
+                # instead of using either to replace anything.
+                merged_secondary = list(
+                    normalize_status_identities(
+                        data.get(CONF_SECONDARY_STATUS_IDENTITIES)
+                    )
+                )
+                additional_identities = list(
+                    normalize_status_identities(
+                        self._pending_secondary_status_identities
+                    )
+                )
+                additional_identities.append(discovered_identity)
+                for identity in additional_identities:
+                    if (
+                        identity != existing_status_identity
+                        and identity not in merged_secondary
+                    ):
+                        merged_secondary.append(identity)
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = serialize_status_identities(
+                    merged_secondary
+                )
+            elif discovery_primary is not None:
+                data[CONF_STATUS_IDENTITY_SOURCE] = self._pending_status_identity_source
+                data[CONF_SECONDARY_STATUS_IDENTITIES] = list(
+                    self._pending_secondary_status_identities
+                )
                 data[CONF_STATUS_DEVICE_ID] = self._pending_status_device_id
                 data[CONF_STATUS_ENUM] = self._pending_status_enum
-            else:
-                data.pop(CONF_STATUS_DEVICE_ID, None)
-                data.pop(CONF_STATUS_ENUM, None)
             return self._finish_pairing(title=self._pending_device_name, data=data)
 
         if (
@@ -1861,6 +2219,12 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         hass = self.hass
 
         def _t(key: str, **kwargs: Any) -> str:
+            """Shorthand for _runtime_translation_text(hass, key, **kwargs).
+
+            Saves repeating `hass` at every one of the many calls the
+            diagnostics text assembled below makes into runtime_
+            translation_text.py's lookup table.
+            """
             return _runtime_translation_text(hass, key, **kwargs)
 
         def _position_text(value: int | None) -> str:
@@ -2360,17 +2724,17 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         )
 
         return await self._await_subentry_result(
-            handler.async_step_calibration_close(user_input)
+            handler.async_step_calibration_initial_state(user_input)
         )
 
     # Delegate all calibration steps to the handler
-    async def async_step_calibration_close(
+    async def async_step_calibration_initial_state(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Delegate to calibration handler."""
         handler = self._get_calibration_handler()
         return await self._await_subentry_result(
-            handler.async_step_calibration_close(user_input)
+            handler.async_step_calibration_initial_state(user_input)
         )
 
     async def async_step_calibration_open_instruction(
@@ -2440,7 +2804,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         manual_times() for calibration_method_choice's own menu options (see
         that method's own docstring for the full explanation of why a menu
         needs this). Unlike async_step_test_success()'s own call into
-        async_step_calibration_close() - that is an ordinary Python call
+        async_step_calibration_initial_state() - that is an ordinary Python call
         this class makes from within one step's body, not Home Assistant
         dispatching a menu option by name: test_success is a plain
         confirmation form, not a menu, as its own docstring says.

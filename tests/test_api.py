@@ -785,6 +785,94 @@ async def test_control_blind_with_retry_sends_two_extra_resends_after_being_acce
     assert len(written(connected_api)) == 3
 
 
+async def test_control_blind_with_retry_skips_the_resend_once_a_real_move_echo_arrives(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirmed motor-move echo makes the remaining resends unnecessary.
+
+    Companion to test_control_blind_with_retry_sends_two_extra_resends_
+    after_being_accepted above, mirroring control_blind_stop()'s own
+    _stop_confirmed_at precedent (test_control_blind_stop_skips_resends_
+    once_a_real_stop_frame_arrives) on the move side: those two resends
+    exist only to cover for a *lost* primary move frame; once this
+    blind's own real "ss" STARTED_MOVING status frame for this exact
+    direction has actually arrived, the motor is independently known to
+    have received it already, so firing the remaining resends anyway
+    would just be redundant RF traffic on an already-busy shared
+    transmitter. register_entity() below gives this device_id a status
+    identity to receive that frame on - a plain device_id with none
+    registered is exactly the scenario the test above exercises, which
+    still passes unchanged (asserts all three writes), so this is
+    additive, not a replacement.
+
+    Project owner's own direct request (2026-11-14), mirroring the stop
+    side's existing precedent, explicitly also asking that - absent such
+    an echo - both resends still fire regardless; that unchanged path is
+    exactly what the sibling test above already covers.
+    """
+    connected_api.register_entity("ABCDEF", "10", "Test Blind")
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # See the matching comment on the sibling test above for why a
+        # bare `return None` would never let this task actually run.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    # The motor's own real echo, independent of and after that stick
+    # accept - see _move_echo_confirmed_at's own comment in api.py.
+    connected_api._handle_message("ss" + "10" + "ABCDEF" + CMD_UP + "00000000")
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    await connected_api.hass.async_block_till_done()
+    # Neither best-effort resend fired - just the one, already-confirmed
+    # primary write.
+    assert len(written(connected_api)) == 1
+
+
+async def test_control_blind_with_retry_resend_ignores_echo_for_opposite_direction(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Down echo must never be read as confirming an Up resend loop (or
+    vice versa) - see _move_echo_confirmed_at's own comment in api.py for
+    why it is keyed by (device_id, command), not just device_id. Without
+    that direction check, a Down echo arriving for an unrelated, later
+    command on the same device could silently cancel an in-flight Up
+    resend that still needs to go out, the mirror-image mistake of the
+    skip the sibling test above exists to prove actually works.
+    """
+    connected_api.register_entity("ABCDEF", "10", "Test Blind")
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_with_retry("10", CMD_UP, device_id="ABCDEF")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary move write is accepted
+    # A genuine echo, but for the *other* direction - must not be read as
+    # confirming this Up resend loop.
+    connected_api._handle_message("ss" + "10" + "ABCDEF" + CMD_DOWN + "00000000")
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    await connected_api.hass.async_block_till_done()
+    # Both best-effort resends still fired - the Down echo above does not
+    # count as confirmation for this Up move.
+    assert len(written(connected_api)) == 3
+
+
 async def test_control_blind_with_retry_returns_before_its_own_resends_finish(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1538,7 +1626,7 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
 
 
 async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmission(
-    connected_api: SchellenbergUsbApi,
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The Kuechenrolladen case: a stop must not collide with its own move's write.
 
@@ -1548,7 +1636,33 @@ async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmissio
     yet, it cannot un-send a write already on the wire - so the fix has to
     be control_blind_stop() itself waiting for the transmitter to clear
     before writing, exactly like a move already does.
+
+    asyncio.sleep patched to instant rather than disabling
+    STOP_COMMAND_EXTRA_RESENDS outright (2026-11-15, following that
+    constant's delay partner being raised 0.25 -> 0.9 - see
+    STOP_COMMAND_RESEND_DELAY_SECONDS' own comment in const.py): unlike
+    the two *other*, lock-ordering sibling tests in this file, which
+    disable the count because a real resend there would land an
+    unplanned extra write mid-sequence and corrupt their own precise
+    write-count/payload assertions between two competing calls, this
+    test makes no assertion at all after its own single stop is accepted
+    - so there is nothing for the real, production
+    STOP_COMMAND_EXTRA_RESENDS=2 resend loop to corrupt by actually
+    running here, only its real-time delay worth avoiding.
     """
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # A bare `return None` never actually yields to the event loop -
+        # see test_control_blind_stop_sends_two_extra_resends_after_being_
+        # accepted's own comment on this exact pitfall, which applies
+        # here identically: this task runs as a genuinely separate
+        # asyncio.Task, and the pumping loop below yields through this
+        # same patched asyncio.sleep.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
     # Simulate this blind's own close write still being in flight: nothing
     # needs to be awaiting ack for a bare "t1" to clear _transmitter_idle.
     connected_api._handle_message("t1")
@@ -1625,6 +1739,54 @@ async def test_control_blind_stop_sends_two_extra_resends_after_being_accepted(
     # plain stop writes for the same device, since control_blind() itself
     # never waits for or reacts to a reply (see its own docstring).
     assert len(written(connected_api)) == 3
+
+
+async def test_control_blind_stop_skips_resends_once_a_real_stop_frame_arrives(
+    connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirmed motor-stop echo makes the remaining resends unnecessary.
+
+    Companion to test_control_blind_stop_sends_two_extra_resends_after_
+    being_accepted above - project owner's own follow-up request
+    (2026-11-07): those two resends exist only to cover for a *lost*
+    primary stop frame; once this blind's own real "ss" STOPPED status
+    frame has actually arrived, the motor is independently known to be
+    stopped already, so firing them anyway would just be redundant RF
+    traffic on an already-busy shared transmitter. register_entity()
+    below gives this device_id a status identity to receive that frame
+    on - a plain device_id with none registered is exactly the scenario
+    the test above exercises, which still passes unchanged (asserts all
+    three writes), so this is additive, not a replacement.
+
+    Briefly reverted (2026-11-08, commit a96a8d1) along with this test,
+    over reliability concerns; both reinstated at the project owner's own
+    later, explicit request once real-world use showed that concern did
+    not hold up in practice - see control_blind_stop()'s own comment.
+    """
+    connected_api.register_entity("AAAAAA", "10", "Test Blind")
+    real_sleep = asyncio.sleep
+
+    async def instant_sleep(*_args: object, **_kwargs: object) -> None:
+        # See the matching comment on the companion test above for why a
+        # bare `return None` would never let this task actually run.
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+    task = asyncio.ensure_future(
+        connected_api.control_blind_stop("10", device_id="AAAAAA")
+    )
+    await _run_until(lambda: len(written(connected_api)) == 1)
+
+    connected_api._handle_message("t1")  # the primary stop is accepted
+    # The motor's own real echo, independent of and after that stick
+    # accept - see _stop_confirmed_at's own comment in api.py.
+    connected_api._handle_message("ss" + "10" + "AAAAAA" + CMD_STOP + "00000000")
+
+    assert await asyncio.wait_for(task, timeout=1) is StopOutcome.CONFIRMED
+    # Neither best-effort resend fired - just the one, already-confirmed
+    # primary write.
+    assert len(written(connected_api)) == 1
 
 
 async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
@@ -3195,9 +3357,9 @@ async def test_handle_message_ss_frame_updates_tracking_and_dispatches_signal(
         connected_api.hass, f"{SIGNAL_DEVICE_EVENT}_ABCDEF_10", _on_event
     )
 
-    # ss + enum(10) + device_id(ABCDEF) + incrementor(0000, ignored) +
-    # command(CMD_UP) + padding(00, ignored) + signal(00, ignored)
-    connected_api._handle_message("ss" + "10" + "ABCDEF" + "0000" + CMD_UP + "0000")
+    # ss + enum(10) + device_id(ABCDEF) + command(CMD_UP) +
+    # remainder(00000000, unparsed - see api.py's own format comment)
+    connected_api._handle_message("ss" + "10" + "ABCDEF" + CMD_UP + "00000000")
 
     frame = connected_api.get_last_received_for_identities([("ABCDEF", "10")])
     assert frame is not None
@@ -3209,6 +3371,110 @@ async def test_handle_message_ss_frame_updates_tracking_and_dispatches_signal(
     assert tracking_frame is not None
     assert tracking_frame["command"] == CMD_UP
     assert received == [CMD_UP]
+
+
+# Regression test for GitHub Issue #85: the command byte was previously read
+# from message[14:16], documented at the time as a 4-char "message
+# incrementor" sitting at [10:14] followed by the 2-char command. Real-world
+# frames (Debug_Protokoll.xlsx, attached to #85) proved that wrong - [14:16]
+# gave a different value almost every time for the *same*, physically-known
+# button, while [10:12] - right after the 6-char device id, with no
+# incrementor field at all - gave exactly one stable value per real action
+# across every one of the 141 frames in that capture. The four raw frames
+# below are copied verbatim from that capture (one per distinct action, two
+# different trigger sources: a SmartFriends box and a 5-channel remote), so
+# this test fails if the parser ever regresses to the old, wrong offset.
+@pytest.mark.parametrize(
+    ("raw_frame", "expected_command", "expected_interpretation"),
+    [
+        # SmartFriends box, device 23/8FC96F. Old [14:16] read "02", "03"
+        # and "04" for these three - as if three different commands had
+        # been sent - instead of the one real command each actually was.
+        ("ss238FC96F00260200EE", CMD_STOP, "stop"),
+        ("ss238FC96F02260300ED", CMD_DOWN, "close"),
+        ("ss238FC96F01260400ED", CMD_UP, "open"),
+        # 5-channel remote, device 43/B891F6, broadcasting Allow Pairing.
+        # Old [14:16] read "DB" here - not even one of the five recognized
+        # command bytes in const.py.
+        ("ss43B891F64025DB00C0", CMD_ALLOW_PAIRING, "unknown"),
+    ],
+)
+def test_handle_message_ss_frame_command_byte_matches_issue_85_capture(
+    connected_api: SchellenbergUsbApi,
+    raw_frame: str,
+    expected_command: str,
+    expected_interpretation: str,
+) -> None:
+    connected_api._handle_message(raw_frame)
+
+    enum = raw_frame[2:4]
+    device_id = raw_frame[4:10]
+    frame = connected_api.get_last_received_for_identities([(device_id, enum)])
+    assert frame is not None
+    assert frame["command"] == expected_command
+    assert frame["interpreted_command"] == expected_interpretation
+
+
+# Regression test for the real-world report that followed Issue #85's own
+# fix: on this user's hardware (two devices, both status-reporting under
+# enum 09), message[10:12] - the position Issue #85's fix reads - is a
+# fixed "1F" in every one of 27 distinct frames collected in a user-
+# provided HA debug log, spanning idle/ambient traffic and traffic
+# following explicit HA-issued open/close/stop commands alike. Since a
+# real command byte must vary with the real action and "1F" never does
+# here, it cannot be the command field for this hardware - message[14:16]
+# is, and does vary correctly with it (00/01/02 only, exactly matching
+# stop/open/close). The four raw frames below are copied verbatim from
+# that log (two devices, all three actions); the closing one is the
+# tightest-correlated of the set - logged ~1.6s after this integration
+# itself issued an explicit close command to that exact device.
+# _resolve_status_command() must keep reading Issue #85's own capture
+# correctly (previous test) while also resolving these - see its
+# docstring in api.py for why checking both positions against the known
+# command set is reliable here, unlike the already-reverted secondary-
+# identity fallback (1db9e69).
+@pytest.mark.parametrize(
+    ("raw_frame", "expected_command", "expected_interpretation"),
+    [
+        ("ss096E568B1F820000C9", CMD_STOP, "stop"),
+        ("ss096E568B1F820100C9", CMD_UP, "open"),
+        ("ss096E568B1F820200CD", CMD_DOWN, "close"),
+        ("ss090B49491F820000C9", CMD_STOP, "stop"),
+    ],
+)
+def test_handle_message_ss_frame_command_byte_falls_back_for_1f82_hardware(
+    connected_api: SchellenbergUsbApi,
+    raw_frame: str,
+    expected_command: str,
+    expected_interpretation: str,
+) -> None:
+    connected_api._handle_message(raw_frame)
+
+    enum = raw_frame[2:4]
+    device_id = raw_frame[4:10]
+    frame = connected_api.get_last_received_for_identities([(device_id, enum)])
+    assert frame is not None
+    assert frame["command"] == expected_command
+    assert frame["interpreted_command"] == expected_interpretation
+
+
+def test_handle_message_ss_frame_keeps_reporting_unknown_when_neither_position_decodes(
+    connected_api: SchellenbergUsbApi,
+) -> None:
+    """When message[10:12] AND message[14:16] are both outside the known
+    command set, the frame must keep reporting exactly what it did before
+    this fallback existed - message[10:12]'s own raw value, interpreted as
+    "unknown" - rather than the fallback inventing some other behavior for
+    a frame nobody has ever captured and confirmed the meaning of.
+    """
+    # ss + enum(10) + device_id(ABCDEF) + "99" (not a known command) +
+    # "00" (unused remainder) + "FF" (also not a known command) + "0000"
+    connected_api._handle_message("ss10ABCDEF9900FF0000")
+
+    frame = connected_api.get_last_received_for_identities([("ABCDEF", "10")])
+    assert frame is not None
+    assert frame["command"] == "99"
+    assert frame["interpreted_command"] == "unknown"
 
 
 async def test_handle_message_ss_frame_unmatched_device_skips_the_per_entity_signal(
@@ -3241,7 +3507,7 @@ async def test_handle_message_ss_frame_unmatched_device_skips_the_per_entity_sig
         connected_api.hass, f"{SIGNAL_DEVICE_EVENT}_FEDCBA_20", _on_id_and_enum
     )
 
-    connected_api._handle_message("ss" + "20" + "FEDCBA" + "0000" + CMD_STOP + "0000")
+    connected_api._handle_message("ss" + "20" + "FEDCBA" + CMD_STOP + "00000000")
 
     frame = connected_api.get_last_received_for_identities([("FEDCBA", "20")])
     assert frame is not None
@@ -3270,7 +3536,7 @@ async def test_handle_message_unmatched_frame_logs_at_debug_only(
         not connected_api._registered_entity_keys
     )  # the exact state that used to warn
 
-    connected_api._handle_message("ss" + "20" + "FEDCBA" + "0000" + CMD_STOP + "0000")
+    connected_api._handle_message("ss" + "20" + "FEDCBA" + CMD_STOP + "00000000")
 
     unmatched_records = [
         record
@@ -3297,7 +3563,7 @@ async def test_handle_message_ss_frame_resolves_pairing_future_for_unknown_devic
     )
     connected_api._pairing_future = connected_api.hass.loop.create_future()
 
-    connected_api._handle_message("ss" + "30" + "112233" + "0000" + CMD_STOP + "0000")
+    connected_api._handle_message("ss" + "30" + "112233" + CMD_STOP + "00000000")
 
     assert connected_api._pairing_future.done()
     assert connected_api._pairing_future.result() == "112233"
@@ -3320,7 +3586,7 @@ async def test_handle_message_ss_frame_skips_capture_signal_when_no_capture_acti
         connected_api.hass, SIGNAL_DEVICE_EVENT_CAPTURE, _on_capture_event
     )
 
-    connected_api._handle_message("ss" + "10" + "ABCDEF" + "0000" + CMD_UP + "0000")
+    connected_api._handle_message("ss" + "10" + "ABCDEF" + CMD_UP + "00000000")
 
     assert received == []
 
@@ -3349,7 +3615,7 @@ async def test_handle_message_ss_frame_broadcasts_capture_signal_during_capture(
     )
     connected_api.start_status_frame_capture(phase="opening")
 
-    connected_api._handle_message("ss" + "10" + "FEDCBA" + "0000" + CMD_UP + "0000")
+    connected_api._handle_message("ss" + "10" + "FEDCBA" + CMD_UP + "00000000")
 
     assert received == [("FEDCBA", CMD_UP)]
 
@@ -3367,7 +3633,7 @@ async def test_handle_message_caps_the_status_discovery_frame_list(
     connected_api.start_status_frame_capture(phase="opening")
 
     for _ in range(api_module.MAX_STATUS_DISCOVERY_FRAMES + 50):
-        connected_api._handle_message("ss" + "10" + "FEDCBA" + "0000" + CMD_UP + "0000")
+        connected_api._handle_message("ss" + "10" + "FEDCBA" + CMD_UP + "00000000")
 
     assert connected_api._status_discovery_frames is not None
     assert len(connected_api._status_discovery_frames) == (
@@ -3510,7 +3776,7 @@ def test_handle_message_does_not_cache_an_ss_frame_with_a_non_hex_device_id(
     registration lookup and signal dispatch (both already no-op harmlessly
     for a bogus key, since nothing real is ever registered under one).
     """
-    connected_api._handle_message("ss10ZZZZZZ0000010000")
+    connected_api._handle_message("ss10ZZZZZZ0100000000")
 
     assert connected_api._last_received_messages == {}
 
@@ -3525,7 +3791,7 @@ def test_handle_message_evicts_the_oldest_identity_once_the_cache_is_full(
     """
     for index in range(api_module.MAX_LAST_RECEIVED_MESSAGES + 1):
         device_id = f"{index:06X}"
-        connected_api._handle_message(f"ss10{device_id}0000010000")
+        connected_api._handle_message(f"ss10{device_id}0100000000")
 
     assert len(connected_api._last_received_messages) == (
         api_module.MAX_LAST_RECEIVED_MESSAGES
@@ -3544,18 +3810,18 @@ def test_handle_message_moves_a_re_seen_identity_back_to_the_front_of_the_cache(
     eviction exactly as if it were new, rather than leaving it stuck at the
     front of the queue under its original, now-stale insertion position.
     """
-    connected_api._handle_message(f"ss10{'000000'}0000010000")
+    connected_api._handle_message(f"ss10{'000000'}0100000000")
     for index in range(1, api_module.MAX_LAST_RECEIVED_MESSAGES):
         device_id = f"{index:06X}"
-        connected_api._handle_message(f"ss10{device_id}0000010000")
+        connected_api._handle_message(f"ss10{device_id}0100000000")
     # Cache is now exactly full (MAX_LAST_RECEIVED_MESSAGES entries: "000000"
     # plus indices 1..MAX_LAST_RECEIVED_MESSAGES-1). Re-seeing "000000" here
     # must not grow it further, and must mark "000000" as freshly used.
-    connected_api._handle_message(f"ss10{'000000'}0000010000")
+    connected_api._handle_message(f"ss10{'000000'}0100000000")
 
     # One more, brand-new identity now has to evict *something*.
     overflow_device_id = f"{api_module.MAX_LAST_RECEIVED_MESSAGES:06X}"
-    connected_api._handle_message(f"ss10{overflow_device_id}0000010000")
+    connected_api._handle_message(f"ss10{overflow_device_id}0100000000")
 
     assert len(connected_api._last_received_messages) == (
         api_module.MAX_LAST_RECEIVED_MESSAGES

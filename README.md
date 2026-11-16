@@ -255,13 +255,10 @@ In practice:
   match the primary identity is kept as a secondary identity (visible in
   [Diagnostics](#diagnostics)) instead of being mixed into position tracking.
 - Pressing a remote or wall switch that *is* saved as a secondary identity still
-  does not feed position tracking, but does cause one small, temporary effect on
-  the dashboard: the cover briefly shows as opening/closing - a guess toward
-  whichever end stop is farther from the current position, not a decoded
-  direction - until the primary identity's own echo of the same move confirms or
-  corrects it a moment later, or a few seconds pass with no such echo and the
-  guess is automatically withdrawn. The tracked position percentage itself is
-  never touched by this, only the opening/closing indicator.
+  does not feed position tracking and causes no effect on the dashboard by
+  itself. The opening/closing indicator and the tracked position both update
+  once the primary identity's own echo of the same move arrives, which happens
+  quickly.
 
 ## Manual position sync
 

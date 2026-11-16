@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -53,7 +52,6 @@ from custom_components.schellenberg_usb.const import (
     EVENT_STARTED_MOVING_DOWN,
     EVENT_STARTED_MOVING_UP,
     EVENT_STOPPED,
-    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
     POSITION_UPDATE_LOOP_TIMEOUT_SECONDS,
     SIGNAL_DEVICE_EVENT,
     STATUS_IDENTITY_SOURCE_UNKNOWN,
@@ -3189,269 +3187,6 @@ async def test_handle_event_stopped_does_not_clear_a_concurrent_commands_target(
 
 
 # ---------------------------------------------------------------------------
-# _handle_secondary_activity()/_clear_optimistic_secondary_move(): an
-# optimistic, direction-guessed dashboard state triggered by a secondary
-# identity's own frame (a second remote/wall-switch paired to the same
-# motor). Deliberately never decodes that frame's own command byte - see
-# the two methods' own docstrings/comments for why - so these tests never
-# pass one in either; async_call_later is stubbed so no test schedules a
-# real timer, and _clear_optimistic_secondary_move is always exercised by
-# calling it directly rather than by waiting one out.
-# ---------------------------------------------------------------------------
-
-
-async def test_handle_secondary_activity_guesses_opening_when_mostly_closed(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    schedule = MagicMock(return_value=MagicMock())
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later", schedule
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 20
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_opening is True
-    assert cover._attr_is_closing is False
-    schedule.assert_called_once_with(
-        hass,
-        OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS,
-        cover._clear_optimistic_secondary_move,
-    )
-    assert cover._optimistic_secondary_move_unsub is schedule.return_value
-
-
-async def test_handle_secondary_activity_guesses_closing_when_mostly_open(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later",
-        MagicMock(return_value=MagicMock()),
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 80
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_closing is True
-    assert cover._attr_is_opening is False
-
-
-async def test_handle_secondary_activity_does_nothing_while_already_tracking(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    schedule = MagicMock()
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later", schedule
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 20
-    cover._attr_is_opening = False
-    cover._attr_is_closing = True  # a real move already tracked, in progress
-    fake_task = MagicMock()
-    fake_task.done.return_value = False
-    fake_task.cancelling.return_value = False
-    cover._position_update_task = fake_task
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_closing is True
-    assert cover._attr_is_opening is False
-    schedule.assert_not_called()
-
-
-async def test_handle_secondary_activity_does_nothing_while_command_in_flight(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    schedule = MagicMock()
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later", schedule
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 20
-    cover._command_in_flight = True
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_opening is False
-    assert cover._attr_is_closing is False
-    schedule.assert_not_called()
-
-
-async def test_handle_secondary_activity_does_nothing_without_a_known_position(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    schedule = MagicMock()
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later", schedule
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = None
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_opening is False
-    assert cover._attr_is_closing is False
-    schedule.assert_not_called()
-
-
-async def test_handle_secondary_activity_debounces_a_repeated_frame(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A remote commonly repeats its frame every ~400ms while held down.
-
-    The first frame's guess and its withdrawal timeout must stand as they
-    are - not be re-guessed or re-scheduled on every repeat.
-    """
-    schedule = MagicMock(return_value=MagicMock())
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later", schedule
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 20
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-    cover._attr_current_cover_position = 80  # would guess the other way
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_opening is True  # unchanged from the first guess
-    assert cover._attr_is_closing is False
-    schedule.assert_called_once()
-
-
-async def test_clear_optimistic_secondary_move_withdraws_unconfirmed_guess(
-    hass: HomeAssistant,
-) -> None:
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_is_opening = True
-    cover._optimistic_secondary_move_unsub = MagicMock()
-    cover._position_update_task = None  # no real echo ever took over
-
-    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
-
-    assert cover._attr_is_opening is False
-    assert cover._attr_is_closing is False
-    assert cover._optimistic_secondary_move_unsub is None
-
-
-async def test_clear_optimistic_secondary_move_leaves_real_tracking_alone(
-    hass: HomeAssistant,
-) -> None:
-    """If the primary identity's own echo already took over, don't stomp it."""
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_is_opening = True  # the real, decoded direction by now
-    cover._attr_is_closing = False
-    cover._optimistic_secondary_move_unsub = MagicMock()
-    fake_task = MagicMock()
-    fake_task.done.return_value = False
-    fake_task.cancelling.return_value = False
-    cover._position_update_task = fake_task  # _handle_event() already took over
-
-    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
-
-    assert cover._attr_is_opening is True
-    assert cover._attr_is_closing is False
-    assert cover._optimistic_secondary_move_unsub is None
-
-
-async def test_clear_optimistic_secondary_move_leaves_a_pending_command_alone(
-    hass: HomeAssistant,
-) -> None:
-    """A command already in flight must not be pulled back to idle either.
-
-    Mirrors the test above, but for the other half of _handle_event()'s own
-    two-part check (_has_live_position_tracking() or self._command_in_
-    flight), which this method's guard had not been mirroring: async_open_
-    cover()/async_close_cover() set their own optimistic is_opening/
-    is_closing synchronously, before their own tracking task exists - it
-    only starts once control_blind_with_retry() actually succeeds, which
-    can stay suspended for a real stretch (hub-wide lock contention, the
-    busy-retry wait), same window test_handle_event_during_a_pending_
-    command_does_not_clear_its_target already proved for _handle_event()
-    itself. Before this fix, this method checked only _has_live_position_
-    tracking() - unlike _handle_secondary_activity()'s own, already-correct
-    mirror of this same check - so a withdrawal timeout firing inside that
-    window pulled a real, in-flight command's own optimistic state straight
-    back down to idle a few seconds into it.
-    """
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_is_opening = True  # async_open_cover()'s own optimistic state
-    cover._attr_is_closing = False
-    cover._command_in_flight = True  # control_blind_with_retry() still pending
-    cover._optimistic_secondary_move_unsub = MagicMock()
-    cover._position_update_task = None  # tracking hasn't started yet
-
-    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
-
-    assert cover._attr_is_opening is True
-    assert cover._attr_is_closing is False
-    assert cover._optimistic_secondary_move_unsub is None
-
-
-async def test_secondary_activity_from_a_stale_post_restart_frame_self_corrects(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Closes out the open "shows closed right after restart" regression note.
-
-    That regression (see CHANGELOG.md / commit d21735d) was caused by a
-    mechanism that no longer exists at all: the old close+open elapsed-
-    timer detection feature (reverted) plus a command-byte decode
-    fallback (also reverted) together let a stale, pre-restart secondary
-    frame - delivered as a burst the instant the integration starts
-    reading the serial port again - commit a blind straight to a wrong,
-    permanent state, since that old timer had no withdrawal of its own
-    to correct a guess nothing ever confirmed.
-
-    _handle_secondary_activity()/_clear_optimistic_secondary_move() is
-    the mechanism that replaced it, and until now each had only ever
-    been tested in isolation - never against this exact scenario end to
-    end. Simulates it directly: a position already restored from before
-    the restart (restore_state's own job, unrelated to either mechanism
-    and not re-tested here), one stale secondary frame with nothing ever
-    confirming it, then the withdrawal timeout firing with no primary
-    echo and no command of this entity's own having started either.
-    Confirms the worst case under the current design is a several-
-    second transient guess that clears itself - never a wrong state
-    left standing indefinitely, the way the old, withdrawn mechanism
-    did. No production code changed for this: the redesign that
-    replaced the old mechanism already closes this gap as a side
-    effect of never trusting an unconfirmed guess for longer than
-    OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS; this test only makes
-    that confirmed rather than assumed.
-    """
-    monkeypatch.setattr(
-        "custom_components.schellenberg_usb.cover.async_call_later",
-        MagicMock(return_value=MagicMock()),
-    )
-    api = MagicMock()
-    cover = _build_cover(hass, api)
-    cover._attr_current_cover_position = 70  # restored: mostly open
-
-    cover._handle_secondary_activity("irrelevant - never decoded")
-
-    assert cover._attr_is_closing is True  # transient guess only
-    assert cover._attr_is_opening is False
-
-    # The primary identity's own echo never arrives for this stale frame
-    # - nothing physically moved - so only the withdrawal timeout fires.
-    cover._clear_optimistic_secondary_move(datetime(2024, 1, 1))
-
-    assert cover._attr_is_opening is False
-    assert cover._attr_is_closing is False
-    assert cover._optimistic_secondary_move_unsub is None
-
-
-# ---------------------------------------------------------------------------
 # async_set_cover_position(): the position slider in the UI. Chains into
 # async_open_cover()/async_close_cover() with _preserve_target=True so the
 # tracking loop's existing partial-target logic (already covered above)
@@ -3576,7 +3311,7 @@ async def test_handle_calibration_completed_updates_travel_times_and_closes(
     hass: HomeAssistant,
 ) -> None:
     """ending_position=0: the close leg ran last, see
-    options_flow_calibration.py's calibration_close step.
+    options_flow_calibration.py's calibration_initial_state step.
     """
     api = MagicMock()
     cover = _build_cover(hass, api, device_id="ABCDEF")
@@ -3691,7 +3426,7 @@ async def test_added_to_hass_uses_calibration_ending_position_when_nothing_was_r
 ) -> None:
     """No restored HA state, but the subentry carries the position
     calibration actually ended at (see options_flow_calibration.py's
-    calibration_close step and cover.py's own
+    calibration_initial_state step and cover.py's own
     _initial_position_from_calibration) - that real measured value should
     be used instead of unconditionally defaulting to closed.
     """

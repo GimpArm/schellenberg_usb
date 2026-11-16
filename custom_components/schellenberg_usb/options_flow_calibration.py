@@ -1,3 +1,20 @@
+"""Live calibration-drive flow shared by pairing and reconfigure.
+
+CalibrationFlowHandler below drives one blind/shutter through an actual
+open-and-close calibration run: the person picks which direction to
+calibrate first, each leg then waits for the real movement-start/stop
+telegrams that leg produces (not a fixed delay), and a hub-wide status-
+frame capture runs alongside to find which device ID/enum combination
+that blind is actually sending its position telegrams as. Both the
+fresh-pairing subentry flow and the reconfigure subentry flow
+(config_flow.py) delegate to the same handler instance for this - a
+fresh pairing turns the result into a brand-new subentry, a
+recalibration updates the existing one instead; see
+enable_subentry_creation()/disable_subentry_creation() for how each
+flow selects its own route, and async_step_calibration_complete() for
+where that split actually happens.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -71,7 +88,33 @@ CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS = 2.0
 
 
 class CalibrationFlowHandler:
+    """Drive one blind through a live calibration run, on behalf of `flow`.
+
+    Not a ConfigSubentryFlow itself - `flow` is the actual
+    SchellenbergPairingSubentryFlow or reconfigure subentry flow this
+    handler acts for, and every HA-facing call (async_show_form,
+    async_abort, the config entry/subentry lookups) goes through that
+    object rather than being implemented here. Holding the calibration-
+    specific state (the open/close timings as they are measured, the
+    capture-buffer ownership, the pending data for a not-yet-created
+    subentry) in a separate object instead of on the flow class itself
+    keeps that state - and the retry/timeout logic built on it - shared
+    identically between the two very different flows that both need a
+    live calibration drive.
+    """
+
     def __init__(self, flow: ConfigSubentryFlow) -> None:
+        """Set up fresh per-run state for a calibration attempt on `flow`.
+
+        One instance is lazily created per flow run, the first time
+        config_flow.py's _get_calibration_handler() is called on it, and
+        then reused for the rest of that same run - see that method's
+        own docstring. Nothing here needs to be reset between attempts
+        because of that: only enable_subentry_creation()/
+        disable_subentry_creation() below mutate this state afterwards,
+        to pick which of async_step_calibration_complete()'s two
+        finishing routes a given run takes.
+        """
         self.flow = flow
         self._selected_device: dict[str, Any] | None = None
         self._calibration_start_time: float | None = None
@@ -115,6 +158,16 @@ class CalibrationFlowHandler:
         self._capture_api: SchellenbergUsbApi | None = None
 
     def _runtime_api(self) -> SchellenbergUsbApi | None:
+        """Return this flow's config entry's current API instance, if any.
+
+        A fresh lookup every time, deliberately not cached on self the
+        way _capture_api below is while a capture is active - this one
+        is meant to always reflect whichever SchellenbergUsbApi instance
+        entry.runtime_data currently points at, including right after a
+        reload has replaced it. _start_calibration_capture()'s own
+        comment on why it caches the result instead, right after calling
+        this, explains the one case where that is not what is wanted.
+        """
         entry = self.flow._get_entry()
         api = entry.runtime_data
         return api if isinstance(api, SchellenbergUsbApi) else None
@@ -196,6 +249,15 @@ class CalibrationFlowHandler:
         return True
 
     def _finish_calibration_capture(self, end_reason: str) -> None:
+        """End the active capture and store its result for this run.
+
+        Safe to call even when no capture is active (self._capture_api
+        is None) - every caller already knows, from its own branch, that
+        a capture was started, but a shared helper covering both the
+        "ever claimed one" and "did not" cases rather than requiring
+        every call site to check first is simpler and cannot silently
+        skip tearing one down.
+        """
         # Same reasoning as _set_calibration_capture_
         # phase() above - read back from the instance this capture was
         # actually started on, not whatever entry.runtime_data currently
@@ -254,6 +316,21 @@ class CalibrationFlowHandler:
             await asyncio.sleep(CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS)
 
     def _apply_calibration_status_candidates(self) -> None:
+        """Copy the just-finished capture's result into the pending fields.
+
+        Called once, right after _finish_calibration_capture() populates
+        self._calibration_discovery_result, from both
+        async_step_calibration_open_instruction() and
+        async_step_calibration_close_instruction()'s own "both legs done"
+        branch. Always overwrites self._pending_status_device_id/_enum/
+        _identity_source and self._pending_secondary_status_identities
+        wholesale with what this capture actually found (or, if it found
+        nothing, with the explicit "unknown" state) - there is nothing
+        from an earlier round for a fresh calibration run to preserve,
+        unlike config_flow.py's async_step_confirm_status_discovery(),
+        which has to guard against doing exactly that to an already-
+        confirmed identity.
+        """
         result = self._calibration_discovery_result
         if not result:
             self._pending_status_device_id = None
@@ -275,6 +352,20 @@ class CalibrationFlowHandler:
         ]
 
     def _calibration_record(self) -> dict[str, Any] | None:
+        """Build the CONF_LAST_CALIBRATION value for this run, or None.
+
+        None exactly when no capture ever actually ran this attempt
+        (self._calibration_discovery_result is still unset) - both
+        async_step_calibration_complete() call sites already guard the
+        assignment with `if calibration_record := self._calibration_record()`
+        for that reason, rather than ever writing an empty record. When a
+        capture did run, this is that capture's own result dict (primary/
+        secondary candidates, end reason, observed frames - see
+        api.py's finish_status_frame_capture()) with the measured open/
+        close times merged in, so CONF_LAST_CALIBRATION ends up self-
+        contained for diagnostics without needing those two separately-
+        stored fields re-joined by whatever reads it back later.
+        """
         if self._calibration_discovery_result is None:
             return None
         return {
@@ -288,6 +379,18 @@ class CalibrationFlowHandler:
         }
 
     def _calibration_summary_placeholders(self) -> dict[str, str]:
+        """Build the description_placeholders for async_step_calibration_complete().
+
+        Renders whatever this run's capture found (or didn't) into the
+        translated strings that step's "calibration_complete" form
+        actually shows - the primary identity and the commands it was
+        seen on, the secondary identities, whether position tracking is
+        available at all, the capture's end reason, and how many frames
+        were observed in total. Safe to call even when no capture ran
+        (self._calibration_discovery_result is still None): every field
+        below falls back to its own "not discovered"/"none"/empty
+        rendering in that case instead of raising.
+        """
         hass = self.flow.hass
         none_word = _runtime_translation_text(hass, "none_word")
         result = self._calibration_discovery_result or {}
@@ -325,6 +428,21 @@ class CalibrationFlowHandler:
         }
 
     def set_selected_device(self, device: dict[str, Any]) -> None:
+        """Record which device this calibration run is for.
+
+        Called once by the owning flow before any async_step_calibration_*
+        method on this handler is reached, for both the fresh-pairing and
+        the reconfigure route - every one of those methods aborts with
+        "device_not_found" instead of proceeding if this was never
+        called, whether via its own guard or - for async_step_
+        calibration_retry(), which has none of its own - by
+        unconditionally delegating to async_step_calibration_open_
+        instruction()/_close_instruction(), which do. `device` carries
+        the same "foreign_capture_device_ids"
+        key both call sites already populate it with; see
+        _wait_for_movement_start()'s own docstring for why that key
+        matters once a live capture starts.
+        """
         self._selected_device = device
 
     def recorded_leg_times(self) -> tuple[float | None, float | None]:
@@ -342,9 +460,26 @@ class CalibrationFlowHandler:
         """
         return self._open_time, self._close_time
 
-    async def async_step_calibration_close(
+    async def async_step_calibration_initial_state(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Ask which direction to calibrate first, then claim a capture.
+
+        The entry point into a live calibration run, reached from both
+        the fresh-pairing route (after a successful motor test) and the
+        reconfigure route's own "Calibrate" menu option. The person's
+        answer only decides which leg's instruction step comes first
+        (async_step_calibration_open_instruction() for "closed",
+        async_step_calibration_close_instruction() for "open" - the
+        *other* leg of whichever state the blind is already in); the
+        actual open/close times get measured from real movement
+        telegrams regardless of which leg runs first. Also where the
+        hub-wide status-frame capture buffer first gets claimed for this
+        run, via _claim_or_advance_capture() - a capture that is still
+        busy with some *other* blind's own flow at this point surfaces
+        as the generic "unknown" error below rather than letting this
+        step silently proceed uncaptured.
+        """
         errors: dict[str, str] = {}
         if user_input is not None:
             initial_state = user_input.get("initial_state")
@@ -377,7 +512,7 @@ class CalibrationFlowHandler:
             return self.flow.async_abort(reason="device_not_found")
 
         return self.flow.async_show_form(
-            step_id="calibration_close",
+            step_id="calibration_initial_state",
             data_schema=vol.Schema(
                 {
                     # A plain BooleanSelector used to default to "closed"
@@ -410,6 +545,19 @@ class CalibrationFlowHandler:
             ),
             description_placeholders={
                 "device_name": self._selected_device["name"],
+                # Empty for a fresh pairing - there is nothing to warn
+                # about yet. Non-empty only for recalibration, where an
+                # already-confirmed status identity exists and the person
+                # asked for a reminder that it depends on them actually
+                # using that same remote again during this run (see
+                # CHANGELOG.md for the real-world report this came from).
+                "recalibration_notice": (
+                    ""
+                    if self._create_subentry_after_calibration
+                    else _runtime_translation_text(
+                        self.flow.hass, "recalibration_notice"
+                    )
+                ),
             },
             errors=errors,
             last_step=False,
@@ -418,6 +566,22 @@ class CalibrationFlowHandler:
     async def async_step_calibration_open_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Measure the open leg: wait for real movement, then for the stop.
+
+        Shown once with no `user_input`, purely to let the person read
+        the instruction and press Start; the actual wait only starts on
+        the form's own submit. Advances the capture to the "opening"
+        phase, then waits in turn for a movement-started telegram and a
+        stop telegram (_wait_for_movement_start()/_wait_for_stop_event())
+        to measure self._open_time from real device behaviour rather
+        than a fixed delay. Either wait timing out takes the person to
+        async_step_calibration_retry()'s menu during a fresh pairing, or
+        back to this same form with an on-screen error during a
+        recalibration - see the first timeout branch below for why those
+        two routes differ. Once both legs have a measured time, hands
+        off to async_step_calibration_complete(); otherwise moves on to
+        this leg's counterpart, async_step_calibration_close_instruction().
+        """
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
 
@@ -436,8 +600,8 @@ class CalibrationFlowHandler:
         if not await self._claim_or_advance_capture(
             lambda: self._set_calibration_capture_phase("opening")
         ):
-            # See async_step_calibration_close()'s own comment on its
-            # identical fallback - near-unreachable once
+            # See async_step_calibration_initial_state()'s own comment on
+            # its identical fallback - near-unreachable once
             # _claim_or_advance_capture() has already waited out any
             # genuinely concurrent capture.
             errors["base"] = "unknown"
@@ -534,6 +698,16 @@ class CalibrationFlowHandler:
     async def async_step_calibration_close_instruction(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Measure the close leg: the mirror image of the open-leg step.
+
+        Same shape as async_step_calibration_open_instruction() above -
+        shown once to let the person press Start, then waits for a
+        movement-started telegram and a stop telegram to measure
+        self._close_time - just for EVENT_STARTED_MOVING_DOWN and the
+        "closing" capture phase instead. See that method's own docstring
+        for the shared timeout/retry behaviour and what happens once
+        both legs are measured.
+        """
         if self._selected_device is None:
             return self.flow.async_abort(reason="device_not_found")
 
@@ -552,8 +726,8 @@ class CalibrationFlowHandler:
         if not await self._claim_or_advance_capture(
             lambda: self._set_calibration_capture_phase("closing")
         ):
-            # See async_step_calibration_close()'s own comment on its
-            # identical fallback - near-unreachable once
+            # See async_step_calibration_initial_state()'s own comment on
+            # its identical fallback - near-unreachable once
             # _claim_or_advance_capture() has already waited out any
             # genuinely concurrent capture.
             errors["base"] = "unknown"
@@ -638,6 +812,34 @@ class CalibrationFlowHandler:
     async def async_step_calibration_complete(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Show the measured results, then finish via whichever route applies.
+
+        Reached once both legs have a measured time, from either
+        instruction step. Shown first with no `user_input` purely as a
+        summary screen (open/close times, discovered identities); the
+        actual finishing only happens on that form's own submit, and
+        always starts by dispatching SIGNAL_CALIBRATION_COMPLETED so
+        cover.py's live entity picks up the new travel times and ending
+        position immediately, regardless of which route runs next.
+        Which route that is depends on self._create_subentry_after_
+        calibration (see enable_subentry_creation()/
+        disable_subentry_creation()): a fresh pairing assembles a brand-
+        new subentry's data and - instead of finishing immediately -
+        detours through async_step_status_discovery_choice() (config_
+        flow.py) for a chance at a real remote-control identity first;
+        a recalibration instead updates the existing subentry in
+        place, always adopting this run's own freshly captured status
+        identity - primary and secondary alike - over whatever was
+        persisted before, including clearing a previously stored
+        secondary identity (for example a remote control) that this
+        round's own capture did not reconfirm. A live calibration
+        run's self-echo capture is direct, first-hand evidence of
+        what is actually driving this blind right now, so it is
+        trusted outright rather than merged with stale data (see the
+        _LOGGER.info() call below, which documents when this changes
+        the previously confirmed identity, without guarding against
+        it).
+        """
         if (
             self._selected_device is None
             or self._open_time is None
@@ -767,8 +969,13 @@ class CalibrationFlowHandler:
                     _LOGGER.info(
                         "Recalibration for %s discovered status identity %s/%s, "
                         "which differs from the already-configured %s/%s; "
-                        "keeping the existing one and discarding the newly "
-                        "discovered guess",
+                        "adopting the newly discovered identity, since this "
+                        "run's own live capture is direct evidence of what is "
+                        "actually driving this blind right now. Any "
+                        "previously stored secondary status identity not "
+                        "reconfirmed by this run (for example a remote "
+                        "control that was not pressed this time) is cleared "
+                        "along with it",
                         self._selected_device["name"]
                         if self._selected_device is not None
                         else "unknown device",
@@ -777,23 +984,23 @@ class CalibrationFlowHandler:
                         existing_status_identity[0],
                         existing_status_identity[1],
                     )
-                else:
-                    data_updates.update(
-                        {
-                            CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
-                            CONF_STATUS_ENUM: self._pending_status_enum,
-                            CONF_STATUS_IDENTITY_SOURCE: (
-                                STATUS_IDENTITY_SOURCE_CALIBRATION
-                            ),
-                            CONF_SECONDARY_STATUS_IDENTITIES: list(
-                                self._pending_secondary_status_identities
-                            ),
-                        }
-                    )
+                data_updates.update(
+                    {
+                        CONF_STATUS_DEVICE_ID: self._pending_status_device_id,
+                        CONF_STATUS_ENUM: self._pending_status_enum,
+                        CONF_STATUS_IDENTITY_SOURCE: (
+                            STATUS_IDENTITY_SOURCE_CALIBRATION
+                        ),
+                        CONF_SECONDARY_STATUS_IDENTITIES: list(
+                            self._pending_secondary_status_identities
+                        ),
+                    }
+                )
             return self.flow.async_update_and_abort(
                 self.flow._get_entry(),
                 self.flow._get_reconfigure_subentry(),
                 data_updates=data_updates,
+                reason="calibration_successful",
             )
 
         return self.flow.async_show_form(
@@ -854,11 +1061,18 @@ class CalibrationFlowHandler:
 
         @callback
         def handle_device_event(command: str) -> None:
+            """Wake the wait once this blind's own signal fires `event_type`."""
             if command == event_type and self._wait_event:
                 self.flow.hass.loop.call_soon_threadsafe(self._wait_event.set)
 
         @callback
         def handle_capture_event(_captured_device_id: str, command: str) -> None:
+            """Wake the wait on a not-yet-confirmed device's matching frame.
+
+            The hub-wide fallback for a blind whose real device id is not
+            known yet - see the comment below for why it must still
+            reject frames already attributed to a *different* blind.
+            """
             # Unlike handle_device_event above (whose signal name already
             # encodes device_id), this hub-wide fallback fires for every
             # device's frames while a capture window is open (see
@@ -910,6 +1124,18 @@ class CalibrationFlowHandler:
     async def _notify_calibration_completed(
         self, open_time: float, close_time: float, ending_position: int
     ) -> None:
+        """Tell the live cover entity about this run's measured results.
+
+        A no-op if self._selected_device was somehow never set - every
+        real caller already aborted earlier in that case, so this only
+        guards against being called out of order. Otherwise dispatches
+        SIGNAL_CALIBRATION_COMPLETED with the entity (or device) id,
+        rounded travel times, and ending position; cover.py's own
+        _handle_calibration_completed() listens for this to update the
+        running entity's travel times and current position without
+        waiting for the subentry/config-entry update this same call is
+        about to trigger to reload the whole integration.
+        """
         if self._selected_device is not None:
             async_dispatcher_send(
                 self.flow.hass,
@@ -933,6 +1159,23 @@ class CalibrationFlowHandler:
         status_identity_source: str | None = None,
         invert_direction: bool = False,
     ) -> None:
+        """Switch this handler onto the fresh-pairing finishing route.
+
+        Called once by the pairing subentry flow's own
+        _apply_paired_device_identity() (config_flow.py) - from async_
+        step_name_device()'s first call, or a wrong-motor retry, both
+        strictly *before* the motor test/calibration itself ever starts,
+        not after it (see _apply_paired_device_identity()'s own
+        docstring) - and before handing off to
+        async_step_calibration_initial_state(), with everything a brand-
+        new subentry will need that this handler does not otherwise
+        discover itself (the paired device's own identity, any status
+        identity already found via remote discovery earlier in that
+        same pairing attempt). Once set, async_step_calibration_
+        complete() assembles and creates that subentry instead of
+        updating an existing one - see disable_subentry_creation() for
+        the reconfigure route's own, opposite default.
+        """
         self._create_subentry_after_calibration = True
         self._pending_blind_id = normalize_blind_id(blind_id) or generate_blind_id()
         self._pending_device_id = device_id
@@ -947,6 +1190,19 @@ class CalibrationFlowHandler:
         self._pending_invert_direction = invert_direction
 
     def disable_subentry_creation(self) -> None:
+        """Switch this handler onto the reconfigure finishing route.
+
+        Called at the top of config_flow.py's async_step_calibrate() -
+        the reconfigure flow's own entry point into a calibration run -
+        so that recalibrating an already-paired blind always starts
+        from this handler's default state, even though the same handler
+        instance may previously have been used (and left in the fresh-
+        pairing state by enable_subentry_creation()) earlier in the same
+        flow run. Clears every pending-subentry field back to its
+        __init__ default, not only the flag itself, so a stale device
+        id/name from an earlier attempt in this same run can never leak
+        into async_step_calibration_complete()'s update-in-place branch.
+        """
         self._create_subentry_after_calibration = False
         self._pending_blind_id = None
         self._pending_device_id = None

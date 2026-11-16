@@ -45,15 +45,15 @@
           }
         },
         "calibration_method_choice": {
-          "title": "Establecer tiempos de recorrido",
+          "title": "Establecer los tiempos de recorrido del motor de la persiana",
           "menu_options": {
             "test_motor": "Calibrar moviendo la persiana",
-            "manual_times": "Introducir los tiempos de recorrido manualmente"
+            "manual_times": "Establecer manualmente los tiempos de recorrido del motor de la persiana"
           }
         },
-        "calibration_close": {
+        "calibration_initial_state": {
           "title": "Antes de empezar",
-          "description": "Para calibrar {device_name} con precisión, Home Assistant necesita saber qué dirección de movimiento de la persiana debe calibrarse primero.",
+          "description": "Para calibrar {device_name} con precisión, Home Assistant necesita saber qué dirección de movimiento de la persiana debe calibrarse primero.{recalibration_notice}",
           "data": {
             "initial_state": "¿Cómo está la persiana actualmente?"
           },
@@ -74,12 +74,12 @@
           "description": "Home Assistant no detectó el movimiento esperado a tiempo. Vuelva a intentarlo o introduzca los tiempos de recorrido manualmente.",
           "menu_options": {
             "calibration_retry": "Volver a intentarlo",
-            "manual_times": "Introducir los tiempos de recorrido manualmente"
+            "manual_times": "Establecer manualmente los tiempos de recorrido del motor de la persiana"
           }
         },
         "calibration_complete": {
           "title": "Calibración completada",
-          "description": "¡Calibración de {device_name} completada!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizan para rastrear con precisión la posición de la persiana.\n\nDetección de estado a partir de la calibración:\n- Identidad de estado principal: {primary_status_identity}\n- Comandos principales utilizados: {primary_frames}\n- Identidades secundarias: {secondary_status_identities}\n- Tramas observadas: {observed_frame_count}\n- Motivo de finalización: {calibration_end_reason}\n- Seguimiento de posición: {position_tracking}\n\nSi no se detectó ninguna identidad de recepción/estado, la persiana aún se puede controlar; su posición se estimará entonces en función de los comandos enviados por Home Assistant.",
+          "description": "¡La calibración de {device_name} se ha completado!\n\nTiempos medidos:\n- Tiempo de apertura: {open_time} segundos\n- Tiempo de cierre: {close_time} segundos\n\nEstos tiempos se utilizan para rastrear con precisión la posición de la persiana.\n\nDetección de estado a partir de la calibración:\n- Identidad de estado principal: {primary_status_identity}\n- Comandos principales utilizados: {primary_frames}\n- Identidades secundarias: {secondary_status_identities}\n- Tramas observadas: {observed_frame_count}\n- Motivo de finalización: {calibration_end_reason}\n- Seguimiento de posición: {position_tracking}\n\nSi no se detectó ninguna identidad de recepción/estado, la persiana aún se puede controlar; su posición se estimará entonces en función de los comandos enviados por Home Assistant.",
           "submit": "Hecho"
         },
         "test_motor": {
@@ -94,8 +94,13 @@
           "title": "¿Se movió la persiana?",
           "description": "Identidad de comando {device_id}/{device_enum} probada: brevemente {test_action}, luego detenida.",
           "data": {
-            "motor_moved": "La persiana se movió"
+            "motor_moved_result": "¿Qué sucedió durante la prueba?"
           },
+          "submit": "Continuar"
+        },
+        "wrong_motor_reset_notice": {
+          "title": "Restablecer primero el otro motor",
+          "description": "Aviso: El otro motor, que acaba de reaccionar por error, permanece receptivo incluso después de aumentar la dirección de esta nueva persiana. Por ello, restablézcalo físicamente **de inmediato** (por ejemplo, mediante su propio mando a distancia) antes de volver a iniciar el emparejamiento; de lo contrario, el mismo error puede repetirse.",
           "submit": "Continuar"
         },
         "test_success": {
@@ -104,7 +109,7 @@
           "submit": "Continuar"
         },
         "manual_times": {
-          "title": "Introducir tiempos de recorrido",
+          "title": "Establecer manualmente los tiempos de recorrido del motor de la persiana",
           "description": "Introduzca los tiempos completos de apertura y cierre medidos.",
           "data": {
             "open_time_seconds": "Tiempo de apertura",
@@ -119,7 +124,7 @@
             "edit": "Editar identidades y tiempos de recorrido",
             "test_existing": "Probar comando de dispositivo",
             "developer_tools": "Herramientas de desarrollador",
-            "calibrate": "Calibrar"
+            "calibrate": "Calibrar dispositivo"
           }
         },
         "developer_tools": {
@@ -129,25 +134,25 @@
             "test_open": "Probar: Abrir la persiana",
             "test_close": "Probar: Cerrar la persiana",
             "test_stop": "Probar: Detener la persiana",
-            "discover_status": "Entrenar los comandos de radio de la persiana desde esta persiana en un mando a distancia para mejorar el reconocimiento de la transmisión de comandos de la persiana al pulsar el mando",
+            "discover_status": "Captar las señales de radio del mando a distancia para la persiana",
             "set_position_open": "Establecer posición de la persiana totalmente abierta",
             "set_position_closed": "Establecer posición de la persiana totalmente cerrada",
             "set_position_manual": "Establecer posición de la persiana manualmente",
-            "reset_stick": "Reiniciar la memoria USB / reconectar interfaz serie de la memoria USB",
+            "reset_stick": "Reiniciar la memoria USB / reconectar su interfaz serie",
             "copy_diagnostics": "Copiar el diagnóstico anterior",
-            "teach_motor": "Programar otro dispositivo en el mismo sector (Atención: los datos de motor existentes se sobrescribirán tras este proceso) / Activar el transmisor USB",
+            "teach_motor": "Emparejar una persiana nueva y sobrescribirla con los datos de esta persiana",
             "send_raw_command": "Enviar trama RF sin procesar al dispositivo"
           }
         },
         "status_discovery_choice": {
-          "title": "¿Entrenar comandos de radio desde un mando a distancia?",
+          "title": "¿Captar comandos de radio desde un mando a distancia?",
           "menu_options": {
-            "discover_status": "Entrenar desde el mando a distancia original (recomendado)",
-            "skip_status_discovery": "Omitir - finalizar el emparejamiento sin esto"
+            "discover_status": "captar desde el mando a distancia original (recomendado)",
+            "skip_status_discovery": "omitir - finalizar el emparejamiento sin esto"
           }
         },
         "discover_status": {
-          "title": "Entrenar los comandos de radio de la persiana para esta persiana desde un mando a distancia para mejorar el reconocimiento de la transmisión de comandos de la persiana al pulsar el mando",
+          "title": "Captar señales del mando a distancia",
           "description": "Dispositivo seleccionado: {selected_blind}\nIdentidad de comando/transmisión: {command_identity}\n\nUtilice el mando a distancia original de Schellenberg para este canal de dispositivo después de pulsar Iniciar escucha: pulse ARRIBA, STOP, ABAJO, STOP. Home Assistant escucha durante 45 segundos y agrupa cada ID de dispositivo, valor enum, comando y marca de tiempo recibidos.",
           "submit": "Iniciar escucha"
         },
@@ -165,7 +170,7 @@
           "submit": "Confirmar posición"
         },
         "reset_stick": {
-          "title": "Reiniciar la memoria USB / reconectar interfaz serie de la memoria USB"
+          "title": "Reiniciar la memoria USB / reconectar su interfaz serie"
         },
         "copy_diagnostics": {
           "title": "Copiar el diagnóstico anterior",
@@ -177,7 +182,7 @@
         },
         "edit": {
           "title": "Editar ajustes del dispositivo",
-          "description": "Cambiar las identidades de protocolo no cambia el ID de entidad único en Home Assistant. La identidad de estado principal controla el seguimiento de posición. Introduzca identidades adicionales como ID de dispositivo/enum, separadas por una o varias líneas o por una o varias comas. Las identidades secundarias se emparejan con fines de diagnóstico, pero no cambian la posición. Deje ambos campos de estado principal en blanco si se desconocen; la identidad de transmisión no se utilizará como estado a menos que se haya observado realmente o la introduzca manualmente.",
+          "description": "Cambiar las identidades de protocolo no cambia el ID de entidad único en Home Assistant. La identidad de estado principal controla el seguimiento de posición. Si es necesario, introduzca identidades adicionales como ID de dispositivo/enum, separadas por una o varias líneas o por una o varias comas. Las identidades secundarias se emparejan con fines de diagnóstico, pero no cambian la posición. Deje ambos campos de estado principal en blanco si se desconocen; la identidad de transmisión no se utilizará como estado a menos que se haya observado realmente o la introduzca manualmente.",
           "data": {
             "device_name": "Nombre",
             "device_id": "ID de dispositivo de comando",
@@ -192,8 +197,8 @@
           "submit": "Guardar"
         },
         "teach_motor": {
-          "title": "Programar otro dispositivo en el mismo sector (Atención: los datos de motor existentes se sobrescribirán tras este proceso) / Activar el transmisor USB",
-          "description": "Dispositivo seleccionado: {selected_blind}\nEnum de comando: {command_device_id}/{command_enum}\n\nOpcional: Seleccione antes de enviar el canal del dispositivo en un mando a distancia original ya emparejado, pulse su botón de programación hasta que el LED del canal parpadee y, a continuación, pulse Stop. Home Assistant envía el comando de aprendizaje 60, espera la confirmación ACK de la memoria, envía el comando de finalización 40 en el mismo valor enum y realiza una breve prueba de Arriba/Stop en el dispositivo. Las confirmaciones ACK de la memoria no demuestran que el dispositivo haya aprendido el código de aprendizaje enum 60 ni que se haya movido. No repita el comando 60 fuera de la secuencia de programación del motor; también puede cambiar la dirección de giro.",
+          "title": "Emparejar una persiana nueva y sobrescribirla con los datos de esta persiana",
+          "description": "Dispositivo seleccionado: {selected_blind}\nEnum de comando: {command_device_id}/{command_enum}\n\nAtención: los datos de motor existentes se sobrescribirán tras este proceso.\n\nOpcional: Seleccione antes de enviar el canal del dispositivo en un mando a distancia original ya emparejado, pulse su botón de programación hasta que el LED del canal parpadee y, a continuación, pulse Stop. Home Assistant envía el comando de aprendizaje 60, espera la confirmación ACK de la memoria, envía el comando de finalización 40 en el mismo valor enum y realiza una breve prueba de Arriba/Stop en el dispositivo. Las confirmaciones ACK de la memoria no demuestran que el dispositivo haya aprendido el código de aprendizaje enum 60 ni que se haya movido. No repita el comando 60 fuera de la secuencia de programación del motor; también puede cambiar la dirección de giro.",
           "submit": "Enviar comando de aprendizaje al dispositivo y probar"
         },
         "send_raw_command": {
@@ -213,6 +218,7 @@
         "already_configured": "Este dispositivo ya está configurado.",
         "initial_state_required": "Seleccione si la persiana está actualmente totalmente abierta o totalmente cerrada antes de continuar.",
         "test_direction_required": "Seleccione qué dirección de movimiento de la persiana se debe probar antes de continuar.",
+        "motor_moved_result_required": "Seleccione qué sucedió durante la prueba antes de continuar.",
         "calibration_timeout": "El temporizador de calibración ha caducado. La persiana tardó más de 2 minutos en realizar el movimiento. Compruebe el dispositivo e inténtelo de nuevo.",
         "calibration_start_timeout": "Tiempo de espera agotado esperando a que la persiana se mueva. Asegúrese de que el dispositivo esté correctamente conectado e inténtelo de nuevo.",
         "unknown": "Se produjo un error inesperado durante la calibración. Por favor, inténtelo de nuevo.",
@@ -229,6 +235,7 @@
         "pairing_interrupted_by_disconnect": "El emparejamiento se interrumpió porque la conexión con el stick USB se reinició o se recargó mientras se esperaba una respuesta (por ejemplo, al añadir o editar otra persiana, o al reiniciar Home Assistant). Por favor, inténtelo de nuevo.",
         "pairing_failed": "Error en el emparejamiento del dispositivo.",
         "reconfigure_successful": "La configuración del dispositivo se ha actualizado correctamente",
+        "calibration_successful": "La configuración se ha realizado correctamente.",
         "command_test_successful": "La prueba de comando del motor se ha realizado correctamente.",
         "device_not_found": "No se ha podido encontrar el dispositivo seleccionado. Inicie este paso de nuevo."
       }
@@ -263,6 +270,14 @@
         "open": "Abrir",
         "close": "Cerrar"
       }
+    },
+    "motor_moved_result": {
+      "options": {
+        "unselected": "Por favor, seleccione",
+        "yes": "Sí, la persiana se movió",
+        "no": "No, la persiana no se movió",
+        "wrong_motor": "Ninguna persiana se movió, o se movieron dos persianas"
+      }
     }
   },
   "entity": {
@@ -296,8 +311,8 @@
   },
   "services": {
     "test_command": {
-      "name": "Comando de prueba para el dispositivo",
-      "description": "Envía Arriba, Abajo o Stop a un dispositivo sin crear una persiana."
+      "name": "Comando de prueba de persiana",
+      "description": "Envía abrir, cerrar o detener a un enum de dispositivo sin crear una persiana."
     }
   }
 }

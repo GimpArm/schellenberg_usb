@@ -126,9 +126,6 @@ SIGNAL_DEVICE_EVENT = f"{DOMAIN}_device_event"
 # options_flow_calibration.py's movement-wait listeners still see the
 # device's real status frames during that single active capture window.
 SIGNAL_DEVICE_EVENT_CAPTURE = f"{DOMAIN}_device_event_capture"
-SIGNAL_DEVICE_PAIRED = f"{DOMAIN}_device_paired"
-SIGNAL_PAIRING_STARTED = f"{DOMAIN}_pairing_started"
-SIGNAL_PAIRING_TIMEOUT = f"{DOMAIN}_pairing_timeout"
 SIGNAL_STICK_STATUS_UPDATED = f"{DOMAIN}_stick_status_updated"
 SIGNAL_CALIBRATION_COMPLETED = f"{DOMAIN}_calibration_completed"
 SIGNAL_MANUAL_POSITION_SYNC = f"{DOMAIN}_manual_position_sync"
@@ -241,11 +238,19 @@ STOP_COMMAND_EXTRA_RESENDS = 2
 # window that cost it. Not tied to STOP_COMMAND_LATENCY_SECONDS - that
 # figure models a *delay already on the wire* (contention, transmit time),
 # this is a deliberately-introduced gap on an otherwise-idle transmitter,
-# a different thing being measured for a different reason. Short enough
-# that the blind has travelled only a negligible, sub-percent distance
-# past where the primary stop already landed it by the time the resend
-# goes out.
-STOP_COMMAND_RESEND_DELAY_SECONDS = 0.25
+# a different thing being measured for a different reason.
+#
+# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
+# direction, after being walked through the real measured confirmation-
+# echo timing: 7 samples of this blind's own primary-identity echo, all
+# 1.641-1.689s after the primary write, meaning even 0.9s still elapses
+# well before a real confirmation could ever arrive - raising this was
+# never going to let a resend observe one first. The resend's own
+# distance cost scales with this delay (the blind travels further past
+# where the primary stop already landed it before each extra frame goes
+# out), accepted here as a known, explicit trade-off rather than a
+# measured benefit.
+STOP_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # Total time _async_position_update_loop()'s auto-stop-at-target branch
 # keeps retrying control_blind_stop() for one target-reached episode
@@ -415,18 +420,20 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # tied to STOP_COMMAND_LATENCY_SECONDS, which applies here unchanged.
 # Kept equal to STOP_COMMAND_RESEND_DELAY_SECONDS deliberately: both
 # model the same kind of deliberately-introduced gap on an otherwise-idle
-# transmitter. Also still worth keeping short for the one case
-# MOVE_COMMAND_EXTRA_RESENDS's own comment above says this module cannot
-# actually close - an externally-originated (physical remote/Gurtwickler)
-# stop racing this resend has no floor to stay safely under, so the best
-# this delay can do for that case is simply not stay open any longer than
-# it has to; lengthening it would only widen that window for no offsetting
-# benefit, since the failure this resend targets (a single lost frame)
-# does not get any likelier to have happened the longer this waits.
+# transmitter.
 # No longer also stop_lead_percent's own baseline in cover.py (together
 # with MOVE_COMMAND_EXTRA_RESENDS above) - see that constant's own
 # comment for why.
-MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
+#
+# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
+# direction, mirroring the same change and the same reasoning on the stop
+# side above - see STOP_COMMAND_RESEND_DELAY_SECONDS's own comment for
+# the measured confirmation-echo timing this was weighed against). The
+# previously-documented case this module cannot actually close - an
+# externally-originated (physical remote/Gurtwickler) stop racing this
+# resend - widens proportionally with this delay, same trade-off as the
+# stop side, accepted here the same way.
+MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # How close cover.py's own elapsed-time position estimate must already be
 # to the edge it was heading toward (0 for closing, 100 for opening), AND
@@ -478,25 +485,6 @@ MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.25
 # far below any realistic deliberate stop position reached from a
 # non-edge start.
 NEAR_END_STOP_SNAP_TOLERANCE_PERCENT = 5
-
-# How long cover.py's own optimistic guess from a secondary identity's
-# frame (_handle_secondary_activity) is allowed to stand before it is
-# withdrawn if nothing ever confirms it. This exists because decoding a
-# secondary frame's own command byte to learn its real direction has been
-# tried twice on real Gurtwickler-remote hardware and failed both times
-# (see commits e911236 and 1db9e69) - so that byte is deliberately never
-# inspected at all any more. Instead, the guess is corrected for free the
-# moment the primary status identity's own echo of the same physical move
-# arrives - _handle_event()'s STARTED_MOVING branch overwrites is_opening/
-# is_closing with the real, reliably decoded direction and starts real
-# tracking, exactly as it already does for any other externally-triggered
-# move. This timeout only covers the case that echo never arrives at all
-# (the same real-world RF loss this project's own debug logs have shown
-# happens occasionally) - long enough that a genuinely-landing-late echo
-# is not preempted, short enough that a wrong guess with nothing left to
-# correct it does not stand for long. Tune here only; cover.py has no
-# literal of its own.
-OPTIMISTIC_SECONDARY_MOVE_TIMEOUT_SECONDS = 5.0
 
 # Device verification
 VERIFY_TIMEOUT = 5  # seconds to wait for verification response
@@ -592,7 +580,8 @@ CONF_OPEN_TIME = "open_time"  # Time it takes to open (up) in seconds
 CONF_CLOSE_TIME = "close_time"  # Time it takes to close (down) in seconds
 # The blind's actual physical position (0 closed / 100 open) once calibration
 # - which now lets the person choose whether open or close is driven first,
-# see options_flow_calibration.py's calibration_close step - has finished.
+# see options_flow_calibration.py's calibration_initial_state step - has
+# finished.
 # Only ever 0 or 100: calibration always ends at whichever end stop the
 # second/last leg drove to. Set on every subentry created by a fresh pairing
 # regardless of which calibration_method_choice option was picked (Issue #78

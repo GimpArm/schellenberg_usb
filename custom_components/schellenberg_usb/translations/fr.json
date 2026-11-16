@@ -45,15 +45,15 @@
           }
         },
         "calibration_method_choice": {
-          "title": "Définir les durées de course",
+          "title": "Définir les durées de course du moteur du volet",
           "menu_options": {
             "test_motor": "Calibrer en déplaçant le volet",
-            "manual_times": "Saisir les durées de course manuellement"
+            "manual_times": "Définir manuellement les durées de course du moteur du volet"
           }
         },
-        "calibration_close": {
+        "calibration_initial_state": {
           "title": "Avant de commencer",
-          "description": "Pour calibrer {device_name} avec précision, Home Assistant doit savoir quelle direction de mouvement du volet doit être calibrée en premier.",
+          "description": "Pour calibrer {device_name} avec précision, Home Assistant doit savoir quelle direction de mouvement du volet doit être calibrée en premier.{recalibration_notice}",
           "data": {
             "initial_state": "Quel est l'état actuel du volet ?"
           },
@@ -74,12 +74,12 @@
           "description": "Home Assistant n'a pas détecté le mouvement attendu à temps. Réessayez, ou saisissez les durées de course manuellement.",
           "menu_options": {
             "calibration_retry": "Réessayer",
-            "manual_times": "Saisir les durées de course manuellement"
+            "manual_times": "Définir manuellement les durées de course du moteur du volet"
           }
         },
         "calibration_complete": {
           "title": "Calibration terminée",
-          "description": "Calibration de {device_name} terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
+          "description": "La calibration de {device_name} est terminée !\n\nTemps mesurés :\n- Temps d'ouverture : {open_time} secondes\n- Temps de fermeture : {close_time} secondes\n\nCes temps sont utilisés pour suivre précisément la position du volet.\n\nDétection de statut à partir de la calibration :\n- Identité de statut principale : {primary_status_identity}\n- Commandes principales utilisées : {primary_frames}\n- Identités secondaires : {secondary_status_identities}\n- Trames observées : {observed_frame_count}\n- Motif de fin : {calibration_end_reason}\n- Suivi de position : {position_tracking}\n\nSi aucune identité de réception/statut n'a été détectée, le volet peut toujours être contrôlé ; sa position sera alors estimée sur la base des commandes envoyées par Home Assistant.",
           "submit": "Terminé"
         },
         "test_motor": {
@@ -94,8 +94,13 @@
           "title": "Le volet a-t-il bougé ?",
           "description": "Identité de commande {device_id}/{device_enum} testée : brièvement {test_action}, puis arrêtée.",
           "data": {
-            "motor_moved": "Le volet a bougé"
+            "motor_moved_result": "Que s'est-il passé pendant le test ?"
           },
+          "submit": "Continuer"
+        },
+        "wrong_motor_reset_notice": {
+          "title": "Réinitialiser d'abord l'autre moteur",
+          "description": "Remarque : l'autre moteur, qui vient de réagir par erreur, reste réceptif même après l'augmentation de l'adresse de ce nouveau volet. Réinitialisez-le donc physiquement **tout de suite** (par exemple via sa propre télécommande) avant de relancer l'appairage - sinon la même erreur peut se reproduire.",
           "submit": "Continuer"
         },
         "test_success": {
@@ -104,7 +109,7 @@
           "submit": "Continuer"
         },
         "manual_times": {
-          "title": "Saisir les durées de course",
+          "title": "Définir manuellement les durées de course du moteur du volet",
           "description": "Saisissez les durées complètes d'ouverture et de fermeture mesurées.",
           "data": {
             "open_time_seconds": "Durée d'ouverture",
@@ -119,7 +124,7 @@
             "edit": "Modifier les identités et durées de course",
             "test_existing": "Tester la commande de l'appareil",
             "developer_tools": "Outils de développement",
-            "calibrate": "Calibrer"
+            "calibrate": "Calibrer l'appareil"
           }
         },
         "developer_tools": {
@@ -129,25 +134,25 @@
             "test_open": "Tester : Ouvrir le volet",
             "test_close": "Tester : Fermer le volet",
             "test_stop": "Tester : Arrêter le volet",
-            "discover_status": "Apprendre les commandes radio du volet à partir de ce volet sur une télécommande pour une meilleure reconnaissance de la transmission des commandes du volet lors de l'appui sur la télécommande",
+            "discover_status": "Capter les signaux radio de la télécommande pour le volet",
             "set_position_open": "Définir la position du volet complètement ouverte",
             "set_position_closed": "Définir la position du volet complètement fermée",
             "set_position_manual": "Définir la position du volet manuellement",
-            "reset_stick": "Réinitialiser la clé USB / reconnecter le port série de la clé USB",
+            "reset_stick": "Réinitialiser la clé USB / reconnecter son port série",
             "copy_diagnostics": "Copier le diagnostic ci-dessus",
-            "teach_motor": "Apprendre un autre appareil dans le même secteur (Attention : les données moteur existantes seront écrasées après cette opération) / Activer l'émetteur USB",
+            "teach_motor": "Coupler un volet neuf et l'écraser avec les données de ce volet",
             "send_raw_command": "Envoyer une trame radio brute à l'appareil"
           }
         },
         "status_discovery_choice": {
-          "title": "Apprendre les commandes radio depuis une télécommande ?",
+          "title": "Capter les commandes radio depuis une télécommande ?",
           "menu_options": {
-            "discover_status": "Apprendre depuis la télécommande d'origine (recommandé)",
-            "skip_status_discovery": "Ignorer - terminer le couplage sans cela"
+            "discover_status": "capter depuis la télécommande d'origine (recommandé)",
+            "skip_status_discovery": "ignorer - terminer le couplage sans cela"
           }
         },
         "discover_status": {
-          "title": "Apprendre les commandes radio du volet pour ce volet à partir d'une télécommande pour une meilleure reconnaissance de la transmission des commandes du volet lors de l'appui sur la télécommande",
+          "title": "Capter les signaux de la télécommande",
           "description": "Appareil sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_identity}\n\nAprès avoir appuyé sur Démarrer l'écoute, utilisez la télécommande Schellenberg d'origine pour ce canal d'appareil : appuyez sur HAUT, STOP, BAS, STOP. Home Assistant écoute pendant 45 secondes et regroupe chaque ID d'appareil, valeur d'énumération, commande et horodatage reçus.",
           "submit": "Démarrer l'écoute"
         },
@@ -165,7 +170,7 @@
           "submit": "Confirmer la position"
         },
         "reset_stick": {
-          "title": "Réinitialiser la clé USB / reconnecter le port série de la clé USB"
+          "title": "Réinitialiser la clé USB / reconnecter son port série"
         },
         "copy_diagnostics": {
           "title": "Copier le diagnostic ci-dessus",
@@ -177,7 +182,7 @@
         },
         "edit": {
           "title": "Modifier les paramètres de l'appareil",
-          "description": "La modification des identités de protocole ne modifie pas l'ID unique de l'entité dans Home Assistant. L'identité de statut principale pilote le suivi de position. Saisissez les identités supplémentaires sous la forme ID d'appareil/énumération, séparées par une ou plusieurs lignes, ou par une ou plusieurs virgules. Les identités secondaires sont comparées à des fins de diagnostic, mais ne modifient pas la position. Laissez les deux champs de statut principal vides s'ils sont inconnus ; l'identité de transmission ne sera pas utilisée comme statut sauf si elle a été réellement observée ou si vous la saisissez manuellement.",
+          "description": "La modification des identités de protocole ne modifie pas l'ID unique de l'entité dans Home Assistant. L'identité de statut principale pilote le suivi de position. Si nécessaire, saisissez les identités supplémentaires sous la forme ID d'appareil/énumération, séparées par une ou plusieurs lignes, ou par une ou plusieurs virgules. Les identités secondaires sont comparées à des fins de diagnostic, mais ne modifient pas la position. Laissez les deux champs de statut principal vides s'ils sont inconnus ; l'identité de transmission ne sera pas utilisée comme statut sauf si elle a été réellement observée ou si vous la saisissez manuellement.",
           "data": {
             "device_name": "Nom",
             "device_id": "ID de l'appareil de commande",
@@ -192,8 +197,8 @@
           "submit": "Enregistrer"
         },
         "teach_motor": {
-          "title": "Apprendre un autre appareil dans le même secteur (Attention : les données moteur existantes seront écrasées après cette opération) / Activer l'émetteur USB",
-          "description": "Appareil sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_device_id}/{command_enum}\n\nFacultatif : Avant d'envoyer, sélectionnez le canal de l'appareil sur une télécommande d'origine déjà appairée, appuyez sur son bouton de programmation jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop. Home Assistant envoie la commande d'apprentissage 60, attend l'accusé de réception ACK de la clé, envoie la commande de fin 40 sur la même valeur d'énumération et effectue ensuite un court test Haut/Stop sur l'appareil. Les accusés de réception ACK de la clé ne prouvent pas que l'appareil a appris le code d'apprentissage énumération 60 ou qu'il a bougé. Ne répétez pas la commande 60 en dehors de la séquence de programmation du moteur ; elle peut également modifier le sens de rotation.",
+          "title": "Coupler un volet neuf et l'écraser avec les données de ce volet",
+          "description": "Appareil sélectionné : {selected_blind}\nIdentité de commande/transmission : {command_device_id}/{command_enum}\n\nAttention : les données moteur existantes seront écrasées après cette opération.\n\nFacultatif : Avant d'envoyer, sélectionnez le canal de l'appareil sur une télécommande d'origine déjà appairée, appuyez sur son bouton de programmation jusqu'à ce que la LED du canal clignote, puis appuyez sur Stop. Home Assistant envoie la commande d'apprentissage 60, attend l'accusé de réception ACK de la clé, envoie la commande de fin 40 sur la même valeur d'énumération et effectue ensuite un court test Haut/Stop sur l'appareil. Les accusés de réception ACK de la clé ne prouvent pas que l'appareil a appris le code d'apprentissage énumération 60 ou qu'il a bougé. Ne répétez pas la commande 60 en dehors de la séquence de programmation du moteur ; elle peut également modifier le sens de rotation.",
           "submit": "Envoyer la commande d'apprentissage à l'appareil et tester"
         },
         "send_raw_command": {
@@ -213,6 +218,7 @@
         "already_configured": "Cet appareil est déjà configuré.",
         "initial_state_required": "Veuillez indiquer si le volet est actuellement complètement ouvert ou complètement fermé avant de continuer.",
         "test_direction_required": "Veuillez indiquer quelle direction de mouvement du volet doit être testée avant de continuer.",
+        "motor_moved_result_required": "Veuillez indiquer ce qui s'est passé pendant le test avant de continuer.",
         "calibration_timeout": "Le minuteur de calibration a expiré. Le volet a mis plus de 2 minutes pour effectuer le mouvement. Veuillez vérifier l'appareil et réessayer.",
         "calibration_start_timeout": "Délai d'attente dépassé en attendant que le volet commence à bouger. Veuillez vous assurer que l'appareil est correctement connecté et réessayer.",
         "unknown": "Une erreur inattendue s'est produite pendant la calibration. Veuillez réessayer.",
@@ -229,6 +235,7 @@
         "pairing_interrupted_by_disconnect": "L'appairage a été interrompu car la connexion à la clé USB a été réinitialisée ou rechargée en attendant une réponse (par exemple, par l'ajout ou la modification d'un autre volet, ou par un redémarrage de Home Assistant). Veuillez réessayer.",
         "pairing_failed": "Échec de l'appairage de l'appareil.",
         "reconfigure_successful": "La configuration de l'appareil a été mise à jour avec succès",
+        "calibration_successful": "La configuration a réussi.",
         "command_test_successful": "Le test de commande du moteur a réussi.",
         "device_not_found": "L'appareil sélectionné est introuvable. Veuillez redémarrer cette étape."
       }
@@ -263,6 +270,14 @@
         "open": "Ouvrir",
         "close": "Fermer"
       }
+    },
+    "motor_moved_result": {
+      "options": {
+        "unselected": "Veuillez sélectionner",
+        "yes": "Oui, le volet a bougé",
+        "no": "Non, le volet n'a pas bougé",
+        "wrong_motor": "Aucun volet n'a bougé, ou deux volets ont bougé"
+      }
     }
   },
   "entity": {
@@ -296,8 +311,8 @@
   },
   "services": {
     "test_command": {
-      "name": "Commande de test pour l'appareil",
-      "description": "Envoie Haut, Bas ou Stop à un appareil sans créer de volet."
+      "name": "Commande de test de volet",
+      "description": "Envoie ouverture, fermeture ou arrêt à une énumération d'appareil sans créer de volet."
     }
   }
 }

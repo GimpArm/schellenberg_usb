@@ -1,6 +1,6 @@
 [project]
 name = "schellenberg_usb"
-version = "v1.4.0"
+version = "v1.5.0"
 readme = "README.md"
 # Floor for the dev/CI toolchain below (uv, mypy, pytest-homeassistant-
 # custom-component) - unrelated to the *integration's* own minimum
@@ -42,12 +42,12 @@ dev = [
 
 test = [
     "croniter~=6.0.0",
-    "watchdog~=6.0.0",
+    "watchdog~=7.1.0",
     "mock-open~=1.4.0",
     "polyfactory~=3.1.0",
     "PyYAML~=6.0.2",
     # Need specific versions
-    "pytest-homeassistant-custom-component==0.13.371",
+    "pytest-homeassistant-custom-component==0.13.375",
     # Versions handled by pytest-homeassistant-custom-component
     "freezegun",
     "pytest",
@@ -58,8 +58,8 @@ test = [
 lint = [
     "mypy~=2.4.0",
     "pre-commit~=4.7.0",
-    "ruff~=0.17.1",
-    "types-PyYAML~=6.0.12.20261103",
+    "ruff~=0.17.4",
+    "types-PyYAML~=6.0.12.20260906",
 ]
 
 
