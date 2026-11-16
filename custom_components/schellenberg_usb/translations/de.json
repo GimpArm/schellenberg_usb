@@ -210,9 +210,6 @@
           "submit": "Rohdaten senden"
         }
       },
-      "create_entry": {
-        "default": "Die Konfiguration wurde erstellt."
-      },
       "error": {
         "required": "Dieses Feld ist erforderlich.",
         "invalid_device_id": "Die Geräte-ID muss genau 6 Hexadezimalzeichen enthalten.",

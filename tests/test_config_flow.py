@@ -3721,34 +3721,6 @@ def test_status_discovery_choice_matches_discover_status_capture_wording() -> No
     )
 
 
-def _load_create_entry(language: str) -> dict[str, Any]:
-    integration_dir = (
-        Path(__file__).parent.parent / "custom_components" / "schellenberg_usb"
-    )
-    path = (
-        integration_dir / "strings.json"
-        if language == "strings"
-        else integration_dir / "translations" / f"{language}.json"
-    )
-    with path.open(encoding="utf-8") as handle:
-        doc = json.load(handle)
-    return cast(dict[str, Any], doc["config_subentries"]["blind"]["create_entry"])
-
-
-def test_blind_subentry_create_entry_has_its_own_confirmation_text() -> None:
-    """Previously absent entirely, so Home Assistant fell back to its own
-    generic create-entry text after a blind subentry was created - with
-    nothing on screen naming what had actually just happened, which is
-    what made this confusing after a first calibration. Covers the
-    English strings.json source and all 4 translations; the German
-    wording is the person's own exact words, not a paraphrase.
-    """
-    for language in ("strings", "en", "de", "es", "fr"):
-        assert _load_create_entry(language)["default"], language
-
-    assert _load_create_entry("de")["default"] == "Die Konfiguration wurde erstellt."
-
-
 def _load_calibration_complete_description(language: str) -> str:
     integration_dir = (
         Path(__file__).parent.parent / "custom_components" / "schellenberg_usb"

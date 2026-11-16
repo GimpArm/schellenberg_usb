@@ -210,9 +210,6 @@
           "submit": "Enviar datos sin procesar"
         }
       },
-      "create_entry": {
-        "default": "La configuración se ha creado."
-      },
       "error": {
         "required": "Este campo es obligatorio.",
         "invalid_device_id": "El ID del dispositivo debe contener exactamente 6 caracteres hexadecimales.",

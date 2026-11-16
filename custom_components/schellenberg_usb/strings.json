@@ -210,9 +210,6 @@
           "submit": "Send raw data"
         }
       },
-      "create_entry": {
-        "default": "The configuration has been created."
-      },
       "error": {
         "required": "This field is required.",
         "invalid_device_id": "Device ID must contain exactly 6 hexadecimal characters.",

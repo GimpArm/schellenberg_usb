@@ -210,9 +210,6 @@
           "submit": "Envoyer les données brutes"
         }
       },
-      "create_entry": {
-        "default": "La configuration a été créée."
-      },
       "error": {
         "required": "Ce champ est obligatoire.",
         "invalid_device_id": "L'ID de l'appareil doit contenir exactement 6 caractères hexadécimaux.",

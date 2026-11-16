@@ -17,6 +17,9 @@ from custom_components.schellenberg_usb.const import (
     STATUS_IDENTITY_SOURCE_UNKNOWN,
 )
 from custom_components.schellenberg_usb.identities import (
+    _CLOSING_LEG_PHASES,
+    _OPENING_LEG_PHASES,
+    _PHASE_CONFIRMING_COMMANDS,
     normalize_status_identities,
     normalize_status_identity,
     parse_status_identities_text,
@@ -791,6 +794,31 @@ def test_summarize_status_discovery_frames_without_a_phase_key_is_unaffected() -
 
     assert result["primary"]["device_id"] == "5D3E7C"
     assert result["primary"]["phase_confirmed_frame_count"] == 0
+
+
+def test_leg_phase_sets_fully_partition_phase_confirming_commands() -> None:
+    """_OPENING_LEG_PHASES and _CLOSING_LEG_PHASES are hand-maintained
+    alongside _PHASE_CONFIRMING_COMMANDS, with nothing in the production
+    code enforcing either half of this on its own (flagged by independent
+    review of the per-leg exclusion-exception commit). The two halves fail
+    in different directions, so both are checked explicitly rather than
+    trusting the three literals to keep agreeing by eye as they evolve:
+
+    - A phase added to _PHASE_CONFIRMING_COMMANDS but left out of both leg
+      sets fails *safe*: summarize_status_discovery_frames's own per-leg
+      exception (see its docstring) never sees evidence from that phase,
+      so an excluded identity that only ever phase-confirms there simply
+      stays excluded - confirmed during review via a monkeypatched extra
+      phase key, not merely asserted here.
+    - A phase accidentally added to *both* leg sets would fail the other
+      way: a single confirming frame could then satisfy both per-leg
+      counters at once, exactly the single-leg coincidence the
+      opening/closing split exists to rule out in the first place.
+    """
+    all_phases = set(_PHASE_CONFIRMING_COMMANDS)
+
+    assert all_phases == _OPENING_LEG_PHASES | _CLOSING_LEG_PHASES
+    assert _OPENING_LEG_PHASES.isdisjoint(_CLOSING_LEG_PHASES)
 
 
 # ---------------------------------------------------------------------------
