@@ -734,12 +734,10 @@ async def test_control_blind_with_retry_sends_two_extra_resends_after_being_acce
 
     Mirrors test_control_blind_stop_sends_two_extra_resends_after_being_
     accepted above for the move side - see MOVE_COMMAND_EXTRA_RESENDS's
-    own comment in const.py for why this exists at all (the same zero-
-    end-to-end-delivery-confirmation gap as the stop side, requested
-    directly once a user pointed out the stop-only fix left it open for
-    open/close), the one way it is not quite as unconditionally safe as
-    that side's version, and why the count is two rather than the original
-    one (raised 2026-11-07, project owner's own direct decision).
+    own comment in const.py for why this exists at all (the same
+    zero-end-to-end-delivery-confirmation gap as the stop side), and for
+    the one way it is not quite as unconditionally safe as that side's
+    version.
 
     These two resends now fire from a detached background task spawned
     the moment the primary write is accepted (see
@@ -757,12 +755,9 @@ async def test_control_blind_with_retry_sends_two_extra_resends_after_being_acce
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
         # A bare `return None` never actually yields to the event loop -
         # see test_control_blind_with_retry_retries_on_busy_with_no_
-        # attempt_limit's own comment on this exact pitfall. The stop
-        # side's own version of this test originally made exactly this
-        # mistake and was caught by an independent review before it ever
-        # shipped (it would have errored out of _run_until below, never
-        # reaching this test's real assertions) - written correctly from
-        # the start here instead.
+        # attempt_limit's own comment on this exact pitfall; that would
+        # error out of _run_until below, never reaching this test's real
+        # assertions.
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
@@ -805,10 +800,8 @@ async def test_control_blind_with_retry_skips_the_resend_once_a_real_move_echo_a
     still passes unchanged (asserts all three writes), so this is
     additive, not a replacement.
 
-    Project owner's own direct request (2026-11-14), mirroring the stop
-    side's existing precedent, explicitly also asking that - absent such
-    an echo - both resends still fire regardless; that unchanged path is
-    exactly what the sibling test above already covers.
+    Absent such an echo, both resends still fire regardless; that
+    unchanged path is exactly what the sibling test above already covers.
     """
     connected_api.register_entity("ABCDEF", "10", "Test Blind")
     real_sleep = asyncio.sleep
@@ -876,23 +869,17 @@ async def test_control_blind_with_retry_resend_ignores_echo_for_opposite_directi
 async def test_control_blind_with_retry_returns_before_its_own_resends_finish(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression (reported 2026-11-08): control_blind_with_retry() must
-    return True the moment its primary write is accepted, not only after
+    """Regression: control_blind_with_retry() must return True the
+    moment its primary write is accepted, not only after
     MOVE_COMMAND_EXTRA_RESENDS' own resends as well.
 
-    Real-world report: a blind driven fully open then fully closed landed
-    on 92%/4% instead of 100%/0%, and the dashboard was separately
-    reported as less responsive than before MOVE_COMMAND_EXTRA_RESENDS
-    existed. Traced to control_blind_with_retry() previously blocking its
-    own return for an extra MOVE_COMMAND_EXTRA_RESENDS *
-    MOVE_COMMAND_RESEND_DELAY_SECONDS seconds after the primary write was
-    already accepted - and async_open_cover()/async_close_cover() (cover.py)
-    only stamp _move_start_time and start position tracking once this call
-    returns, so that extra wait pushed back the very baseline the whole
-    move's own elapsed-time tracking measures from, confirmed by diffing
-    against v1.2.0 (from before this resend feature existed), where this
-    same call returned immediately on accept. See this fix's own
-    CHANGELOG entry for the full chain.
+    async_open_cover()/async_close_cover() (cover.py) stamp
+    _move_start_time and start position tracking only once this call
+    returns, so blocking that return for an extra
+    MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS
+    seconds after the primary write is already accepted would push back
+    the very baseline the whole move's own elapsed-time tracking
+    measures from - throwing off every position estimate for the move.
 
     Uses a real (small) MOVE_COMMAND_RESEND_DELAY_SECONDS rather than the
     sibling tests' own asyncio.sleep monkeypatch, specifically so elapsed
@@ -933,13 +920,12 @@ async def test_control_blind_with_retry_logs_the_transmitter_wait_before_writing
     """The new log line must report a real, measured wait, not a fixed
     ~0s regardless of what actually happened.
 
-    Added directly from a real log where a blind's own reported
-    overshoot past its target traced back to exactly this wait - time
-    spent queued behind another blind's own transmission before this
-    call's primary write could go out at all - previously only
-    reconstructable by hand-diffing two separate, unrelated log lines
-    rather than visible on its own. Mirrors test_control_blind_stop_
-    logs_the_transmitter_wait_before_writing below for the stop side.
+    Time spent queued behind another blind's own transmission before
+    this call's primary write can go out at all directly affects the
+    blind's final position, so it needs to be visible on its own rather
+    than only reconstructable by hand-diffing separate log lines.
+    Mirrors test_control_blind_stop_logs_the_transmitter_wait_before_
+    writing below for the stop side.
 
     Resend disabled - irrelevant to this log line, which fires once,
     before the primary write, and disabling it keeps this test from
@@ -988,18 +974,12 @@ async def test_control_blind_with_retry_logs_exactly_once_despite_a_busy_bounce(
     """A "tE" busy bounce before eventual acceptance must produce exactly
     one log line, not one per attempt.
 
-    Independent review of the sibling test above found that the log it
-    covers originally sat inside the retry loop itself - before the write
-    on every iteration that reached one, not only the one that ultimately
-    succeeded - so a busy bounce (exactly the real-world contention this
-    diagnostic exists to surface, see the six-blind log cited in
-    CHANGELOG.md) could log once per attempt, with a growing wait each
-    time, for what the CHANGELOG already described as a single logical
-    call. Fixed by snapshotting the wait into a local right after the
-    write that is confirmed accepted, and only emitting the log once
-    self._move_ack_result actually reads True for that same attempt. This
-    drives a genuine "tE"-then-accept sequence - not a mocked stand-in -
-    and confirms exactly one line comes out despite two real writes.
+    The log is emitted only once self._move_ack_result actually reads
+    True for a given attempt, by snapshotting the wait into a local
+    right after the write that is confirmed accepted - not from inside
+    the retry loop on every iteration. This drives a genuine
+    "tE"-then-accept sequence - not a mocked stand-in - and confirms
+    exactly one line comes out despite two real writes.
     """
     real_sleep = asyncio.sleep
 
@@ -1100,31 +1080,21 @@ async def test_control_blind_with_retry_still_cancellable_after_its_own_return(
     rather than control_blind_with_retry()'s own `finally` - and only then
     calls cancel_pending_move().
 
-    This test previously awaited control_blind_with_retry() via a
-    separate asyncio.ensure_future() Task and then awaited *that* Task -
-    which an independent review's own standalone asyncio reproduction
-    caught adding its own extra event-loop hop beyond what the detached
-    resend task's own eager start already needed to reach, and resume
-    from, its own first asyncio.sleep(): by the time anything awaiting a
-    Task can observe that Task as done, the eagerly-started resend task
-    had, every time, already had its own turn first and sent its first
-    resend - so the strongest claim that structure could actually prove
-    was that a cancellation lands by the *second* resend, not that none
-    escapes at all. Fixed here, not just documented: control_blind_with_
-    retry() is now awaited directly - a plain coroutine, never wrapped in
-    its own Task - so this test resumes in the exact same tick that call
-    itself returns in, with no such hop to let the resend task sneak in
-    ahead of it. (The ack is still delivered concurrently, by a small
-    helper that does need its own Task, since something has to run while
-    the main call sits parked on the ack-wait - but it is *that* Task,
-    not the call this test actually cares about, and awaiting an
+    control_blind_with_retry() is awaited directly here - a plain
+    coroutine, never wrapped in its own Task - so this test resumes in
+    the exact same tick that call itself returns in, with no extra
+    event-loop hop that would let the eagerly-started resend task sneak
+    in ahead of it and send a resend before the assertions below run.
+    (The ack is still delivered concurrently, by a small helper that
+    does need its own Task, since something has to run while the main
+    call sits parked on the ack-wait - but it is *that* Task, not the
+    call this test actually cares about, and awaiting an
     already-finished Task back here does not yield to the loop at all.)
-    move_call_token staying in _moves_in_progress for exactly this gap is
-    what cancel_pending_move() here needs in order to find anything to
-    snapshot in the first place - cleaning it up immediately on return,
-    the way control_blind_with_retry()'s own `finally` used to
-    unconditionally, would have made this cancellation silently no-op
-    instead.
+
+    move_call_token staying in _moves_in_progress for exactly this gap
+    is what cancel_pending_move() here needs in order to find anything
+    to snapshot in the first place - cleaning it up immediately on
+    return would make this cancellation silently no-op instead.
     """
     real_sleep = asyncio.sleep
 
@@ -1387,18 +1357,15 @@ async def test_control_blind_with_retry_serializes_two_blinds_instead_of_racing(
 ) -> None:
     """The actual bug fix: two blinds commanded together must queue, not race.
 
-    Regression for the real-world symptom (3 of 6 blinds moving almost in
-    parallel): async_open_cover()/async_close_cover() used to each
-    independently await wait_for_transmitter_idle() and then write, so when
-    the shared _transmitter_idle event fired, every blind waiting on it
-    woke in the same instant and wrote within the same ~15ms window -
-    confirmed from a real log - of which the stick accepted exactly one and
-    answered "tE" to the rest, which control_blind() neither waited for nor
-    retried. control_blind_with_retry() closes this by holding _move_lock
-    across the *entire* write-then-retry-until-accepted cycle, not just the
-    write: blind B's call below must not reach the wire at all until blind
-    A's first attempt has learned its outcome ("t1"), not merely until A
-    has finished writing.
+    If each call independently awaited wait_for_transmitter_idle() and
+    then wrote, every blind waiting on the shared _transmitter_idle
+    event would wake in the same instant and could write within the
+    same narrow window, of which the stick accepts only one and answers
+    "tE" to the rest. control_blind_with_retry() closes this by holding
+    _move_lock across the *entire* write-then-retry-until-accepted
+    cycle, not just the write: blind B's call below must not reach the
+    wire at all until blind A's first attempt has learned its outcome
+    ("t1"), not merely until A has finished writing.
 
     MOVE_COMMAND_EXTRA_RESENDS disabled: this test is about lock ordering
     between two different calls, not about the resend mechanism, which
@@ -1502,17 +1469,12 @@ async def test_handle_connection_lost_cancels_a_still_sleeping_resend_task(
     coroutine, never wrapped in its own asyncio.ensure_future() Task - so
     this test resumes in the exact same tick that call itself returns in,
     before the eagerly-started resend task gets a turn to resume past its
-    own first asyncio.sleep() and actually send that first resend. An
-    earlier version of this test awaited a separate Task standing in for
-    this call instead, which a second independent review's own
-    standalone asyncio reproduction caught adding exactly that extra
-    event-loop hop - letting the resend task's first resend slip out
-    before anything awaiting that Task could ever observe it as done, no
-    matter which of the ways of awaiting a Task was used. See
+    own first asyncio.sleep() and actually send that first resend.
+    Wrapping it in a separate Task instead would add exactly that extra
+    event-loop hop, letting the resend task's first resend slip out
+    before anything awaiting that Task could observe it as done. See
     test_control_blind_with_retry_still_cancellable_after_its_own_
-    return's own docstring for the same fix applied there too, and the
-    CHANGELOG for the three from-scratch reproductions that confirmed it
-    before either test was changed.
+    return's own docstring for the same fix applied there too.
 
     written() cannot tell a resend correctly suppressed by this check
     apart from one control_blind() itself merely refused once
@@ -1628,27 +1590,25 @@ async def test_control_blind_stop_serializes_two_stops_instead_of_racing(
 async def test_control_blind_stop_waits_for_its_own_blinds_in_flight_transmission(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Kuechenrolladen case: a stop must not collide with its own move's write.
+    """A stop must not collide with its own move's in-flight write.
 
-    Regression for a real log pattern: a blind's own close command's first
-    write was still transmitting (no "t0" yet) when its stop arrived right
-    after. cancel_pending_move() only ends a *retry* that has not happened
-    yet, it cannot un-send a write already on the wire - so the fix has to
-    be control_blind_stop() itself waiting for the transmitter to clear
-    before writing, exactly like a move already does.
+    If a blind's own close command's first write is still transmitting
+    (no "t0" yet) when its stop arrives right after, cancel_pending_move()
+    only ends a *retry* that has not happened yet - it cannot un-send a
+    write already on the wire. The fix is control_blind_stop() itself
+    waiting for the transmitter to clear before writing, exactly like a
+    move already does.
 
-    asyncio.sleep patched to instant rather than disabling
-    STOP_COMMAND_EXTRA_RESENDS outright (2026-11-15, following that
-    constant's delay partner being raised 0.25 -> 0.9 - see
-    STOP_COMMAND_RESEND_DELAY_SECONDS' own comment in const.py): unlike
-    the two *other*, lock-ordering sibling tests in this file, which
-    disable the count because a real resend there would land an
-    unplanned extra write mid-sequence and corrupt their own precise
-    write-count/payload assertions between two competing calls, this
-    test makes no assertion at all after its own single stop is accepted
-    - so there is nothing for the real, production
-    STOP_COMMAND_EXTRA_RESENDS=2 resend loop to corrupt by actually
-    running here, only its real-time delay worth avoiding.
+    asyncio.sleep is patched to instant rather than disabling
+    STOP_COMMAND_EXTRA_RESENDS outright: unlike the two *other*,
+    lock-ordering sibling tests in this file, which disable the count
+    because a real resend there would land an unplanned extra write
+    mid-sequence and corrupt their own precise write-count/payload
+    assertions between two competing calls, this test makes no assertion
+    at all after its own single stop is accepted - so there is nothing
+    for the real, production STOP_COMMAND_EXTRA_RESENDS resend loop to
+    corrupt by actually running here, only its real-time delay worth
+    avoiding.
     """
     real_sleep = asyncio.sleep
 
@@ -1688,26 +1648,16 @@ async def test_control_blind_stop_sends_two_extra_resends_after_being_accepted(
 ) -> None:
     """STOP_COMMAND_EXTRA_RESENDS: two extra best-effort stop frames.
 
-    Real-world report (2026-10-31): in a six-blind "close to an
-    intermediate target" batch, run through a shared transmitter in the
-    reporter's own known high-RF-interference environment, two of the six
-    blinds ran all the way to their physical end stop with no visible
-    stop at all - confirmed by the reporter's own direct, physical check
-    of all six blinds right after (every dashboard-reported stop position
-    was closer to target than the blind's real position, the opposite of
-    what a software stop-calculation bug would produce). This protocol
-    gives no end-to-end delivery confirmation for any transmit, stop
-    included (motor_result stays unknown either way; see this constant's
-    own comment in const.py), so a single stop frame lost to interference
-    leaves the motor with nothing telling it to stop. control_blind_stop()
-    fires two extra, best-effort control_blind() writes - unlocked, no
-    ack-wait of their own, exactly like the give-up fallback already at
-    the bottom of this same method - after its own primary, acked stop is
-    accepted, rather than relying on that single frame alone. Originally
-    one extra frame; raised to two (2026-11-07, project owner's own direct
-    decision, the same high-RF-interference environment this report came
-    from) for further margin - see this constant's own comment in
-    const.py for why that is still safe.
+    This protocol gives no end-to-end delivery confirmation for any
+    transmit, stop included (motor_result stays unknown either way; see
+    this constant's own comment in const.py), so a single stop frame
+    lost to interference leaves the motor with nothing telling it to
+    stop. control_blind_stop() fires two extra, best-effort
+    control_blind() writes - unlocked, no ack-wait of their own, exactly
+    like the give-up fallback already at the bottom of this same method
+    - after its own primary, acked stop is accepted, rather than relying
+    on that single frame alone. See this constant's own comment in
+    const.py for why two is still safe.
     """
 
     real_sleep = asyncio.sleep
@@ -1747,21 +1697,16 @@ async def test_control_blind_stop_skips_resends_once_a_real_stop_frame_arrives(
     """A confirmed motor-stop echo makes the remaining resends unnecessary.
 
     Companion to test_control_blind_stop_sends_two_extra_resends_after_
-    being_accepted above - project owner's own follow-up request
-    (2026-11-07): those two resends exist only to cover for a *lost*
-    primary stop frame; once this blind's own real "ss" STOPPED status
-    frame has actually arrived, the motor is independently known to be
-    stopped already, so firing them anyway would just be redundant RF
-    traffic on an already-busy shared transmitter. register_entity()
-    below gives this device_id a status identity to receive that frame
-    on - a plain device_id with none registered is exactly the scenario
-    the test above exercises, which still passes unchanged (asserts all
-    three writes), so this is additive, not a replacement.
-
-    Briefly reverted (2026-11-08, commit a96a8d1) along with this test,
-    over reliability concerns; both reinstated at the project owner's own
-    later, explicit request once real-world use showed that concern did
-    not hold up in practice - see control_blind_stop()'s own comment.
+    being_accepted above: those two resends exist only to cover for a
+    *lost* primary stop frame; once this blind's own real "ss" STOPPED
+    status frame has actually arrived, the motor is independently known
+    to be stopped already, so firing them anyway would just be
+    redundant RF traffic on an already-busy shared transmitter.
+    register_entity() below gives this device_id a status identity to
+    receive that frame on - a plain device_id with none registered is
+    exactly the scenario the test above exercises, which still passes
+    unchanged (asserts all three writes), so this is additive, not a
+    replacement.
     """
     connected_api.register_entity("AAAAAA", "10", "Test Blind")
     real_sleep = asyncio.sleep
@@ -1797,14 +1742,10 @@ async def test_control_blind_stop_logs_the_transmitter_wait_before_writing(
     """The new log line must report a real, measured wait, not a fixed
     ~0s regardless of what actually happened.
 
-    Added directly from a real log (2026-11-01): a kitchen blind's own
-    dashboard-reported "closed to ~25%" overshot by several percent, and
-    diffing two unrelated, pre-existing log lines by hand (the script's
-    own "Stopping cover" call versus this method's first real transmit)
-    showed up to ~1.1s spent queued behind other blinds' own
-    transmissions in a six-blind batch before this call's primary write
-    went out at all - a real, measured delay with no prior log line of
-    its own to show it directly.
+    Time spent queued behind other blinds' own transmissions before this
+    call's primary write goes out at all can account for a stop landing
+    later than the dashboard-reported position suggests, and previously
+    had no log line of its own to show it directly.
 
     Resend disabled - irrelevant to this log line, which fires once,
     before the primary write, and disabling it keeps this test from
@@ -1852,8 +1793,7 @@ async def test_control_blind_stop_logs_exactly_once_despite_a_busy_bounce(
     """Mirrors test_control_blind_with_retry_logs_exactly_once_despite_a_
     busy_bounce above, for this method's own identical fix: a "tE" bounce
     before eventual acceptance must produce exactly one log line, not one
-    per attempt. See that test's own docstring for the independent review
-    finding this guards against.
+    per attempt.
     """
     real_sleep = asyncio.sleep
 
@@ -2003,18 +1943,15 @@ def _blind_payload(enum: str, action: str) -> bytes:
 async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression for the real log: a stop must not wait out another
-    blind's own already-queued move.
+    """A stop must not wait out another blind's own already-queued move.
 
-    An earlier version of this fix held _move_lock across the whole
-    wait-for-idle-then-write cycle, so whichever call acquired the lock
-    first - even if it then had nothing to do but wait out the wire -
-    blocked every later caller, a stop included, for that entire transmit
-    cycle (confirmed from a real log: a manual stop requested before a
-    second blind's own close even reached the lock still waited out that
-    close's whole ~1.1-1.2s transmit cycle). Priority (see _PriorityLock)
-    fixes this: once the wire actually clears, a waiting stop goes before
-    a waiting move, regardless of which one asked for the lock earlier.
+    Holding _move_lock across the whole wait-for-idle-then-write cycle
+    would let whichever call acquired the lock first - even if it then
+    had nothing to do but wait out the wire - block every later caller,
+    a stop included, for that entire transmit cycle. Priority (see
+    _PriorityLock) fixes this: once the wire actually clears, a waiting
+    stop goes before a waiting move, regardless of which one asked for
+    the lock earlier.
 
     Both resend counts disabled - this test pins down the exact payload of
     each of the two writes below (the stop's, then B's move), which either
@@ -2023,12 +1960,10 @@ async def test_control_blind_stop_goes_before_an_unrelated_blinds_queued_move(
     """
     monkeypatch.setattr(api_module, "STOP_COMMAND_EXTRA_RESENDS", 0)
     monkeypatch.setattr(api_module, "MOVE_COMMAND_EXTRA_RESENDS", 0)
-    # Some other transmission is already in flight - stands in for this
-    # same blind's own just-fired move in the real log.
+    # Some other transmission is already in flight.
     connected_api._handle_message("t1")
 
-    # Blind B's own close is queued behind the busy wire - an ordinary
-    # waiter, exactly like Kuechenrolladen's second close in the real log.
+    # Blind B's own close is queued behind the busy wire - an ordinary waiter.
     task_b = asyncio.ensure_future(
         connected_api.control_blind_with_retry("20", CMD_DOWN, device_id="BBBBBB")
     )
@@ -2457,11 +2392,9 @@ async def test_cancel_pending_move_ends_a_waiting_retry_loop_for_that_device(
 ) -> None:
     """A stop for the same blind must end its own still-retrying move.
 
-    This is the collision that made routing moves through a busy-retry
-    cycle get reverted once before (see cancel_pending_move()'s and
-    async_stop_cover()'s own docstrings): without this, a retry already
-    queued for blind X could resend open/close after a stop for X had
-    already gone out.
+    See cancel_pending_move()'s and async_stop_cover()'s own docstrings:
+    without this, a retry already queued for blind X could resend
+    open/close after a stop for X had already gone out.
     """
 
     real_sleep = asyncio.sleep
@@ -2750,30 +2683,16 @@ async def test_a_fresh_call_is_unaffected_by_a_stale_cancellation(
     """A stop aimed at earlier, still-draining siblings must not also catch
     a brand new, unrelated call that only starts afterwards.
 
-    Found by the fourth independent review, of the reference-counting fix
-    directly above this test: once cancellation became a flag that stayed
-    pending for a whole device_id until the *last* of several concurrent
-    same-device calls actually exited (rather than being cleared the
-    instant any one of them first noticed it, the bug the fix above this
-    one closes), that flag could outlive the specific calls it was
-    actually meant for. Concrete scenario: two concurrent calls A and B
-    for device "X" are both in flight; a stop is requested while both are
-    live; A notices and exits, but B is still genuinely retrying or about
-    to resend, so the flag correctly has to stay set for X. If a brand new
-    call C for the exact same device starts in that window - nobody asked
-    to cancel C, it did not even exist yet when the stop was requested -
-    the device-wide flag this session's own first reference-counting
-    attempt used made C's very first check see "X has a pending
-    cancellation" and give up immediately, before ever writing anything,
-    even though that cancellation was never meant for it. Traced against
-    that exact, immediately-prior design (_moves_in_progress as a plain
-    per-device count, _move_cancel_requested as a flat set[str] of
-    device_ids - the code this session had before the fix directly above
-    this test): pre-seeding a count of 1 for "ABCDEF", calling
-    cancel_pending_move("ABCDEF"), then starting a fresh call for
-    "ABCDEF" made that fresh call's own very first loop check see
-    "ABCDEF" in the flat set and return False immediately - confirming
-    this scenario really did misfire under that design.
+    Concrete scenario: two concurrent calls A and B for device "X" are
+    both in flight; a stop is requested while both are live; A notices
+    and exits, but B is still genuinely retrying or about to resend, so
+    the cancellation correctly has to stay pending for X. If a brand new
+    call C for the exact same device starts in that window - nobody
+    asked to cancel C, it did not even exist yet when the stop was
+    requested - a device-wide cancellation flag would make C's very
+    first check see "X has a pending cancellation" and give up
+    immediately, before ever writing anything, even though that
+    cancellation was never meant for it.
 
     Fixed by snapshotting, at the moment cancel_pending_move() runs,
     exactly which call *tokens* are active for that device right then (see
@@ -3125,22 +3044,15 @@ async def test_stop_pairing_mode_restores_listening_from_the_write_alone(
 async def test_pair_device_and_wait_timeout_leaves_stick_able_to_pair_again(
     connected_api: SchellenbergUsbApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression test for the exact user-visible bug.
+    """A pairing timeout must never block the next attempt.
 
-    After a 2-minute pairing timeout, reopening the pairing wizard's entry
-    point - both of its old, separate entry points shared this same
-    pair_device_and_wait()/_stop_pairing_mode() code path before Issue #78
-    unified them into one, and the single entry point left today still
-    does - used to immediately re-show the identical "pairing_timeout"
-    abort message, before any new attempt to find a device even began.
-    Cause: _stop_pairing_mode()'s cleanup used to leave _device_mode stuck
-    on "unknown" purely because an idle-confirmation wait it awaited timed
-    out, even though the "sp" stop-pairing write itself had already
-    succeeded - and _is_transmit_capable() then rejected every subsequent
+    If _stop_pairing_mode()'s cleanup left _device_mode stuck on
+    "unknown" because an idle-confirmation wait it awaited timed out -
+    even though the "sp" stop-pairing write itself had already succeeded
+    - _is_transmit_capable() would reject every subsequent
     pair_device_and_wait() call instantly on "wrong_mode:unknown". That
     wait is gone now (see _stop_pairing_mode's docstring), but this test
-    stays as a regression guard on the user-visible symptom: a timeout
-    must never block the next attempt.
+    stays as a regression guard on the user-visible symptom.
     """
     monkeypatch.setattr(api_module, "PAIRING_TIMEOUT", 0.01)
 
@@ -3166,11 +3078,10 @@ async def test_pair_device_and_wait_timeout_leaves_stick_able_to_pair_again(
 # ---------------------------------------------------------------------------
 # initialize_next_device_enum(): the "next free enum" computation
 # pair_device_and_wait() calls to decide which address to teach a brand
-# new device. #225 (2026-11-08, "total kritisch"): a test blind's live
-# motor test, run immediately after teaching during an otherwise-ordinary
-# pairing attempt, moved a different, already-paired blind too, despite
-# the two having different configured primary IDs. See this method's own
-# docstring for the mechanism; the fix is exercised below.
+# new device. Must never reissue an enum that is still in use, or a test
+# blind's live motor test during pairing could move a different,
+# already-paired blind too. See this method's own docstring for the
+# mechanism; the fix is exercised below.
 # ---------------------------------------------------------------------------
 
 
@@ -3195,7 +3106,7 @@ def test_initialize_next_device_enum_skips_past_the_highest_registered_device(
 def test_initialize_next_device_enum_never_reissues_an_enum_from_an_abandoned_pairing(
     connected_api: SchellenbergUsbApi,
 ) -> None:
-    """Regression test for #225.
+    """Regression test: an enum must never be reissued while still live.
 
     Teaching a test blind, then aborting the pairing flow before it was
     ever saved, used to leave this method with no memory that the enum
@@ -3373,17 +3284,15 @@ async def test_handle_message_ss_frame_updates_tracking_and_dispatches_signal(
     assert received == [CMD_UP]
 
 
-# Regression test for GitHub Issue #85: the command byte was previously read
-# from message[14:16], documented at the time as a 4-char "message
-# incrementor" sitting at [10:14] followed by the 2-char command. Real-world
-# frames (Debug_Protokoll.xlsx, attached to #85) proved that wrong - [14:16]
-# gave a different value almost every time for the *same*, physically-known
-# button, while [10:12] - right after the 6-char device id, with no
-# incrementor field at all - gave exactly one stable value per real action
-# across every one of the 141 frames in that capture. The four raw frames
-# below are copied verbatim from that capture (one per distinct action, two
-# different trigger sources: a SmartFriends box and a 5-channel remote), so
-# this test fails if the parser ever regresses to the old, wrong offset.
+# Regression test: the command byte lives at message[10:12], right after
+# the 6-char device id, not at message[14:16] (which was once documented
+# as a 4-char "message incrementor" at [10:14] followed by a 2-char
+# command). [10:12] gives exactly one stable value per real action;
+# [14:16] varies even for the same physically-known button. The four raw
+# frames below are copied verbatim from a real capture (one per distinct
+# action, two different trigger sources: a SmartFriends box and a
+# 5-channel remote), so this test fails if the parser ever regresses to
+# the old, wrong offset.
 @pytest.mark.parametrize(
     ("raw_frame", "expected_command", "expected_interpretation"),
     [
@@ -3415,24 +3324,15 @@ def test_handle_message_ss_frame_command_byte_matches_issue_85_capture(
     assert frame["interpreted_command"] == expected_interpretation
 
 
-# Regression test for the real-world report that followed Issue #85's own
-# fix: on this user's hardware (two devices, both status-reporting under
-# enum 09), message[10:12] - the position Issue #85's fix reads - is a
-# fixed "1F" in every one of 27 distinct frames collected in a user-
-# provided HA debug log, spanning idle/ambient traffic and traffic
-# following explicit HA-issued open/close/stop commands alike. Since a
-# real command byte must vary with the real action and "1F" never does
-# here, it cannot be the command field for this hardware - message[14:16]
-# is, and does vary correctly with it (00/01/02 only, exactly matching
-# stop/open/close). The four raw frames below are copied verbatim from
-# that log (two devices, all three actions); the closing one is the
-# tightest-correlated of the set - logged ~1.6s after this integration
-# itself issued an explicit close command to that exact device.
-# _resolve_status_command() must keep reading Issue #85's own capture
+# Regression test: on some hardware, message[10:12] is a fixed value
+# (here "1F") that never varies with the real action, so it cannot be
+# the command field - message[14:16] is, varying correctly (00/01/02,
+# matching stop/open/close). The four raw frames below are copied
+# verbatim from a real capture (two devices, all three actions).
+# _resolve_status_command() must keep reading the [10:12] hardware
 # correctly (previous test) while also resolving these - see its
 # docstring in api.py for why checking both positions against the known
-# command set is reliable here, unlike the already-reverted secondary-
-# identity fallback (1db9e69).
+# command set is reliable here.
 @pytest.mark.parametrize(
     ("raw_frame", "expected_command", "expected_interpretation"),
     [
@@ -3648,8 +3548,8 @@ async def test_handle_message_caps_the_status_discovery_frame_list(
 # navigated away from, or otherwise abandoned between claiming the buffer
 # and its own next await) must stop blocking everyone forever once it is
 # older than STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS - see that
-# constant's own comment in const.py for the real-world report this fixes,
-# and CalibrationFlowHandler._claim_or_advance_capture() (options_flow_
+# constant's own comment in const.py for why, and
+# CalibrationFlowHandler._claim_or_advance_capture() (options_flow_
 # calibration.py, exercised in tests/test_options_flow_calibration.py) for
 # the caller that waits out exactly this busy-vs-stale distinction instead
 # of surfacing an immediate dead-end error.

@@ -285,10 +285,9 @@ async def _start_pairing_flow(
     (entry_id, subentry_type) handler tuple, not via the context source, so
     async_step_user() is the correct, real entry point regardless of type.
 
-    Since the Issue #78 pairing-flow unification (2026-11-07), this *is*
-    the pairing step itself (step_id "user") - no menu precedes it any
-    more; see async_step_user()'s own docstring in config_flow.py. A
-    caller submits an empty user_input against the returned flow_id to
+    This *is* the pairing step itself (step_id "user") - no menu
+    precedes it; see async_step_user()'s own docstring in config_flow.py.
+    A caller submits an empty user_input against the returned flow_id to
     actually pair (api.pair_device_and_wait()) and reach name_device.
     """
     result = await hass.config_entries.subentries.async_init(
@@ -337,10 +336,9 @@ async def test_pairing_workflow_names_device_then_starts_calibration(
     )
     result = await _start_pairing_flow(hass, entry)
 
-    # Since the Issue #78 pairing-flow unification (2026-11-07), the
-    # pairing form itself *is* step_id "user" - no intermediate
-    # "pair_device" step precedes it any more (see async_step_user()'s
-    # own docstring in config_flow.py).
+    # The pairing form itself *is* step_id "user" - no intermediate
+    # "pair_device" step precedes it (see async_step_user()'s own
+    # docstring in config_flow.py).
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={}
     )
@@ -351,10 +349,8 @@ async def test_pairing_workflow_names_device_then_starts_calibration(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Kitchen Blind"}
     )
 
-    # Every fresh pairing offers this same choice after naming (Issue
-    # #77, 2026-11-07) rather than going straight into calibration the
-    # way the old "legacy" workflow used to - see async_step_name_
-    # device()'s own comment on this branch.
+    # Every fresh pairing offers this same choice after naming - see
+    # async_step_name_device()'s own comment on this branch.
     assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "calibration_method_choice"
     assert set(cast(Iterable[str], result["menu_options"])) == {
@@ -362,9 +358,7 @@ async def test_pairing_workflow_names_device_then_starts_calibration(
         "manual_times",
     }
 
-    # Choosing to calibrate now also runs the motor-test confirmation
-    # that, before the unification, only the old "Add device from
-    # remote" workflow required (Issue #78 discussion) - see
+    # Choosing to calibrate also runs a motor-test confirmation - see
     # test_choosing_test_motor_runs_sequence_before_calibration_initial_
     # state below for the rest of that same sequence through to a real
     # calibration_initial_state form.
@@ -493,18 +487,17 @@ async def _drive_pairing_to_calibration_initial_state(
     """Drive pairing through naming and reach the calibration_initial_state
     form.
 
-    Since Issue #77 (2026-11-07), naming no longer leads straight into
-    calibration_initial_state - it shows calibration_method_choice first
-    (see async_step_name_device()'s own comment) - so this helper submits
-    that choice too. Since the Issue #78 pairing-flow unification
-    (2026-11-07), choosing to calibrate ("test_motor") also runs the same
-    motor-test confirmation (test_motor/did_motor_move/test_success) every
-    fresh pairing now gets before reaching a real calibration_initial_state
-    - this helper drives through that too, with its own asyncio.sleep/
-    MOVE_ACK_TIMEOUT mocks (see test_choosing_test_motor_runs_sequence_
-    before_calibration_initial_state's own comment on why both are
-    needed), so every test built on top of it (which only care about
-    what happens from calibration_initial_state onward) stays unaffected.
+    Naming does not lead straight into calibration_initial_state - it
+    shows calibration_method_choice first (see async_step_name_device()'s
+    own comment) - so this helper submits that choice too. Choosing to
+    calibrate ("test_motor") also runs a motor-test confirmation
+    (test_motor/did_motor_move/test_success) every fresh pairing gets
+    before reaching a real calibration_initial_state - this helper drives
+    through that too, with its own asyncio.sleep/MOVE_ACK_TIMEOUT mocks
+    (see test_choosing_test_motor_runs_sequence_before_calibration_
+    initial_state's own comment on why both are needed), so every test
+    built on top of it (which only care about what happens from
+    calibration_initial_state onward) stays unaffected.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     monkeypatch.setattr(api_module, "MOVE_ACK_TIMEOUT", 0.0)
@@ -825,10 +818,10 @@ async def test_live_calibration_skip_status_discovery_creates_entry_directly(
     """Choosing "Skip" on status_discovery_choice must finish pairing at once.
 
     Companion to test_live_calibration_pairing_captures_status_identity_via_
-    discovery above, for the new skip option (2026-11-08, project owner's
-    own request): a person without their original remote to hand must be
-    able to get past this choice without ever reaching async_step_discover_
-    status()'s own "Start listening" screen at all. Proves the live-
+    discovery above, for the skip option: a person without their original
+    remote to hand must be able to get past this choice without ever
+    reaching async_step_discover_status()'s own "Start listening" screen
+    at all. Proves the live-
     calibration route's own _pending_finish_data stash survives this path
     too, not just the "ran discovery, found nothing" one the first test in
     this section already covers - async_discover_status_identities() is
@@ -889,7 +882,7 @@ async def test_live_calibration_skip_status_discovery_creates_entry_directly(
 
 # ---------------------------------------------------------------------------
 # Subentry flow: pairing's manual-entry and timeout escape hatches
-# (Issue #77, 2026-11-07 - see async_step_name_device()'s and async_step_
+# (see async_step_name_device()'s and async_step_
 # calibration_open_instruction()'s own comments)
 # ---------------------------------------------------------------------------
 
@@ -1163,10 +1156,9 @@ async def test_calibration_timeout_manual_choice_prefills_the_leg_already_measur
     already knows precisely. Proven here by omitting CONF_OPEN_TIME_
     SECONDS from the submitted user_input entirely - exactly how a real
     flow manager receives a numeric field nobody touched - and relying on
-    the schema's own default to fill it in: before this fix, this exact
-    omission would have been rejected (that field had no default at all,
-    so voluptuous would re-show this same form with a validation error
-    instead of proceeding).
+    the schema's own default to fill it in, which that field must have
+    or voluptuous would re-show this same form with a validation error
+    instead of proceeding.
     """
     monkeypatch.setattr(
         connected_api,
@@ -1297,10 +1289,8 @@ async def test_choosing_test_motor_runs_sequence_before_calibration_initial_stat
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
     )
-    # Since the Issue #78 pairing-flow unification (2026-11-07), every
-    # fresh pairing is offered this choice, and "test_motor" is how it
-    # reaches the motor test that only the old "Add device from remote"
-    # workflow used to require (see async_step_name_device()'s own
+    # Every fresh pairing is offered this choice, and "test_motor" is how
+    # it reaches the motor test (see async_step_name_device()'s own
     # comment).
     assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "calibration_method_choice"
@@ -1335,10 +1325,9 @@ async def test_choosing_test_motor_runs_sequence_before_calibration_initial_stat
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={"motor_moved_result": "yes"}
     )
-    # test_success is a plain confirmation now, not a choice (Issue #78
-    # pairing-flow unification) - "Enter travel times manually" moved
-    # earlier, to calibration_method_choice, before the motor test ever
-    # runs.
+    # test_success is a plain confirmation, not a choice - "Enter travel
+    # times manually" lives earlier, in calibration_method_choice, before
+    # the motor test ever runs.
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "test_success"
 
@@ -1396,8 +1385,7 @@ async def test_did_motor_move_no_shows_retry_notice_and_lets_person_choose_again
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Home Assistant used to decide the retry direction itself (silently
-    alternating open/close). It no longer decides anything: "no movement"
+    """Nothing decides the retry direction automatically: "no movement"
     just reshows test_motor's own required, no-default select so the
     person chooses a direction again - the same one, or the other one -
     with a retry_notice explaining why the form is back. There is no
@@ -1545,8 +1533,7 @@ async def test_did_motor_move_false_then_true_on_retry_reaches_test_success(
         result["flow_id"], user_input={"motor_moved_result": "yes"}
     )
 
-    # test_success is a plain confirmation now, not a choice (Issue #78
-    # pairing-flow unification) - see
+    # test_success is a plain confirmation, not a choice - see
     # test_choosing_test_motor_runs_motor_test_sequence_before_
     # calibration_initial_state above.
     assert result["type"] is FlowResultType.FORM
@@ -1887,7 +1874,6 @@ async def test_manual_times_leads_into_discover_status(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "Hybrid Blind"}
     )
-    # Since the Issue #78 pairing-flow unification (2026-11-07),
     # "manual_times" is offered by calibration_method_choice, right
     # after naming - no motor test needed first (see async_step_name_
     # device()'s own comment).
@@ -1963,7 +1949,6 @@ async def test_manual_times_to_discover_status_creates_entry_directly(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    # Since the Issue #78 pairing-flow unification (2026-11-07),
     # "manual_times" is offered by calibration_method_choice, right
     # after naming - no motor test needed first (see async_step_name_
     # device()'s own comment).
@@ -2061,7 +2046,6 @@ async def test_manual_times_to_discover_status_creates_entry_with_open_initial_p
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    # Since the Issue #78 pairing-flow unification (2026-11-07),
     # "manual_times" is offered by calibration_method_choice, right
     # after naming - no motor test needed first (see async_step_name_
     # device()'s own comment).
@@ -2181,7 +2165,6 @@ async def test_manual_times_without_a_real_initial_state_choice_shows_an_error(
     result = await hass.config_entries.subentries.async_configure(
         result["flow_id"], user_input={CONF_DEVICE_NAME: "New Blind"}
     )
-    # Since the Issue #78 pairing-flow unification (2026-11-07),
     # "manual_times" is offered by calibration_method_choice, right
     # after naming - no motor test needed first (see async_step_name_
     # device()'s own comment).
@@ -2281,9 +2264,9 @@ async def test_discover_status_success_confirms_and_updates_existing_blind(
     identity.
 
     Builds its own blind rather than using the shared _add_existing_blind()
-    fixture directly (2026-11-15): that fixture's own CONF_STATUS_DEVICE_ID/
-    CONF_STATUS_ENUM (matching DEVICE_ID/DEVICE_ENUM) now count as an
-    already-confirmed identity under today's conflict-protection fix (its
+    fixture directly: that fixture's own CONF_STATUS_DEVICE_ID/
+    CONF_STATUS_ENUM (matching DEVICE_ID/DEVICE_ENUM) count as an
+    already-confirmed identity under conflict protection (its
     own CONF_STATUS_IDENTITY_SOURCE is unset, which - like
     resolve_blind_identities()'s own "legacy" fallback elsewhere - this
     flow treats as a real, confirmed identity, not an unknown one), so
@@ -2360,19 +2343,18 @@ async def test_discover_status_conflicting_primary_keeps_existing_and_adds_secon
     already-working status identity - it is folded into the secondary
     list instead, never used to replace anything.
 
-    Regression for a real report (2026-11-15): Developer Tools' own
-    "Discover status" dialog, run against an already-paired blind whose
-    status identity an electronic Gurtwickler's own motor echo had
-    already confirmed, found the *original remote*'s identity instead
-    (the same stick also hears it) and - before this fix - the branch
-    below ran unconditionally whenever discovery found anything,
-    replacing both the primary identity and the whole secondary list
-    with just this one run's result. The Gurtwickler's identity did not
-    even survive as a secondary, it simply vanished, leaving it producing
-    no reaction in Home Assistant afterward. Mirrors the identical
-    protection test_confirm_status_discovery_keeps_calibration_primary_
-    on_conflict (tests/test_pairing_subentry_flow.py) already has for the
-    sibling, fresh-pairing branch.
+    Regression scenario: Developer Tools' own "Discover status" dialog,
+    run against an already-paired blind whose status identity an
+    electronic Gurtwickler's own motor echo had already confirmed, finds
+    the *original remote*'s identity instead (the same stick also hears
+    it). Without this protection, that would replace both the primary
+    identity and the whole secondary list with just this one run's
+    result - the Gurtwickler's identity would not even survive as a
+    secondary, leaving it producing no reaction in Home Assistant
+    afterward. Mirrors the identical protection
+    test_confirm_status_discovery_keeps_calibration_primary_on_conflict
+    (tests/test_pairing_subentry_flow.py) already has for the sibling,
+    fresh-pairing branch.
     """
     entry = _build_hub_entry(hass, connected_api)
     blind = _add_existing_blind(hass, entry)
@@ -2432,10 +2414,10 @@ async def test_discover_status_finding_nothing_keeps_the_existing_identity(
     the existing identity.
 
     An inconclusive discovery attempt (wrong button, pressed too fast, RF
-    interference - no primary frame captured) used to unconditionally pop
-    the existing CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM on "Save" anyway,
-    silently erasing a previously-working status identity with no
-    warning. _add_existing_blind()'s blind already has one (matching
+    interference - no primary frame captured) must not pop the existing
+    CONF_STATUS_DEVICE_ID/CONF_STATUS_ENUM on "Save" anyway, silently
+    erasing a previously-working status identity with no warning.
+    _add_existing_blind()'s blind already has one (matching
     DEVICE_ID/DEVICE_ENUM); it must survive an empty discovery result
     untouched, unlike test_discover_status_success_confirms_and_updates_
     existing_blind above, where discovery genuinely finds something.
@@ -2758,11 +2740,10 @@ async def test_test_existing_honors_chosen_direction_when_recorded_closed(
     connected_api: SchellenbergUsbApi,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The tracked position used to pick the test direction automatically
-    (toward "open" for a closed blind). It no longer does - the person's
-    own choice is what counts, confirmed here by choosing "close" for a
-    blind recorded as closed, the opposite of what the old auto-logic
-    would have picked, and getting exactly that sent.
+    """The tracked position must not pick the test direction automatically
+    (e.g. toward "open" for a closed blind) - the person's own choice is
+    what counts, confirmed here by choosing "close" for a blind recorded
+    as closed and getting exactly that sent.
     """
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     # See test_choosing_test_motor_runs_motor_test_sequence_before_
@@ -2986,8 +2967,8 @@ async def test_did_motor_move_rejects_unselected_for_an_existing_blind(
 ) -> None:
     """Same reasoning as test_did_motor_move_rejects_submitting_without_a_
     real_choice above, now for the "existing" workflow's own re-test form -
-    unified onto the same required, no-default select on 2026-11-14 (see
-    _motor_moved_result_schema()'s own docstring), it must reject the
+    both share the same required, no-default select (see
+    _motor_moved_result_schema()'s own docstring), so it must reject the
     highlighted-but-unchosen "unselected" placeholder the same way the
     "pairing" form does, rather than ever silently treating it as "no".
     """
@@ -3480,14 +3461,14 @@ def test_calibration_initial_state_forces_an_explicit_choice() -> None:
 
 
 def test_did_motor_move_unified_field_replaces_the_old_boolean_everywhere() -> None:
-    """The "existing" workflow's own re-test used to have its own separate
-    "motor_moved" plain-boolean field and label here, dropped when it was
-    unified (2026-11-14) onto the same "motor_moved_result" required select
-    _motor_moved_result_schema() already used for "pairing" (see that
-    schema's own docstring for why). Confirmed across every language, the
-    same way test_calibration_initial_state_forces_an_explicit_choice just
-    above confirms its own, analogous boolean-to-select replacement: the
-    old field and its label are gone, not just unreferenced from Python.
+    """The "existing" workflow's own re-test shares the same
+    "motor_moved_result" required select _motor_moved_result_schema()
+    uses for "pairing" (see that schema's own docstring for why), not a
+    separate "motor_moved" plain-boolean field. Confirmed across every
+    language, the same way test_calibration_initial_state_forces_an_
+    explicit_choice just above confirms its own, analogous boolean-to-
+    select replacement: the old field and its label must be gone
+    entirely, not just unreferenced from Python.
     The full four-label option set backing the shared selector still
     carries all three real outcomes plus the placeholder in every
     language - which caller actually offers "wrong_motor" is a runtime
@@ -3504,20 +3485,16 @@ def test_did_motor_move_unified_field_replaces_the_old_boolean_everywhere() -> N
 
 
 def test_calibration_method_choice_menu_options_capitalization() -> None:
-    """ "test_motor" keeps this step's own original, deliberate
-    lowercase-initial convention - confirmed in an earlier session as
-    unconventional but intentional (a plural noun is normally
-    capitalised in German regardless of sentence position).
+    """ "test_motor" keeps this step's own deliberate lowercase-initial
+    convention, unconventional but intentional (a plural noun is
+    normally capitalised in German regardless of sentence position).
 
-    "manual_times" no longer follows that same lowercase convention,
-    though: reworded (2026-11-14, see test_calibration_method_choice_
-    title_names_the_menu_not_just_manual_entry below for the wording
-    itself), then, the same day, explicitly asked to be capitalised
-    again at its first letter in every language - overriding its own
-    earlier lowercase treatment for this one option specifically. The
-    two options on this same step are therefore now deliberately cased
-    differently from each other, not a lapse to "fix": that asymmetry
-    is exactly what was asked for, the second time around.
+    "manual_times" does not follow that same lowercase convention - it
+    is capitalised at its first letter in every language (see
+    test_calibration_method_choice_title_names_the_menu_not_just_
+    manual_entry below for its wording). The two options on this same
+    step are therefore deliberately cased differently from each other,
+    not a lapse to "fix".
     """
     menu_options = _load_step("de", "calibration_method_choice")["menu_options"]
     assert menu_options == {
@@ -3527,21 +3504,10 @@ def test_calibration_method_choice_menu_options_capitalization() -> None:
 
 
 def test_calibration_timeout_choice_manual_times_matches_the_other_two() -> None:
-    """calibration_timeout_choice's own "manual_times" option used to
-    read "Laufzeiten manuell eingeben" - deliberately kept distinct from
-    calibration_method_choice's sibling option (a test guarded against
-    an accidental blanket find-and-replace ever touching it, since
-    nobody had actually asked for it to change).
-
-    2026-11-14, same day, explicitly asked to change after all: both
-    menu options AND the manual_times step's own title (previously a
-    fourth, generic wording, "Laufzeiten eingeben"/"Enter travel
-    times") now read identically, in every language - the person's own
-    follow-up once this leftover three-way mismatch was pointed out
-    while renaming the step's title to match calibration_method_
-    choice's option. This supersedes the old guard above: that one
-    protected against an *unintentional* propagation, not against a
-    deliberate, explicit request to unify all three.
+    """calibration_timeout_choice's own "manual_times" option,
+    calibration_method_choice's sibling option, and the manual_times
+    step's own title must all read identically, in every language -
+    a deliberate three-way match, not an accidental drift to catch.
     """
     for language in ("strings", "en", "de", "es", "fr"):
         choice_option = _load_step(language, "calibration_method_choice")[
@@ -3556,29 +3522,16 @@ def test_calibration_timeout_choice_manual_times_matches_the_other_two() -> None
 
 def test_calibration_method_choice_title_names_the_menu_not_just_manual_entry() -> None:
     """Companion to test_calibration_method_choice_menu_options_
-    capitalization above. A same-day first pass at this rename
-    (2026-11-14) made the title and the manual_times option share one
-    wording - wrong, because this step's own page *is* the two-option
-    menu (confirmed against a screenshot of it): it offers a choice
-    between calibrating by moving the shutter (test_motor) and entering
-    times by hand (manual_times), so a title that already says
-    "manually"/"manuell" would misdescribe the test_motor path too.
-
-    Corrected the same day: the title now names only what both options
-    are *for* - the shutter motor's travel times - with no "manually"
-    anywhere in it, while the manual_times option alone keeps that
-    word, since it is the one path it actually describes. The two must
-    therefore differ in every language, not match.
-
-    German briefly dropped "lauf" from the option only ("Rollladenmotorzeiten
-    manuell festlegen" vs. the title's "Rollladenmotorlaufzeiten festlegen") -
-    the person's own exact dictated wording for the option at the time, kept
-    verbatim rather than "corrected" to match the title's stem. Later the
-    same day, after seeing the two side by side in the running app, the
-    person asked for "Rollladenmotorlaufzeiten" everywhere instead, in every
-    menu it appears in - reversing that specific earlier dictation. German's
-    option and title now share that same stem, differing only by "manuell",
-    matching how EN/ES/FR already worked all along.
+    capitalization above. This step's own page *is* the two-option
+    menu: it offers a choice between calibrating by moving the shutter
+    (test_motor) and entering times by hand (manual_times), so the
+    title must name only what both options are *for* - the shutter
+    motor's travel times - with no "manually"/"manuell" anywhere in it,
+    while the manual_times option alone keeps that word, since it is
+    the one path it actually describes. The two must therefore differ
+    in every language, not match. German's option and title share the
+    same "Rollladenmotorlaufzeiten" stem, differing only by "manuell",
+    matching how EN/ES/FR already work.
     """
     expected = {
         "strings": (
@@ -3612,26 +3565,15 @@ def test_calibration_method_choice_title_names_the_menu_not_just_manual_entry() 
 
 
 def test_teach_motor_step_title_matches_its_own_menu_label() -> None:
-    """An earlier fix (see this same test's own prior history) split the
-    menu_options label under developer_tools from this step's own title,
-    because the label used to carry a long, two-part explanation
-    (teaching a new motor AND activating the USB transmitter, plus a
-    data-loss caution) that the person would otherwise read twice in a
-    row - once to choose the menu entry, then again as the page heading.
-
-    2026-11-14: the person asked for the two to match again, this time
-    the other way around - both now share this short, more specific
-    phrase naming what the step actually does (pairing a *different*
-    shutter at this same RF identity, overwriting the one currently
-    taught) - and for the caution that used to live in the long menu
-    label to move into the step's own description instead, as a
-    standalone sentence, rather than staying a parenthetical bolted onto
-    the menu entry. That caution must still reach the person before they
-    commit to clicking the menu entry, and a short title/label alone
-    cannot fit it - so the step's own description, which the menu entry
-    cannot show in advance, needs to carry it instead; this test also
-    guards that it is still present somewhere in the step, not quietly
-    dropped in the handoff.
+    """The developer_tools menu label and this step's own title must
+    share one short, specific phrase naming what the step actually does
+    (pairing a *different* shutter at this same RF identity, overwriting
+    the one currently taught), rather than the person reading a long,
+    two-part explanation twice in a row - once to choose the menu entry,
+    then again as the page heading. The data-loss caution instead lives
+    in the step's own description (see
+    test_teach_motor_description_still_carries_the_overwrite_caution
+    below), since a short title/label alone cannot fit it.
     """
     for language in ("strings", "en", "de", "es", "fr"):
         step = _load_step(language, "teach_motor")
@@ -3647,10 +3589,9 @@ def test_teach_motor_step_title_matches_its_own_menu_label() -> None:
 
 def test_teach_motor_description_still_carries_the_overwrite_caution() -> None:
     """Companion to test_teach_motor_step_title_matches_its_own_menu_label
-    above: the caution moved out of the long developer_tools menu label
-    and into this step's own description (2026-11-14) must actually have
-    landed there, in every language, rather than having been dropped
-    while the menu label was shortened.
+    above: the caution must actually live in this step's own description,
+    in every language, rather than having been dropped while the menu
+    label was shortened.
     """
     caution_substring = {
         "strings": "Caution: existing motor data will be overwritten",
@@ -3677,17 +3618,17 @@ def test_status_discovery_choice_matches_discover_status_capture_wording() -> No
     "Add device" pairing flow, right before a person leaves it; picking
     its own "discover_status" option leads into the very same
     async_step_discover_status() the developer_tools menu entry also
-    leads to. All three used to say "anlernen"/"train"/"entrenar"/
-    "apprendre" here, which is inaccurate for what actually happens -
-    nothing is taught, Home Assistant only listens to and records the
-    remote's radio signals for 45 seconds (see discover_status's own
-    description). developer_tools and discover_status itself were
-    already corrected to "erfassen"/"capture"/"captar"/"capter"
-    wording; this guards the pairing-flow entry point against falling
-    back out of step with that fix, since status_discovery_choice.title
-    and .menu_options.discover_status are their own translation keys
-    (scoped to status_discovery_choice's own step_id) that a find-and-
-    replace over the "discover_status" identifier alone would not reach.
+    leads to. Must not say "anlernen"/"train"/"entrenar"/"apprendre"
+    here, which is inaccurate for what actually happens - nothing is
+    taught, Home Assistant only listens to and records the remote's
+    radio signals for 45 seconds (see discover_status's own
+    description) - and must instead match developer_tools' and
+    discover_status's own "erfassen"/"capture"/"captar"/"capter"
+    wording, since status_discovery_choice.title and
+    .menu_options.discover_status are their own translation keys
+    (scoped to status_discovery_choice's own step_id) that a
+    find-and-replace over the "discover_status" identifier alone would
+    not reach.
     """
     capture_verb = {
         "strings": "capture",
@@ -3741,16 +3682,13 @@ def _load_calibration_complete_description(language: str) -> str:
 
 
 def test_calibration_complete_description_opens_with_a_grammatical_sentence() -> None:
-    """Reported directly against a live screenshot, by comparison with the
-    blind subentry's own confirmation text just above (create_entry.default,
-    now "Die Konfiguration wurde erstellt." / "The configuration has been
-    created."): this step's own first line was the same kind of bare noun
-    phrase with no article or verb - "Kalibrierung für {device_name}
-    abgeschlossen!" / "Calibration for {device_name} complete!" - unlike
-    every other step's description in these same translation files. Covers
-    only the opening line; the rest of the description (measured times,
-    status detection, position-tracking note) is unchanged. The German
-    wording is the person's own exact words, not a paraphrase.
+    """This step's own first line must be a grammatical sentence, like
+    every other step's description in these same translation files -
+    not a bare noun phrase with no article or verb (e.g. "Kalibrierung
+    für {device_name} abgeschlossen!" / "Calibration for {device_name}
+    complete!"). Covers only the opening line; the rest of the
+    description (measured times, status detection, position-tracking
+    note) is unchanged.
     """
     expected_openings = {
         "strings": "The calibration for {device_name} is complete!\n\n",
@@ -3767,69 +3705,27 @@ def test_calibration_complete_description_opens_with_a_grammatical_sentence() ->
 
 def test_set_position_manual_names_the_selected_blind_by_the_field_too() -> None:
     """Reported from a screenshot: on a hub with several blinds, the
-    position field's own pre-filled value gave no hint by itself which
-    blind it belonged to - only the step's top-level description said so,
-    and that line is easy to have already scrolled past. Three fixes, all
-    from the same day, settled this string's final shape:
+    position field's own pre-filled value gives no hint by itself which
+    blind it belongs to - only the step's top-level description says so,
+    and that line is easy to have already scrolled past.
 
-    First, a data_description was added under the "position" field,
-    repeating that same {selected_blind} name right next to the field
-    itself, in every language, worded "The position shown below is for
-    {selected_blind}." (and each language's own equivalent) - reusing the
-    placeholder async_step_set_position_manual() already fills via its
-    existing description_placeholders.
+    The fix is a final sentence on the step's own top-level
+    `description` (which already renders right before the field, and
+    already uses this same {selected_blind} placeholder for its own
+    first sentence) naming the blind the position belongs to, in every
+    language - no `data_description` on the field itself, since
+    Home Assistant renders that as a caption *underneath* the field, not
+    immediately before it.
 
-    Second, a follow-up screenshot showed that wording had the direction
-    backwards in every language: Home Assistant renders a field's own
-    data_description as a caption *underneath* that field, not above it,
-    so "shown below" should have read "shown above" from the start.
-    Corrected to "shown above"/"oben angezeigte"/"mostrada arriba"/
-    "ci-dessus" - briefly, before the third fix below reverted it again.
-
-    Third, rather than keep fighting the above/below wording against a
-    caption position neither of the first two fixes actually controlled,
-    the sentence itself was moved to *before* the field instead - the one
-    place in this form that already renders above it, the step's own
-    top-level `description`, which already uses this same {selected_blind}
-    placeholder successfully for its own first sentence. The sentence was
-    re-reverted to its original "below"/"unten"/"a continuación"/
-    "ci-dessous" wording (correct again now that it precedes the field)
-    and appended as `description`'s own final sentence; `data_description`
-    was removed for this step entirely, rather than left behind holding an
-    empty object once "position" was its only key. Being the very last
-    thing read before the field itself, immediately adjacent to it exactly
-    as the original real-world report asked for, no caption below the
-    field is needed any more either - and no config_flow.py change was
-    needed for any of the three fixes, since description_placeholders
-    already reaches both `description` and `data_description` alike (the
-    second screenshot incidentally confirmed this for `data_description`
-    too, rendering {selected_blind} as the real device name
-    "Badezimmerrolladen" rather than a literal, unsubstituted placeholder -
-    moot for this field's own final shape, which no longer uses
-    data_description at all, but settled for any future use of it
-    elsewhere in this integration).
-
-    The German description text separately dropped its leading article on
-    the second sentence ("Aktuell erfasste Position" instead of "Die
-    aktuell erfasste Position") - also from the first screenshot, and also
-    fixed here; "en"/"es"/"fr" already read naturally without one.
-
-    Fourth (2026-11-08, a later real-world report, same final sentence):
-    with a long enough {selected_blind} name and/or a narrow enough dialog,
-    the German final sentence's own leading "Die unten" wrapped across two
-    lines on its own - "Die" ending one line, "unten angezeigte Position
-    ist für <name>." starting the next - reading as if "Die" belonged to
-    the sentence above it rather than to "unten" right after it. Joined
-    with U+00A0 (a non-breaking space) between exactly those two words, so
-    a browser can still wrap the rest of the sentence normally but can no
-    longer split this specific pair - the same narrow, surgical fix the
-    report's own wording asked for ("die zwei Wörter 'Die unten' sollen
-    nur eine Zeile runter zu den anderen Wörtern"), without reopening the
-    sentence-boundary/caption-position questions the first three fixes
-    above already settled. "en"/"es"/"fr" start their own final sentence
+    The German final sentence's own leading "Die unten" can wrap across
+    two lines on its own with a long enough {selected_blind} name and/or
+    a narrow enough dialog, reading as if "Die" belonged to the sentence
+    above it rather than to "unten" right after it. Joined with U+00A0
+    (a non-breaking space) between exactly those two words, so a browser
+    can still wrap the rest of the sentence normally but cannot split
+    this specific pair. "en"/"es"/"fr" start their own final sentence
     differently ("The position"/"La posición"/"La position", not a bare
-    two-word adverbial lead-in) and were never reported to have this
-    problem, so none of the three were touched.
+    two-word adverbial lead-in) and don't have this problem.
     """
     expected_final_sentence = {
         "strings": "The position shown below is for {selected_blind}.",

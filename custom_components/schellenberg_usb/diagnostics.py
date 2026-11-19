@@ -90,13 +90,6 @@ async def async_get_device_diagnostics(
     async_setup_entry() creates for the USB stick device itself - so both
     are checked here, branching only once a subentry's device actually
     matches.
-
-    This used to only ever check blind subentries (every
-    other subentry type, the hub included, was skipped outright), so asking
-    for diagnostics from the hub device's own page - not any blind's - could
-    never match anything and always fell through to the generic error below,
-    instead of the same real stick data async_get_config_entry_diagnostics()
-    already exposes at the entry level.
     """
     api = entry.runtime_data
     for subentry in entry.subentries.values():

@@ -177,12 +177,11 @@ class CalibrationFlowHandler:
 
         Returns False, without starting anything, when a different
         blind's calibration or status-discovery flow already owns the
-        buffer. This used to catch that RuntimeError and force its way
-        in anyway - finishing and discarding whatever capture was
-        already running, then starting a new one in its place - which
-        let two concurrent flows for two *different* blinds silently
-        corrupt each other's result, up to and including writing the
-        wrong status identity into a blind's permanent config data.
+        buffer, rather than forcing its way in by discarding whatever
+        capture is already running - that would let two concurrent flows
+        for two *different* blinds silently corrupt each other's result,
+        up to and including writing the wrong status identity into a
+        blind's permanent config data.
         async_discover_status_identities() (api.py), called from
         config_flow.py's async_step_discover_status, already gets this
         right for the exact same buffer: it lets the RuntimeError
@@ -295,9 +294,7 @@ class CalibrationFlowHandler:
         `claim` can still come back False here is a second flow's own
         genuinely still-running capture for a *different* blind, which
         this waits out rather than surfacing as a dead end the person has
-        to notice and manually retry (2026-11-08, replacing the
-        "calibration_capture_busy" error this step used to show - see
-        CALIBRATION_TIMEOUT's neighbour in const.py for the fuller story).
+        to notice and manually retry.
         Bounded by that same staleness window plus one extra poll's worth
         of margin: by the time that elapses, either `claim` has already
         succeeded on an earlier poll, or the other flow's own capture has
@@ -515,25 +512,14 @@ class CalibrationFlowHandler:
             step_id="calibration_initial_state",
             data_schema=vol.Schema(
                 {
-                    # A plain BooleanSelector used to default to "closed"
-                    # (unchecked) whenever the person left it alone, which
-                    # looked identical to an actual, considered answer - the
-                    # checkbox's own label only ever stated what *checking*
-                    # it meant, with nothing on the form saying what leaving
-                    # it unchecked meant instead. Replacing it with a
-                    # two-option required select was meant to force one of
-                    # the two real states to be picked explicitly every
-                    # time, on the assumption that Home Assistant's frontend
-                    # could not submit a required select with neither option
-                    # chosen - but in its "list" (radio) rendering it visibly
-                    # highlights the first option before anything is picked,
-                    # which looks exactly like a considered answer again and
-                    # reintroduces the original problem. A third, clearly
-                    # non-answer placeholder option now occupies that
-                    # highlighted first slot instead; submitting it (or
-                    # anything other than "open"/"closed", belt and braces)
-                    # is rejected above with an explicit on-screen error
-                    # instead of silently being treated as "closed".
+                    # A third, clearly non-answer placeholder option occupies
+                    # the "list" (radio) rendering's highlighted first slot,
+                    # since a plain two-option select would visibly highlight
+                    # "open"/"closed" before anything is picked, looking like
+                    # a considered answer when none was given. Submitting the
+                    # placeholder (or anything other than "open"/"closed",
+                    # belt and braces) is rejected above with an explicit
+                    # on-screen error instead of silently defaulting.
                     vol.Required("initial_state"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=["unselected", "open", "closed"],
@@ -549,8 +535,7 @@ class CalibrationFlowHandler:
                 # about yet. Non-empty only for recalibration, where an
                 # already-confirmed status identity exists and the person
                 # asked for a reminder that it depends on them actually
-                # using that same remote again during this run (see
-                # CHANGELOG.md for the real-world report this came from).
+                # using that same remote again during this run.
                 "recalibration_notice": (
                     ""
                     if self._create_subentry_after_calibration
@@ -619,9 +604,9 @@ class CalibrationFlowHandler:
             if not start_ok:
                 self._finish_calibration_capture("opening_start_timeout")
                 if self._create_subentry_after_calibration:
-                    # Issue #77 (2026-11-07): a fresh pairing gets an
-                    # explicit choice instead of only an on-screen error and
-                    # an implicit "submit this same form again" - see
+                    # A fresh pairing gets an explicit choice instead of
+                    # only an on-screen error and an implicit "submit this
+                    # same form again" - see
                     # async_step_calibration_retry()'s own docstring below
                     # and CALIBRATION_TIMEOUT's own comment in const.py.
                     # Recalibrating an already-paired blind
@@ -901,21 +886,15 @@ class CalibrationFlowHandler:
                 pairing_flow = cast("SchellenbergPairingSubentryFlow", self.flow)
                 # Offer a real status-identity discovery attempt before
                 # finishing, the same as async_step_manual_times()'s own
-                # pairing route already does (config_flow.py) - this
-                # live-calibration route used to finish immediately here
-                # with no discovery attempted at all, so a freshly-paired
-                # blind's secondary (and, unless a person separately ran
-                # "Discover status" from Developer Tools afterward,
-                # primary) status identity stayed permanently unset.
+                # pairing route already does (config_flow.py).
                 # `_pending_finish_data` carries this already-assembled
                 # `data` dict through that detour; see its own docstring
                 # in config_flow.py's __init__. Routed through async_step_
                 # status_discovery_choice() rather than straight into
-                # async_step_discover_status() itself (2026-11-08, project
-                # owner's own request) so a person without their original
-                # remote to hand - or who simply doesn't want to run this
-                # right now - can skip it instead of having to abandon
-                # this whole pairing attempt to get past it.
+                # async_step_discover_status() itself so a person without
+                # their original remote to hand - or who simply doesn't want
+                # to run this right now - can skip it instead of having to
+                # abandon this whole pairing attempt to get past it.
                 pairing_flow._pending_finish_data = data
                 return await pairing_flow.async_step_status_discovery_choice()
 
@@ -931,23 +910,14 @@ class CalibrationFlowHandler:
             data_updates: dict[str, Any] = {
                 CONF_OPEN_TIME: round(self._open_time, 2),
                 CONF_CLOSE_TIME: round(self._close_time, 2),
-                # Recalibrating an already-paired blind used to correct
-                # only its *live* position (via the SIGNAL_CALIBRATION_
-                # COMPLETED/_handle_calibration_completed hand-off above -
-                # unchanged by this addition) without ever refreshing this
-                # persisted fallback, unlike a fresh pairing's own "create
-                # subentry" branch a few lines above, which always has.
-                # That meant a blind recalibrated today still had nothing
-                # but Home Assistant's own, separately-volatile restore
-                # state to fall back on at the next startup where that
-                # restore state happens to come up empty - the exact gap
-                # a real-world report (2026-11-01) traced a mix of
-                # "Unbekannt"/correctly-restored blinds on one hub back
-                # to: the "Unbekannt" ones had all been calibrated before
-                # CONF_INITIAL_POSITION existed at all, and recalibrating
-                # them under current code still would not have persisted
-                # anything for next time. Now it does, the same ending_
-                # position already computed above for the live hand-off.
+                # Recalibration refreshes this persisted fallback too, not
+                # just the *live* position (via the SIGNAL_CALIBRATION_
+                # COMPLETED/_handle_calibration_completed hand-off above),
+                # the same ending_position already computed above for that
+                # hand-off - without it, a recalibrated blind would have
+                # nothing but Home Assistant's own, separately-volatile
+                # restore state to fall back on if that restore state comes
+                # up empty at the next startup.
                 CONF_INITIAL_POSITION: ending_position,
             }
             if calibration_record := self._calibration_record():
@@ -1077,15 +1047,13 @@ class CalibrationFlowHandler:
             # encodes device_id), this hub-wide fallback fires for every
             # device's frames while a capture window is open (see
             # SIGNAL_DEVICE_EVENT_CAPTURE's own comment in api.py) - without
-            # this check it accepted a *different*, unrelated blind moving
-            # on the same hub at the same moment as a false positive for
-            # this one, corrupting the open/close time being measured here.
-            # Only ever
-            # rejects a frame positively attributed to one of those other
-            # blinds; anything not yet claimed by anyone - including this
-            # same blind's own not-yet-confirmed real identity, exactly the
-            # case this fallback exists for - is still accepted, same as
-            # before this fix.
+            # this check a *different*, unrelated blind moving on the same
+            # hub at the same moment would be a false positive for this
+            # one, corrupting the open/close time being measured here. Only
+            # ever rejects a frame positively attributed to one of those
+            # other blinds; anything not yet claimed by anyone - including
+            # this same blind's own not-yet-confirmed real identity, exactly
+            # the case this fallback exists for - is still accepted.
             if command != event_type or not self._wait_event:
                 return
             if _captured_device_id.strip().upper() in foreign_device_ids:

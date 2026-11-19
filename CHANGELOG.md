@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.5.1
+
+Three real-world-triggered fixes plus a broad docstring/comment cleanup across the whole integration and test suite.
+
+* Manually syncing a blind's position via Developer Tools wrote `CONF_INITIAL_POSITION` into the subentry's data like any other field, but it was missing from `reload_ignored_subentry_data_keys` (`__init__.py`) - unlike `CONF_OPEN_TIME`/`CONF_CLOSE_TIME`/`CONF_LAST_CALIBRATION`, so that single-field update also forced an unnecessary full hub reload instead of being picked up live the way the others already are. `CONF_INITIAL_POSITION` added to the ignore tuple. New test `test_manual_position_sync_subentry_update_does_not_trigger_reload` (`tests/test_init.py`), mirroring the existing calibration-only coverage for the same mechanism.
+
+* `_async_position_update_loop()`'s three full-travel-resync success paths (the explicit-target-reached branch and the plain open/close-to-0%/100% branches, `cover.py`) updated `_attr_current_cover_position` directly but never called `_record_position_update()`, so the Entwicklerwerkzeuge/diagnostics page kept showing a stale position and timestamp for a blind that had, in reality, just finished a confirmed move. All three now record the transition, each guarded against double-recording what `_confirm_full_travel_resync()` may already have recorded itself (`status="estimated from full travel"`) when a resync was genuinely pending for that same direction.
+
+* **Real-world report, reproduced directly against the fix above:** even with that fix in place, the Entwicklerwerkzeuge page could still count a blind's position down well past an intermediate `set_cover_position()` target - a run to 93% observed settling at 67% first - before correcting itself. Root cause: `_update_position()`'s own elapsed-time estimate (`cover.py`) is bounded only by the overall [0, 100] travel range, never by an active target, and it records every change it computes via `_record_position_update()` itself (`status="estimated"`), independently of the loop above it. So for as long as the target's own stop command was still being confirmed (a resend, say), the estimate kept counting past the target, each tick re-recording a position further from where the blind - already stopped by then - really was. `_update_position()` now caps its own estimate at the active target, once reached, in both directions - the loop's own optimistic snap to the target (unchanged) already assumed this outcome anyway. New tests `test_update_position_caps_a_closing_estimate_at_an_intermediate_target` and `test_update_position_caps_an_opening_estimate_at_an_intermediate_target` (`tests/test_cover.py`).
+
+* Docstrings and comments across the integration and test suite reduced to one concise docstring per function where practical, plus only short, essential inline comments - cutting the long narrative/historical blocks (dated bug-history, review-round counts) built up over several releases. No behavior change; verified comment/docstring-only via an AST comparison against the pre-cleanup source for every touched file.
+
 ## v1.5.0
 
 Follows v1.4.0: a pairing-flow status-identity bug fix, a calibration-dialog capture-release latency fix, a new pairing-recovery option for a wrong-motor mismatch, a reintroduced stop-resend optimization, and a corrected status-frame byte offset (Issue #85) - plus assorted wording cleanup and a full docstring audit.

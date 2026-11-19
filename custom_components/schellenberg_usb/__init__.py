@@ -28,6 +28,7 @@ from .const import (
     CONF_CONFIG_ENTRY_ID,
     CONF_DEVICE_ID,
     CONF_ENUM,
+    CONF_INITIAL_POSITION,
     CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
@@ -151,15 +152,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         requested_entry_id = call.data.get(CONF_CONFIG_ENTRY_ID)
         loaded_entries: list[tuple[SchellenbergConfigEntry, SchellenbergUsbApi]] = []
         for candidate in hass.config_entries.async_entries(DOMAIN):
-            # candidate.runtime_data is only set by async_setup_entry, so a
-            # configured-but-not-loaded entry (never set up, failed setup,
-            # or unloaded) has no such attribute at all yet - accessing it
-            # directly raises AttributeError instead of returning None, and
-            # this loop must survive that for every *other* entry to still
-            # be considered. This is unrelated to the identifier-lookup
-            # compatibility handled by device_registry_compat.py: it is not
-            # about older Home Assistant releases, it is about a config
-            # entry that simply is not loaded right now.
+            # A not-yet-loaded entry has no runtime_data attribute at all;
+            # skip it instead of letting AttributeError abort the loop.
             api = getattr(candidate, "runtime_data", None)
             if isinstance(api, SchellenbergUsbApi):
                 loaded_entries.append((candidate, api))
@@ -312,13 +306,8 @@ async def async_setup_entry(
 
     device_registry = dr.async_get(hass)
 
-    # NOTE: `dr.async_get_device_id_by_identifier` never existed in Home Assistant
-    # (calling it raised AttributeError, which was NOT caught by the ValueError
-    # handler that used to be here, so this crashed async_setup_entry on every
-    # attempt). Identifiers are also no longer globally unique as of HA 2026.9;
-    # they are scoped per config entry there. See device_registry_compat.py for
-    # why the lookup below still works on Home Assistant releases older than
-    # 2026.9 too, rather than trading one AttributeError for another.
+    # Device identifiers are scoped per config entry since HA 2026.9; see
+    # device_registry_compat.py for the lookup that works on older releases too.
     hub_device = async_get_device_by_identifier_compat(
         device_registry, (DOMAIN, entry.entry_id), entry.entry_id
     )
@@ -365,21 +354,18 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Fields the running entities already pick up live via a dispatcher
-    # signal (_notify_calibration_completed in options_flow_calibration.py
-    # -> SchellenbergCover._handle_calibration_completed in cover.py)
-    # instead of needing a reload. Recalibrating an *existing* blind persists
-    # exactly these three fields onto its subentry, so counting them here
-    # would trigger a full hub reload - disconnecting the serial port and
-    # rebuilding every cover/sensor/switch on this hub, not just the
-    # recalibrated one - immediately after that live update, defeating the
-    # whole point of it. Everything else (a subentry being added/removed, or
-    # any other data field changing, including the status-identity fields
-    # cover.py only reads once at entity construction) still needs the
-    # reload below to take effect.
+    # signal, so persisting them must not also force a reload (which would
+    # disconnect/rebuild every cover on the hub and reset every "last
+    # changed" timestamp, not just the one blind that changed):
+    # CONF_OPEN_TIME/CONF_CLOSE_TIME/CONF_LAST_CALIBRATION (calibration,
+    # via cover.py's _handle_calibration_completed) and
+    # CONF_INITIAL_POSITION (manual position sync, via cover.py's
+    # _handle_manual_position_sync). Any other field change still reloads.
     reload_ignored_subentry_data_keys = (
         CONF_OPEN_TIME,
         CONF_CLOSE_TIME,
         CONF_LAST_CALIBRATION,
+        CONF_INITIAL_POSITION,
     )
 
     def _subentry_reload_snapshot(
