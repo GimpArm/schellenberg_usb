@@ -569,18 +569,22 @@ internal_blind_position_logic:
   mode: parallel
   max: 12
   sequence:
+    - variables:
+        target_position: "{{ requested_position | float(0) }}"
+        current_position: "{{ states(helper) | float(0) }}"
     - condition: template
-      value_template: "{{ requested_position | int != states(helper) | int }}"
+      value_template: "{{ target_position | int != current_position | int }}"
     - action: cover.set_cover_position
       target:
         entity_id: "{{ entity }}"
       data:
-        position: "{{ 100 - (requested_position | int) }}"
+        position: "{{ 100 - (target_position | int) }}"
+    - wait_template: "{{ not is_state(entity, 'opening') and not is_state(entity, 'closing') }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helper }}"
       data:
-        value: "{{ requested_position | float(0) }}"
+        value: "{{ target_position | float(0) }}"
 ```
 
 **Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
@@ -609,7 +613,8 @@ alexa_blind_position_logic:
       target:
         entity_id: "{{ entity }}"
       data:
-        position: "{{ 100 - (effective_target | int) }}"
+        position: "{{ 100 - (effective_target | float(0) | int) }}"
+    - wait_template: "{{ not is_state(entity, 'opening') and not is_state(entity, 'closing') }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helper }}"
