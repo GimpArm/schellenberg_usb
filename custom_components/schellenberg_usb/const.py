@@ -135,57 +135,44 @@ SIGNAL_MANUAL_POSITION_SYNC = f"{DOMAIN}_manual_position_sync"
 SERVICE_TEST_COMMAND = "test_command"
 TEST_COMMAND_DELAY = 0.75
 
-# Measured on real hardware (t1-to-t0 across the stick's own transmit cycle -
-# see the pairing-test fix's own comments in config_flow.py for the same
-# figure): one open/close/stop frame consistently takes roughly 1.1-1.2s to
+# Measured on real hardware (t1-to-t0 across the stick's own transmit
+# cycle): one open/close/stop frame consistently takes roughly 1.1-1.2s to
 # transmit end to end.
 #
 # _async_position_update_loop() in cover.py (stop_lead_percent) is the one
 # place this figure's start-side and stop-side roles both matter at once -
-# see that call site's own comment for the full derivation (Issue #78,
-# 2026-11-01 originally, corrected 2026-11-07 after an intervening version
-# double-counted them). Summary: this same measured figure models both how
-# long after accepting an open/close write the real motor takes to actually
-# start moving (D_start) and how long after a stop command is actually
-# issued the real motor takes to actually stop (D_stop). Uncontended, D_start
-# and D_stop are equal and enter stop_lead_percent's own baseline with
-# opposite sign, so they cancel out of it completely - this constant doesn't
-# appear in that baseline at all any more. It still widens that same lead
-# further when api.py's move_lock_busy reports contention, for the time this
-# blind's own stop can additionally spend queued behind another blind's
-# move/stop sharing the same transmit lock (D_stop grows under contention,
-# D_start doesn't, so the cancellation above no longer holds) - see that
-# call site's own comment for the real-log numbers behind it.
+# see that call site's own comment for the full derivation. Summary: this
+# same measured figure models both how long after accepting an open/close
+# write the real motor takes to actually start moving (D_start) and how
+# long after a stop command is actually issued the real motor takes to
+# actually stop (D_stop). Uncontended, D_start and D_stop are equal and
+# enter stop_lead_percent's own baseline with opposite sign, so they cancel
+# out of it completely - this constant doesn't appear in that baseline at
+# all any more. It still widens that same lead further when api.py's
+# move_lock_busy reports contention, for the time this blind's own stop can
+# additionally spend queued behind another blind's move/stop sharing the
+# same transmit lock (D_stop grows under contention, D_start doesn't, so
+# the cancellation above no longer holds).
 #
-# Kept as one named constant, rather than inline at each call site, because
-# the underlying hardware latency measured above is already described as
-# applying to "one open/close/stop frame" generically - a real difference
-# between D_start and D_stop has never been measured, so splitting them
-# would just be two names for one number - and so a real-hardware test on a
-# different stick/motor combination only needs to change one number.
+# Kept as one named constant, rather than inline at each call site, since
+# a real difference between D_start and D_stop has never been measured -
+# splitting them would just be two names for one number.
 STOP_COMMAND_LATENCY_SECONDS = 1.2
 
 # Sanity ceiling on the latency-compensation lead that stop_lead_percent
 # (in _async_position_update_loop() in cover.py) computes, expressed in
 # the same percentage points as that lead. Not a tuned value, like the
 # travel-time floor (0.1s) that same calculation's divisor already has.
-# Real calibrated travel times stay well clear of it: the project owner's
-# own six blinds range 8.45-23.27s (2026-11-07), and even the shortest of
-# those, contended, only reaches about 20 points (1.7s / 8.45s - see
-# STOP_COMMAND_LATENCY_SECONDS's own comment for where that 1.7s comes
-# from) - comfortably under this 50-point cap. A blind would need a real
-# open/close travel time under roughly 3.4s to hit this cap on a
-# contended stop with an entirely genuine calibration - mainly a guard,
-# in practice, against corrupt/legacy config data (a near-zero or wildly
-# wrong travel time), same as the divisor floor above it, rather than
-# something a real blind's own calibration is expected to approach.
-# Binds hardest for a travel time so short or corrupted that the
-# uncapped lead would run into the hundreds of percent, pushing the
-# comparison it feeds so far past the valid 0-100 range that any
-# position at all would satisfy "already there" the instant a move
-# starts, regardless of how far from the real target it actually was -
-# unlike that divisor floor, this has no matching ceiling at all
-# otherwise.
+# Real calibrated travel times stay well clear of it, so this is mainly a
+# guard, in practice, against corrupt/legacy config data (a near-zero or
+# wildly wrong travel time), same as the divisor floor above it, rather
+# than something a real blind's own calibration is expected to approach.
+# Binds hardest for a travel time so short or corrupted that the uncapped
+# lead would run into the hundreds of percent, pushing the comparison it
+# feeds so far past the valid 0-100 range that any position at all would
+# satisfy "already there" the instant a move starts, regardless of how far
+# from the real target it actually was - unlike that divisor floor, this
+# has no matching ceiling at all otherwise.
 MAX_STOP_LEAD_PERCENT = 50.0
 
 # How many *additional* stop frames control_blind_stop() fires, as plain,
@@ -197,39 +184,19 @@ MAX_STOP_LEAD_PERCENT = 50.0
 # the frame on the air, never that the motor's receiver actually caught
 # it - this protocol has no end-to-end delivery confirmation at all, only
 # ever the one-hop stick ack already handled above. In most RF environments
-# that single frame is enough, which is why this integration has run on
-# exactly one stop frame since control_blind_stop() first existed. It is
-# not enough in a strong-RF-interference environment: a real six-blind
-# "close to an intermediate target" batch, run back to back through the
-# shared transmitter under exactly that kind of interference, left two of
-# the six still closing with no visible stop at all - not merely late,
-# which the contention-aware lead above already compensates for, but
-# missing outright, each riding on past its target all the way to its
-# physical end stop while every other blind in the same batch landed
-# close to target. A second stop frame is harmless if the first one
-# already landed - this blind is either already stopped, in which case
-# another stop is a no-op exactly like a second press of a physical
-# remote's own stop button, or a brand new move for the very same blind
-# has started in the meantime, in which case that move's own retry loop
-# (control_blind_with_retry()) is already serialized against this same
-# _move_lock and simply queues behind these extra writes for the ~1-2
-# transmit cycles they take, rather than racing them. Originally kept to
-# one extra frame, not several, for exactly that contention reason: each
-# additional write still costs one more shared-transmitter slot that
+# a single frame is enough; it is not enough in a strong-RF-interference
+# environment, where a stop frame can go missing outright, with the blind
+# riding on past its target all the way to its physical end stop. A second
+# (or third) stop frame is harmless if the first one already landed - this
+# blind is either already stopped, in which case another stop is a no-op
+# exactly like a second press of a physical remote's own stop button, or a
+# brand new move for the very same blind has started in the meantime, in
+# which case that move's own retry loop (control_blind_with_retry()) is
+# already serialized against this same _move_lock and simply queues behind
+# these extra writes for the ~1-2 transmit cycles they take, rather than
+# racing them. Kept to a small number of extra frames, not more, because
+# each additional write still costs one more shared-transmitter slot that
 # every other blind in the same batch is queued behind.
-#
-# Raised from one extra frame to two (2026-11-07, project owner's own
-# direct decision, the same high-RF-interference environment the real-
-# world report above came from): the contention cost described above is
-# real and still applies - a third frame queues behind other blinds the
-# same way a second one does - but is being accepted further, for
-# additional margin against exactly the failure mode this section opened
-# with, in an environment that keeps producing it. Harmless for the same
-# reason a second frame already was: a third plain repeat of the
-# identical stop write is still either a no-op (blind already stopped) or
-# queues safely behind a genuinely new move (as above) - nothing about
-# going from one extra frame to two changes which of those two cases
-# applies, only how many times the harmless one repeats.
 STOP_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_stop() waits after its primary, acked stop before
@@ -238,18 +205,11 @@ STOP_COMMAND_EXTRA_RESENDS = 2
 # window that cost it. Not tied to STOP_COMMAND_LATENCY_SECONDS - that
 # figure models a *delay already on the wire* (contention, transmit time),
 # this is a deliberately-introduced gap on an otherwise-idle transmitter,
-# a different thing being measured for a different reason.
-#
-# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
-# direction, after being walked through the real measured confirmation-
-# echo timing: 7 samples of this blind's own primary-identity echo, all
-# 1.641-1.689s after the primary write, meaning even 0.9s still elapses
-# well before a real confirmation could ever arrive - raising this was
-# never going to let a resend observe one first. The resend's own
-# distance cost scales with this delay (the blind travels further past
+# a different thing being measured for a different reason. The resend's
+# own distance cost scales with this delay (the blind travels further past
 # where the primary stop already landed it before each extra frame goes
-# out), accepted here as a known, explicit trade-off rather than a
-# measured benefit.
+# out), a known, explicit trade-off against the benefit of giving a real
+# confirmation echo more time to arrive first.
 STOP_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # Total time _async_position_update_loop()'s auto-stop-at-target branch
@@ -263,39 +223,28 @@ STOP_COMMAND_RESEND_DELAY_SECONDS = 0.9
 # STOP_RETRY_BUDGET exists so a *manual* stop (async_stop_cover()) stays
 # responsive for whoever just pressed it; this loop has no one waiting
 # on it synchronously, so it can afford to keep trying for much longer
-# before concluding the blind's own fate is genuinely unknown - a real
-# six-blind Alexa "25%" command (2026-11-01) produced exactly one
-# STOP_RETRY_BUDGET-exhausted UNCONFIRMED outcome, after which the
-# fallback write still very plausibly reached the stick (most of what
-# exhausts STOP_RETRY_BUDGET is lock/transmitter contention, not an
-# actually-unreachable stick), so declaring the position unknown after
-# only one more 2.0s attempt, the way the old code effectively did by
-# mistake, would throw away a real answer a few seconds later would
-# have given it. Not unbounded either: nothing here can distinguish
-# "still just contended" from "this blind stopped answering entirely",
-# and an entity whose auto-stop never gives up looks, from the dashboard,
-# exactly like one that is still confidently tracking a position it can
-# no longer vouch for. A drop to 15.0 was considered (2026-11-01) and
-# explicitly decided against (2026-11-07, project owner's own direction)
-# in favour of keeping the full margin above - noted here so this isn't
-# mistaken for an overlooked follow-up later.
+# before concluding the blind's own fate is genuinely unknown - most of
+# what exhausts STOP_RETRY_BUDGET is lock/transmitter contention, not an
+# actually-unreachable stick, so giving up after only one more short
+# attempt would throw away a real answer a few seconds later would have
+# given. Not unbounded either: nothing here can distinguish "still just
+# contended" from "this blind stopped answering entirely", and an entity
+# whose auto-stop never gives up looks, from the dashboard, exactly like
+# one that is still confidently tracking a position it can no longer
+# vouch for.
 AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS = 30.0
 
 # Hard ceiling on how long _async_position_update_loop() itself may run for
 # one continuous tracking episode (captured once, when the loop's own task
 # starts, and checked every ~0.2s tick) before it gives up entirely and
-# reports the position as unknown - added as part of the Issue #78 fix
-# (2026-11-07, confirmed directly with the project owner), which is what
-# first made this loop's own worst-case running time worth bounding
-# explicitly rather than trusting it to always self-terminate.
+# reports the position as unknown.
 #
 # This is deliberately a different, *outer* bound from
 # AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS above: that one only times the
 # auto-stop-at-target branch's own retry-control_blind_stop() sub-loop,
 # which is just one of several ways this same task can end a tracking
 # episode (the others being a plain open/close reaching 0/100 with its
-# full-travel resync cleared, or - before now - never, if neither of those
-# conditions was ever satisfied). This constant instead bounds the whole
+# full-travel resync cleared). This constant instead bounds the whole
 # task, across every branch and however many times self._target_position is
 # changed underneath it (a same-direction retarget keeps the same task
 # running rather than starting a fresh one - see its own "continue" comment
@@ -304,31 +253,22 @@ AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS = 30.0
 # reporting "opening"/"closing" and a position estimate nobody can still
 # vouch for.
 #
-# Set well above anything this loop is expected to ever actually take: the
-# longest real travel time measured against the project owner's own six
-# blinds is 23.27s (see MAX_STOP_LEAD_PERCENT's own comment below), and even
+# Set well above anything this loop is expected to ever actually take: even
 # DEFAULT_TRAVEL_TIME_SECONDS (60.0, a deliberately generous fallback for an
 # un-calibrated blind) plus a full AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS
 # retry budget on top only reaches 90s - a third below this. Ordinary
 # operation should never come close to tripping this; it exists purely as
-# the backstop of last resort for whatever this fix's own doubled stop_lead_
-# percent compensation, or some other interaction entirely, fails to
+# a backstop of last resort for whatever interaction this module fails to
 # anticipate.
 POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 
 # Mirrors STOP_COMMAND_EXTRA_RESENDS, for the same reason, for a move
 # (open/close) command instead of a stop: control_blind_with_retry() only
 # ever retries while the *stick* reports busy/no-reply, so once the stick
-# has accepted the write there was, before this, still exactly one frame
-# standing between "accepted" and the motor actually receiving it -  the
-# same zero-end-to-end-confirmation gap STOP_COMMAND_EXTRA_RESENDS exists
-# for, just on the move side rather than the stop side. Requested directly
-# (2026-10-31) once that asymmetry was pointed out: a user-maintained pair
-# of external scripts had been covering exactly this gap for move commands
-# (re-sending open/close ~0.3s later for RF reliability - see
-# _has_live_tracking_in_direction()'s own docstring in cover.py, written
-# for exactly that pattern) since before this integration had any answer
-# of its own for it.
+# has accepted the write there is still exactly one frame standing between
+# "accepted" and the motor actually receiving it - the same zero-end-to-
+# end-confirmation gap STOP_COMMAND_EXTRA_RESENDS exists for, just on the
+# move side rather than the stop side.
 #
 # Not quite as unconditionally safe as the stop side's resend, and worth
 # being explicit about rather than silently assuming otherwise: a second
@@ -336,44 +276,15 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # identical "open"/"close" landing after a *different*, genuine command
 # has since reached the motor - most plausibly a fast-following stop -
 # would restart it briefly in the original direction, undoing that stop
-# rather than merely repeating a no-op.
-#
-# Raised directly (2026-10-31) over exactly this, worried that a short
-# set_cover_position() leg (a target only a few percent away) would have
-# its own auto-stop-at-target fire inside this resend's own delay window
-# below and get undone by it, making positions in roughly that range
-# unreachable. Originally traced and confirmed that specific case could
-# not happen at all, because this resend loop used to run awaited inline
-# before this function's own `return True` - so async_open_cover()/
-# async_close_cover() never set self._move_start_time or started the
-# tracking loop that could observe "target reached" until the resend was
-# already done; there was nothing yet running to race.
-#
-# That inline timing is gone (2026-11-08 - see this constant's own next
-# comment below for since when and why): this resend loop is now a
-# detached background task, so a short enough leg's own tracking loop
-# can genuinely be running, and reach its own auto-stop, while this same
-# move's own resend is still pending. That no longer makes the race
-# impossible, only exactly as survivable as the cross-source race
-# described in the paragraph just below - cancel_pending_move() snapshots
-# every token this device_id currently has in flight (see its own
-# docstring in this module), this move's own included, so the auto-stop
-# path reaches this resend's own pre-write check the same way and with
-# the same accepted residual window either way.
-#
-# What this resend *can* still race is a stop for the same device_id
-# coming from a second, concurrent source: a brand new async_stop_cover()
-# call (UI, automation, Alexa's own "stop"), or the auto-stop-at-target
-# branch of an *earlier*, still-live move this call's own write was only
-# ever a redundant piggyback onto (is_redundant_resend - typically the
-# user's own external scripts' intentional double-send). Both already
-# call cancel_pending_move() for this exact device_id before anything
-# else - control_blind_with_retry() itself checks that signal before each
-# retry attempt, and (as of this same date) its post-accept resend loop
-# now checks it too, immediately before each write, skipping the resend
-# rather than letting it undo a stop requested in the meantime. See that
-# check's own comment at its call site for why the stop side's resend
-# does not need the same check.
+# rather than merely repeating a no-op. This resend loop runs as a
+# detached background task, so cancel_pending_move() (see its own
+# docstring in this module) is checked immediately before each write,
+# skipping the resend rather than letting it undo a stop requested for
+# this same device_id in the meantime - whether that stop is a brand new
+# async_stop_cover() call, or the auto-stop-at-target branch of an
+# earlier, still-live move this call's own write was only ever a
+# redundant piggyback onto. See that check's own comment at its call site
+# for why the stop side's resend does not need the same check.
 #
 # What that check cannot see is a stop that never goes through this
 # integration's own command path at all - a physical remote or a
@@ -381,37 +292,17 @@ POSITION_UPDATE_LOOP_TIMEOUT_SECONDS = 120.0
 # wire-level echo with no corresponding cancel_pending_move() call. That
 # case has no timing floor to bound it by (unlike a stop issued through
 # control_blind_stop(), which needs to acquire the lock, wait for the
-# transmitter to go idle, write, and get acked - comfortably more than
-# one full transmit cycle, ~1.1-1.2s per real logs) and is not closed by
-# anything in this module today. The residual window is the same kind of
+# transmitter to go idle, write, and get acked - comfortably more than one
+# full transmit cycle, ~1.1-1.2s per real logs) and is not closed by
+# anything in this module today. That residual window is the same kind of
 # accepted, documented trade-off STOP_COMMAND_EXTRA_RESENDS's own resend
 # already carries (there, colliding with a different blind's write; here,
-# racing an externally-originated stop for this same blind) - not a
-# defect introduced by adding this, just the same category of real-world
-# RF/timing uncertainty this whole module already has to live with.
-#
-# Raised from one extra resend to two (2026-11-07, project owner's own
-# direct decision, mirroring the same change and the same reasoning on
-# the stop side above) for further margin in the same high-RF-
-# interference environment this whole constant exists for. This stretches
-# the externally-originated-stop residual window described just above
-# proportionally further - out to roughly two resend intervals after the
-# primary write instead of one - since there is now one more best-effort
-# write such a stop has no way to prevent. Accepted for the same reason
-# the window existed at all before this change: nothing in this module
-# can close it outright, and the realistic alternative - going back to a
-# single, unconfirmed frame - reintroduces the exact lost-command failure
-# this resend exists to cover, the more frequent, better-evidenced risk of
-# the two.
-#
-# Used to also be the other factor (together with
-# MOVE_COMMAND_RESEND_DELAY_SECONDS below) in stop_lead_percent's own
-# uncontended baseline in cover.py (T_stamp), back when this resend ran
-# inline and delayed stamping _move_start_time past the primary write.
-# That inline loop is now a detached background task (2026-11-08, see
-# cover.py's own stop_lead_percent comment), so _move_start_time is
-# stamped on the primary write's ack alone; that baseline is gone, and
-# neither constant here affects it any more.
+# racing an externally-originated stop for this same blind) - not a defect
+# introduced by adding this, just the same category of real-world
+# RF/timing uncertainty this whole module already has to live with. The
+# realistic alternative - going back to a single, unconfirmed frame -
+# reintroduces the exact lost-command failure this resend exists to
+# cover, the more frequent, better-evidenced risk of the two.
 MOVE_COMMAND_EXTRA_RESENDS = 2
 
 # How long control_blind_with_retry() waits after its primary, acked move
@@ -420,19 +311,10 @@ MOVE_COMMAND_EXTRA_RESENDS = 2
 # tied to STOP_COMMAND_LATENCY_SECONDS, which applies here unchanged.
 # Kept equal to STOP_COMMAND_RESEND_DELAY_SECONDS deliberately: both
 # model the same kind of deliberately-introduced gap on an otherwise-idle
-# transmitter.
-# No longer also stop_lead_percent's own baseline in cover.py (together
-# with MOVE_COMMAND_EXTRA_RESENDS above) - see that constant's own
-# comment for why.
-#
-# Raised from 0.25 to 0.9 (2026-11-15, project owner's own explicit
-# direction, mirroring the same change and the same reasoning on the stop
-# side above - see STOP_COMMAND_RESEND_DELAY_SECONDS's own comment for
-# the measured confirmation-echo timing this was weighed against). The
-# previously-documented case this module cannot actually close - an
-# externally-originated (physical remote/Gurtwickler) stop racing this
-# resend - widens proportionally with this delay, same trade-off as the
-# stop side, accepted here the same way.
+# transmitter. The previously-documented case this module cannot actually
+# close - an externally-originated (physical remote/Gurtwickler) stop
+# racing this resend - widens proportionally with this delay, same
+# trade-off as the stop side, accepted here the same way.
 MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.9
 
 # How close cover.py's own elapsed-time position estimate must already be
@@ -452,37 +334,33 @@ MOVE_COMMAND_RESEND_DELAY_SECONDS = 0.9
 # own mechanical limit, or something stops it part-way (most plausibly a
 # deliberate press of the remote's own stop button). Nothing in the
 # STOPPED echo itself says which one happened; this is the only signal
-# available to tell them apart. Real-world reports (2026-10-31): closing
-# this way consistently lands the estimate at 2%, opening at 98%, never
-# the exact 0/100 the motor physically reached - calibration's own
-# travel_time is necessarily an approximation of a real motor's, and the
-# two rarely agree to the second, so the *true* end stop almost never
-# lines up with elapsed time crossing exactly 0/100.
+# available to tell them apart. In practice, closing this way consistently
+# lands the estimate at 2%, opening at 98%, never the exact 0/100 the
+# motor physically reached - calibration's own travel_time is necessarily
+# an approximation
+# of a real motor's, and the two rarely agree to the second, so the *true*
+# end stop almost never lines up with elapsed time crossing exactly 0/100.
 #
 # Position alone is NOT enough to tell a genuine end stop apart from a
-# deliberate mid-travel stop, though: a first version of this check
-# assumed a deliberate stop would never land within a few percent of
-# either edge "by coincidence", which a direct user report immediately
-# disproved - nudging a blind open to a deliberately chosen 98% (open,
-# but intentionally not quite all the way) via the remote is exactly the
-# kind of real, intentional near-edge stop that assumption missed, and a
-# position-only check would snap it straight to 100% regardless, silently
-# overriding the position the stop button was actually pressed to reach.
-# Requiring the move to have also *started* within this same tolerance of
-# the opposite edge (_move_start_position - see its own clearing a few
-# lines below the check that reads it) closes that gap for exactly the
-# cases these real-world reports described: a deliberate nudge from some
-# other, non-edge position never satisfies it, while a genuine full-range
-# traversal (closed-to-open or open-to-closed) always does. It still
-# cannot tell a deliberate stop chosen a few percent short of full travel
-# *when that move also genuinely started from the opposite edge* (closing
-# all the way, then choosing to reopen to exactly 98%, say) apart from a
-# real end stop with the same drift - no further signal distinguishes
-# those two at the position/timing level available here - but it narrows
-# the false-positive window from "any near-edge stop" down to that one
-# specific, much rarer case. Kept comfortably above the reported 2% gap,
-# with headroom for other blinds' own calibration drift, while staying
-# far below any realistic deliberate stop position reached from a
+# deliberate mid-travel stop, though: nudging a blind open to a
+# deliberately chosen 98% (open, but intentionally not quite all the way)
+# via the remote is exactly the kind of real, intentional near-edge stop
+# that a position-only check would snap straight to 100% regardless,
+# silently overriding the position the stop button was actually pressed
+# to reach. Requiring the move to have also *started* within this same
+# tolerance of the opposite edge (_move_start_position - see its own
+# clearing a few lines below the check that reads it) closes that gap: a
+# deliberate nudge from some other, non-edge position never satisfies it,
+# while a genuine full-range traversal (closed-to-open or open-to-closed)
+# always does. It still cannot tell a deliberate stop chosen a few percent
+# short of full travel *when that move also genuinely started from the
+# opposite edge* (closing all the way, then choosing to reopen to exactly
+# 98%, say) apart from a real end stop with the same drift - no further
+# signal distinguishes those two at the position/timing level available
+# here - but it narrows the false-positive window from "any near-edge
+# stop" down to that one specific, much rarer case. Kept comfortably above
+# the reported 2% gap (with headroom for other blinds' own drift), while
+# staying far below any realistic deliberate stop position reached from a
 # non-edge start.
 NEAR_END_STOP_SNAP_TOLERANCE_PERCENT = 5
 
@@ -504,41 +382,20 @@ STATUS_DISCOVERY_TIMEOUT = 45  # seconds to capture original-remote frames
 # and, via _wait_for_stop_event()'s delegation to the same method, waiting
 # for the matching stop afterward.
 #
-# Lowered from 300 (5 minutes) to 120 (2 minutes) for Issue #77 (RolloDrive
-# 65 Premium reported calibration "hanging endlessly" - 2026-11-07): the old
-# value just meant a silent 5-minute wait before anything was shown at all,
-# which read indistinguishably from a genuine hang to someone watching the
-# pairing wizard.
-#
-# Raised back to 300 (2026-11-08), on the project owner's own real-world
-# report: 120s proved too tight for an ordinary manual open/close under
-# this installation's real RF interference (see the person's own stated
-# environment in its wider project notes) - a leg that would have finished
-# fine given a little more time instead hit this timeout mid-motion and
-# bounced the person into the retry/manual-entry menu below for a
-# calibration that was never actually stuck. The *actual* fix for Issue
-# #77's "hanging endlessly with nothing to distinguish a hang from a slow
-# wait" complaint turned out to be the explicit retry/manual-entry choice
-# below, not the shorter raw timeout - that choice already replaces 120s
-# (or 300s) of silence with an on-screen, navigable menu the moment a leg
-# genuinely does time out, regardless of how long this constant is set to.
-# Lowering CALIBRATION_TIMEOUT was the wrong lever for that complaint and
-# cost real, legitimate calibrations instead; this constant is now back at
-# its original, more generous value while that menu keeps doing the actual
-# work. Still comfortably bounded either way - the project owner's own six
-# real blinds (see MAX_STOP_LEAD_PERCENT's own comment in this file) all
-# finish within 24s, nowhere near even the old 120s budget.
-#
 # A fresh pairing (CalibrationFlowHandler._create_subentry_after_calibration
-# is True) now also gets an explicit choice - retry this same leg, or switch
-# to manual time entry - the moment either wait in that leg times out,
-# rather than only an on-screen error and an implicit "submit the form
-# again" (see calibration_open_instruction/calibration_close_instruction's
-# own comments in options_flow_calibration.py). Recalibrating an already-
-# paired blind keeps the old error-and-resubmit behavior unchanged - that
-# workflow already has its own direct manual-entry escape hatch one menu
-# level up (reconfigure's own "edit" option), so adding a second one here
-# would just be two routes to the same place.
+# is True) gets an explicit choice - retry this same leg, or switch to
+# manual time entry - the moment either wait in that leg times out, rather
+# than only an on-screen error and an implicit "submit the form again"
+# (see calibration_open_instruction/calibration_close_instruction's own
+# comments in options_flow_calibration.py). That explicit menu, not this
+# raw timeout value, is what actually distinguishes a genuine hang from a
+# slow-but-fine wait for the person watching the wizard - so this constant
+# is kept generous enough that an ordinary manual open/close under real RF
+# interference finishes comfortably within it. Recalibrating an
+# already-paired blind keeps the old error-and-resubmit behavior
+# unchanged - that workflow already has its own direct manual-entry escape
+# hatch one menu level up (reconfigure's own "edit" option), so adding a
+# second one here would just be two routes to the same place.
 CALIBRATION_TIMEOUT = 300
 
 # How old the hub-wide status-frame capture buffer (api.py's
@@ -548,26 +405,22 @@ CALIBRATION_TIMEOUT = 300
 # *different* flow's own attempt to claim it is allowed to reclaim it
 # instead of being refused outright.
 #
-# Added 2026-11-08: a flow that claims this buffer (CalibrationFlowHandler.
+# A flow that claims this buffer (CalibrationFlowHandler.
 # _start_calibration_capture(), options_flow_calibration.py) and is then
 # abandoned before its own _finish_calibration_capture() ever runs - the
 # person closes the wizard, navigates away, or anything else removes the
 # flow while it is sitting on a plain, un-awaited form between claiming the
-# buffer and actually awaiting a movement/stop event - leaked it forever:
-# nothing in Home Assistant's flow-removal path called back into this
-# integration to release it, and every later attempt (this blind's own
-# retry included) kept being refused with no way to tell a genuinely
-# still-running capture apart from a permanently abandoned one. Reported by
-# the project owner as a real, reproducible dead end after aborting a test
-# pairing mid-flow. A capture past this age is assumed abandoned and is
-# reclaimed instead of refused - see start_status_frame_capture()'s own
-# comment in api.py. Deliberately its own constant, not CALIBRATION_TIMEOUT
-# above: that one bounds a single movement/stop wait *within* an active
-# capture, this one bounds how long a capture can sit unclaimed-but-open
-# before it is treated as dead - two different questions that happened to
-# share a number before CALIBRATION_TIMEOUT was raised to 300 above, and
-# would otherwise have silently drifted apart from the "two minutes" the
-# project owner actually asked for this one to be.
+# buffer and actually awaiting a movement/stop event - would otherwise leak
+# it forever: nothing in Home Assistant's flow-removal path calls back into
+# this integration to release it, and every later attempt would keep being
+# refused with no way to tell a genuinely still-running capture apart from
+# a permanently abandoned one. A capture past this age is assumed abandoned
+# and is reclaimed instead of refused - see start_status_frame_capture()'s
+# own comment in api.py. Deliberately its own constant, not
+# CALIBRATION_TIMEOUT above: that one bounds a single movement/stop wait
+# *within* an active capture, this one bounds how long a capture can sit
+# unclaimed-but-open before it is treated as dead - two different
+# questions that happen to share a number here.
 STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS = 120
 # Fallback travel time (seconds) used whenever a blind has no calibrated/manual
 # open or close time yet. Shared by cover.py (runtime default) and
@@ -578,20 +431,19 @@ DEFAULT_TRAVEL_TIME_SECONDS = 60.0
 # / CONF_CLOSE_TIME_SECONDS above for the corresponding form field keys).
 CONF_OPEN_TIME = "open_time"  # Time it takes to open (up) in seconds
 CONF_CLOSE_TIME = "close_time"  # Time it takes to close (down) in seconds
-# The blind's actual physical position (0 closed / 100 open) once calibration
-# - which now lets the person choose whether open or close is driven first,
-# see options_flow_calibration.py's calibration_initial_state step - has
-# finished.
+# The blind's actual physical position (0 closed / 100 open) once
+# calibration - which lets the person choose whether open or close is
+# driven first, see options_flow_calibration.py's calibration_initial_state
+# step - has finished.
 # Only ever 0 or 100: calibration always ends at whichever end stop the
-# second/last leg drove to. Set on every subentry created by a fresh pairing
-# regardless of which calibration_method_choice option was picked (Issue #78
-# pairing-flow unification, 2026-11-07, see config_flow.py's async_step_user()
-# docstring) - a live calibration run sets it to the real ending position
-# (options_flow_calibration.py), and the manual-entry route sets it directly
-# from the person's own stated current position (_pending_data(), fed by
-# async_step_manual_times()). cover.py falls back to 0 only when the key is
-# absent entirely, which now covers just blinds paired before this key
-# existed in the first place.
+# second/last leg drove to. Set on every subentry created by a fresh
+# pairing regardless of which calibration_method_choice option was picked -
+# a live calibration run sets it to the real ending position
+# (options_flow_calibration.py), and the manual-entry route sets it
+# directly from the person's own stated current position (_pending_data(),
+# fed by async_step_manual_times()). cover.py falls back to 0 only when
+# the key is absent entirely, which covers just blinds paired before this
+# key existed in the first place.
 CONF_INITIAL_POSITION = "initial_position"
 # Legacy top-level command-device-ID key from before CONF_COMMAND_DEVICE_ID
 # and the separate status identity existed. Despite living in this

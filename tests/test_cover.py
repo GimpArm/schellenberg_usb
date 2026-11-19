@@ -418,13 +418,12 @@ async def test_async_open_cover_sets_move_start_time_to_plain_monotonic(
     Companion to test_async_open_cover_does_not_start_tracking_before_
     retry_succeeds above, which only proves _move_start_time is set at
     all (not None) once control_blind_with_retry() succeeds. This proves
-    *where* it is set to. Used to be pushed STOP_COMMAND_LATENCY_SECONDS
-    ahead instead; reverted (Issue #78, 2026-11-07) because that push
-    froze the reported position for just over a second at the start of
-    every move - see this assignment's own comment in
-    _async_open_cover_body() for the full reasoning, and
-    stop_lead_percent's own comment in _async_position_update_loop() for
-    where that compensation lives now instead.
+    *where* it is set to - pushing it into the future instead would
+    freeze the reported position at the start of every move. See this
+    assignment's own comment in _async_open_cover_body() for the full
+    reasoning, and stop_lead_percent's own comment in
+    _async_position_update_loop() for where that compensation lives
+    instead.
     """
     clock = _FakeClock(2_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
@@ -460,21 +459,19 @@ async def test_async_close_cover_skips_reset_for_redundant_resend(
     """A redundant re-send of an already-in-progress close must not re-base
     the running position estimate.
 
-    Regression guard confirmed from a real log: the README's own
-    fine-position-control example scripts intentionally send
-    open_cover/close_cover a second time, ~0.3s after the first, purely
-    for RF reliability. Before this fix, async_close_cover() cancelled
-    position tracking unconditionally at call entry and only
-    re-established it once *this* call's own control_blind_with_retry()
-    succeeded - which, queued behind another blind sharing the hub-wide
-    _move_lock, measured well over a second in that log. The blind kept
-    moving under the first, already-accepted send the whole time; only
-    the HA-side estimate froze, then resumed from that stale, frozen
-    value - permanently losing however far the blind actually travelled
-    during the gap. Simulated here by marking the cover as already
-    closing with a live tracking task and a valid baseline before calling
-    async_close_cover() again, the way a real redundant re-send would
-    find it.
+    The README's own fine-position-control example scripts intentionally
+    send open_cover/close_cover a second time, ~0.3s after the first,
+    purely for RF reliability. If async_close_cover() cancelled position
+    tracking unconditionally at call entry and only re-established it
+    once *this* call's own control_blind_with_retry() succeeded - which
+    can take well over a second queued behind another blind sharing the
+    hub-wide _move_lock - the blind would keep moving under the first,
+    already-accepted send the whole time while the HA-side estimate
+    froze, then resumed from that stale, frozen value, permanently
+    losing however far the blind actually travelled during the gap.
+    Simulated here by marking the cover as already closing with a live
+    tracking task and a valid baseline before calling async_close_cover()
+    again, the way a real redundant re-send would find it.
     """
     api = MagicMock()
     api.control_blind_with_retry = AsyncMock(return_value=True)
@@ -1004,14 +1001,13 @@ async def test_async_stop_cover_fallback_leaves_a_racing_retarget_untouched(
 ) -> None:
     """A racing same-direction retarget's own target must survive this fallback.
 
-    A third independent review (2026-11-08) of #226/#227 and its own two
-    follow-up fixes found that this general fallback - reached here via an
-    ordinary CONFIRMED stop - never touches self._target_position, unlike
-    the FAILED and backstop-exhaustion branches fixed elsewhere in this
-    method. On its face that looks like the same staleness hazard, but is
-    deliberately correct: a different, newer async_set_cover_position()
-    call's own synchronous write can land during control_blind_stop()'s
-    own await (simulated here exactly as test_async_stop_cover_fallback_
+    This general fallback - reached here via an ordinary CONFIRMED stop -
+    never touches self._target_position, unlike the FAILED and
+    backstop-exhaustion branches handled elsewhere in this method. On
+    its face that looks like a staleness hazard, but is deliberately
+    correct: a different, newer async_set_cover_position() call's own
+    synchronous write can land during control_blind_stop()'s own await
+    (simulated here exactly as test_async_stop_cover_fallback_
     does_not_clobber_a_newer_move does for its own is_opening/is_closing
     case) and leave self._target_position holding its own, live target -
     which must come through this fallback's own cleanup completely
@@ -1062,18 +1058,18 @@ async def test_async_stop_cover_fallback_does_not_clobber_a_newer_move(
     hass: HomeAssistant,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Regression guard for #226/#227.
+    """Regression guard: a stale stop must not clobber a newer move's state.
 
     A stop whose own control_blind_stop() call is still suspended - here
-    because, standing in for the real debug log that root-caused this, a
-    different, newer async_open_cover() call for this same device already
-    set its own is_opening/is_closing (its own very first line, no await
-    of its own first) while this call's own await of control_blind_stop()
-    was still pending - must not fall through to the ordinary stick-ack-
-    only cleanup once that await resolves: doing so clobbered the newer
-    move's own is_opening/is_closing, move_start_* and tracking task with
-    state meant for the move this stop actually targeted, freezing the
-    dashboard until the next command. The newer move's state (simulated
+    because a different, newer async_open_cover() call for this same
+    device already set its own is_opening/is_closing (its own very
+    first line, no await of its own first) while this call's own await
+    of control_blind_stop() was still pending - must not fall through
+    to the ordinary stick-ack-only cleanup once that await resolves:
+    doing so would clobber the newer move's own is_opening/is_closing,
+    move_start_* and tracking task with state meant for the move this
+    stop actually targeted, freezing the dashboard until the next
+    command. The newer move's state (simulated
     here exactly as test_async_close_cover_skips_reset_for_redundant_
     resend above does for its own already-in-progress case) must come
     through this call completely untouched.
@@ -1132,17 +1128,16 @@ async def test_async_stop_cover_failed_outcome_does_not_clobber_a_newer_target(
 ) -> None:
     """Regression guard for the same bug class, in the FAILED branch.
 
-    A second independent review (2026-11-08) of the fix above found an
-    analogous, unconfirmed assumption a few lines away: the FAILED branch
-    restores self._target_position from previous_target_position
-    unconditionally, with no re-check that nothing else claimed the
-    target slot while control_blind_stop() above was suspended - exactly
-    the mistake #226/#227 fixed for is_opening/is_closing. Here, a
-    different, newer async_set_cover_position() call's own synchronous
-    write (self._target_position = target_position) lands during that
-    same await, before this stop's own write fails. The newer call's
-    target must survive completely untouched, not be overwritten with
-    this stale call's own, now-irrelevant previous target.
+    The FAILED branch restores self._target_position from
+    previous_target_position unconditionally, with no re-check that
+    nothing else claimed the target slot while control_blind_stop()
+    above was suspended - the same hazard already handled for
+    is_opening/is_closing. Here, a different, newer
+    async_set_cover_position() call's own synchronous write
+    (self._target_position = target_position) lands during that same
+    await, before this stop's own write fails. The newer call's target
+    must survive completely untouched, not be overwritten with this
+    stale call's own, now-irrelevant previous target.
     """
     caplog.set_level(logging.DEBUG, logger="custom_components.schellenberg_usb.cover")
 
@@ -1297,18 +1292,16 @@ async def test_position_loop_retries_auto_stop_when_the_write_is_unconfirmed(
 ) -> None:
     """An UNCONFIRMED auto-stop write must not be treated as a successful stop either.
 
-    The actual bug this whole fix exists for: control_blind_stop() used to
-    return a bare bool, so STOP_RETRY_BUDGET's own exhausted-fallback write
-    - sent, but nothing confirms the stick (let alone the motor) ever saw
-    it - was indistinguishable from a genuinely stick-accepted stop. A real
-    six-blind Alexa "25%" command (2026-11-01) hit exactly this: the
-    fallback fired for one blind, this loop finalized on the strength of
-    it, and that blind then kept physically closing all the way to its own
-    end stop while the dashboard stayed frozen at the stale percentage this
-    loop had already committed to. StopOutcome.UNCONFIRMED must retry next
-    tick, exactly like FAILED already does (see the test above), not
-    finalize - see test_position_loop_backstop_reports_unknown_after_
-    prolonged_unconfirmed_stops below for how long it may keep retrying.
+    If control_blind_stop() returned a bare bool, STOP_RETRY_BUDGET's own
+    exhausted-fallback write - sent, but nothing confirms the stick (let
+    alone the motor) ever saw it - would be indistinguishable from a
+    genuinely stick-accepted stop: this loop could finalize on the
+    strength of it while the blind kept physically moving to its own end
+    stop, with the dashboard frozen at the stale percentage already
+    committed to. StopOutcome.UNCONFIRMED must retry next tick, exactly
+    like FAILED already does (see the test above), not finalize - see
+    test_position_loop_backstop_reports_unknown_after_prolonged_
+    unconfirmed_stops below for how long it may keep retrying.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -1418,16 +1411,15 @@ async def test_position_loop_backstop_resets_after_a_retarget_mid_unconfirmed_re
 ) -> None:
     """A retarget landing while UNCONFIRMED must not inherit the old clock.
 
-    Regression guard for a gap an independent review (2026-11-01) found in
-    the backstop mechanism's first version: self._pending_auto_stop_since
-    was only ever cleared on StopOutcome.CONFIRMED or on the backstop's own
-    exhaustion - never when a retarget (or a direction-reversal
-    cancellation; see _async_cancel_position_tracking()'s own comment)
-    lands while still UNCONFIRMED/FAILED and retrying. A stale timestamp
-    left over from the *old* target could then survive into a completely
-    different, later episode and silently eat into (or exhaust outright)
-    its own AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS budget before that
-    episode's very first attempt. Exercised here via a same-task retarget
+    self._pending_auto_stop_since must be cleared not only on
+    StopOutcome.CONFIRMED or on the backstop's own exhaustion, but also
+    when a retarget (or a direction-reversal cancellation; see
+    _async_cancel_position_tracking()'s own comment) lands while still
+    UNCONFIRMED/FAILED and retrying. A stale timestamp left over from the
+    *old* target could otherwise survive into a completely different,
+    later episode and silently eat into (or exhaust outright) its own
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS budget before that episode's
+    very first attempt. Exercised here via a same-task retarget
     (the same gap test_position_loop_keeps_tracking_a_same_direction_
     retarget_mid_stop covers for the CONFIRMED case) rather than an actual
     cancel+restart, to isolate this loop's own re-stamping logic from
@@ -1505,20 +1497,17 @@ async def test_position_loop_backstop_exhaustion_does_not_clobber_a_retarget(
 ) -> None:
     """Regression guard for the same bug class, in the backstop-exhaustion path.
 
-    A second independent review (2026-11-08) of #226/#227 found an
-    analogous gap here: unlike the sibling test above - a retarget landing
-    on some *earlier*, still-retrying attempt, which self-corrects on the
-    very next tick's own fresh target_when_stop_was_sent - nothing
-    protected the one attempt whose own clock.advance() happens to cross
-    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS itself. Before this fix, a
-    retarget landing in that exact attempt's own await fell straight into
-    the backstop-exhaustion branch's unconditional clear, wiping out the
-    brand new target (and is_closing/tracking) a retarget call had already
-    claimed moments earlier in that same await, and ending this task via
-    return with nothing left to track or auto-stop the new leg at all -
-    the #226/#227 bug class again, reached via 30s of sustained backstop
-    retries landing on the same tick as a retarget rather than a direction
-    reversal racing a manual stop.
+    Unlike the sibling test above - a retarget landing on some
+    *earlier*, still-retrying attempt, which self-corrects on the very
+    next tick's own fresh target_when_stop_was_sent - the one attempt
+    whose own clock.advance() happens to cross
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS itself needs its own
+    protection: a retarget landing in that exact attempt's own await
+    must not fall straight into the backstop-exhaustion branch's
+    unconditional clear, wiping out the brand new target (and
+    is_closing/tracking) a retarget call had already claimed moments
+    earlier in that same await, and ending this task via return with
+    nothing left to track or auto-stop the new leg at all.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -1592,8 +1581,7 @@ async def test_position_loop_times_out_after_the_outer_budget_is_exhausted(
 ) -> None:
     """The whole loop, not just the auto-stop retry sub-step, is bounded.
 
-    Issue #78's own outer safety net (2026-11-07, confirmed directly with
-    the project owner): POSITION_UPDATE_LOOP_TIMEOUT_SECONDS bounds
+    POSITION_UPDATE_LOOP_TIMEOUT_SECONDS bounds
     _async_position_update_loop()'s own total running time, regardless of
     which branch it is stuck in - unlike AUTO_STOP_CONFIRMATION_BACKSTOP_
     SECONDS above, which only times the auto-stop-at-target retry sub-loop
@@ -1667,22 +1655,21 @@ async def test_position_loop_keeps_tracking_a_same_direction_retarget_mid_stop(
 ) -> None:
     """A same-direction retarget landing mid-stop must not be wiped out.
 
-    Regression guard for the race the independent review of aa33670+#116
-    flagged (task #117): _has_live_tracking_in_direction() only checks
-    direction, not the target value, so async_close_cover()'s own
-    is_redundant_resend piggyback path can see this exact loop/task as
-    still live - same direction, not done, _move_start_* still set - and
-    deliberately leave it running rather than starting a tracking task of
-    its own, on the assumption that this loop will keep tracking its new
-    target. Before this fix, this loop had no way to notice the target
-    had moved out from under it while its own control_blind_stop() for
-    the *old* target was in flight: once that await returned, it
-    unconditionally cleared is_closing/_move_start_*/_target_position and
-    returned, ending itself - leaving the new leg's own, still-physically-
-    continuing move with nothing left tracking or auto-stopping it at
-    all. A plain _command_in_flight check could not close this gap either
-    (noted by the same reviewer): the new leg has already returned by the
-    time this loop's stop completes, so nothing is "in flight" to check.
+    _has_live_tracking_in_direction() only checks direction, not the
+    target value, so async_close_cover()'s own is_redundant_resend
+    piggyback path can see this exact loop/task as still live - same
+    direction, not done, _move_start_* still set - and deliberately
+    leave it running rather than starting a tracking task of its own,
+    on the assumption that this loop will keep tracking its new target.
+    This loop must therefore notice when the target has moved out from
+    under it while its own control_blind_stop() for the *old* target is
+    in flight: once that await returns, it must not unconditionally
+    clear is_closing/_move_start_*/_target_position and return, which
+    would leave the new leg's own, still-physically-continuing move with
+    nothing left tracking or auto-stopping it at all. A plain
+    _command_in_flight check cannot close this gap either: the new leg
+    has already returned by the time this loop's stop completes, so
+    nothing is "in flight" to check.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -1771,25 +1758,19 @@ class _LoopKeptRunning(Exception):
 async def test_position_loop_does_not_stop_early_on_a_short_uncontended_leg(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A short leg's own travel time must no longer inflate the lead.
+    """A short leg's own travel time must not inflate the lead.
 
-    Replaces this test's own former self (named ..._stops_early_to_
-    compensate_stop_latency), which proved the opposite: that a short,
-    5s close travel time turned the old ~0.5s uncontended baseline
-    (MOVE_COMMAND_EXTRA_RESENDS * MOVE_COMMAND_RESEND_DELAY_SECONDS) into
-    a disproportionately large ~10-point lead, large enough that a
-    position estimate of 25% - still 5 points short of the literal 20%
-    target - satisfied the compensated threshold and fired the stop
-    early. That was the same mechanism as the separately-reported
-    Küchenrolladen 92%/4%-undershoot/dashboard-sluggishness bug, just on
-    the intermediate-target side of it instead of the full-travel side -
-    see stop_lead_percent's own comment in _async_position_update_loop()
-    for the shared root cause and why the uncontended baseline is now
-    zeroed outright rather than merely recomputed. Uncontended, the lead
-    is now exactly 0 regardless of how short the travel time is, so this
-    same 25% estimate must no longer satisfy "<=20": the loop has to
-    keep waiting for the estimate to actually reach the literal target
-    instead, proving short legs no longer get an inflated lead at all.
+    A short, 5s close travel time could otherwise turn a small
+    uncontended baseline into a disproportionately large lead, large
+    enough that a position estimate of 25% - still 5 points short of
+    the literal 20% target - would satisfy the compensated threshold
+    and fire the stop early. See stop_lead_percent's own comment in
+    _async_position_update_loop() for why the uncontended baseline is
+    zeroed outright rather than merely recomputed. Uncontended, the
+    lead is exactly 0 regardless of how short the travel time is, so
+    this 25% estimate must not satisfy "<=20": the loop has to keep
+    waiting for the estimate to actually reach the literal target
+    instead, proving short legs do not get an inflated lead.
     """
 
     sleep_calls = 0
@@ -2118,21 +2099,21 @@ async def test_position_loop_set_position_endstop_also_confirms_full_travel(
 async def test_confirm_full_travel_resync_marks_confirmed_even_unarmed(
     hass: HomeAssistant,
 ) -> None:
-    """The real bug the test above's own hand-set _full_travel_resync_
-    direction masked: a set_cover_position(0)/(100) call never arms that
-    attribute in the first place (see async_close_cover's/async_open_
-    cover's own ternary, gated on self._target_position is None, which a
-    set_cover_position() leg's own _preserve_target=True never leaves
-    true) - so in real production code, reaching the endstop this way
-    always calls _confirm_full_travel_resync() with that attribute still
-    None, never "closing"/"opening". Before this fix, the mismatch made
-    the whole call a no-op, so self._position_confirmed_since_restart
-    stayed False forever if the first interaction after a restart
-    happened to be a set_cover_position() call instead of a plain
-    open/close - found and fixed at the project owner's own request
-    (2026-11-08), confirmed to be the same problem on both open and
-    close since async_open_cover()'s own ternary is the identical
-    mirror of async_close_cover()'s.
+    """Must mark confirmed even when _full_travel_resync_direction is unarmed.
+
+    A set_cover_position(0)/(100) call never arms
+    _full_travel_resync_direction in the first place (see
+    async_close_cover's/async_open_cover's own ternary, gated on
+    self._target_position is None, which a set_cover_position() leg's
+    own _preserve_target=True never leaves true) - so in real
+    production code, reaching the endstop this way always calls
+    _confirm_full_travel_resync() with that attribute still None, never
+    "closing"/"opening". If the mismatch made the whole call a no-op,
+    self._position_confirmed_since_restart would stay False forever if
+    the first interaction after a restart happened to be a
+    set_cover_position() call instead of a plain open/close - the same
+    problem on both open and close since async_open_cover()'s own
+    ternary is the identical mirror of async_close_cover()'s.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)
@@ -2225,15 +2206,12 @@ async def test_set_cover_position_to_an_endstop_also_confirms_when_opening(
 ) -> None:
     """Mirror of the test above, for the opening side.
 
-    Added on the project owner's own direct follow-up question of whether
-    both directions were truly verified, not just argued to be identical
-    by reading async_open_cover()'s ternary alongside async_close_cover()'s
-    (see _confirm_full_travel_resync()'s own docstring) - that argument is
-    correct (the two ternaries differ only in the "opening"/"closing"
-    string literal, see cover.py directly), but is a code-reading argument,
-    not a test. This gives the opening side the same direct, end-to-end
-    proof the test above already gives the closing side, rather than
-    leaving it resting on the symmetry argument alone.
+    async_open_cover()'s ternary is the identical mirror of
+    async_close_cover()'s (see _confirm_full_travel_resync()'s own
+    docstring), differing only in the "opening"/"closing" string
+    literal, but this gives the opening side its own direct,
+    end-to-end proof rather than resting on that symmetry argument
+    alone.
     """
 
     async def instant_sleep(*_args: object, **_kwargs: object) -> None:
@@ -2325,18 +2303,13 @@ async def test_update_position_holds_at_start_during_the_transmit_dead_time(
     """A _move_start_time pushed into the future must not run the position
     estimate backwards past the start position.
 
-    async_open_cover()/async_close_cover() used to push _move_start_time
-    this far into the future themselves, modeling the real ~1.1-1.2s it
-    takes the stick to accept a write before the motor actually starts
-    turning - reverted (Issue #78, 2026-11-07; see both call sites' own
-    comments) because it froze the reported position for just over a
-    second at the start of every single move, a real, user-visible
-    regression of its own. Neither call site constructs this scenario any
-    more, but _update_position()'s own max(0.0, ...) clamp - the actual
-    thing under test here - is left in place as a defensive guard rather
-    than removed along with the one caller that used to exercise it, so
-    this test now builds the scenario directly rather than through
-    async_open_cover()/async_close_cover(): while time.monotonic() has
+    Neither async_open_cover() nor async_close_cover() constructs this
+    scenario any more (pushing _move_start_time into the future froze
+    the reported position at the start of every move, a user-visible
+    regression - see both call sites' own comments), but
+    _update_position()'s own max(0.0, ...) clamp - the actual thing
+    under test here - is left in place as a defensive guard, so this
+    test builds the scenario directly instead: while time.monotonic() has
     not yet reached a (here, manually set) pushed-forward _move_start_
     time, elapsed_time would otherwise go negative and run total_
     position_change backwards past _move_start_position - the clamp
@@ -2385,6 +2358,56 @@ async def test_update_position_clamps_overshoot_to_the_travel_limits(
 
     assert cover._attr_current_cover_position == 0
     assert cover._attr_is_closed is True
+
+
+async def test_update_position_caps_a_closing_estimate_at_an_intermediate_target(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The estimate must not count past an active intermediate target.
+
+    Unlike a plain full close (clamped at the real 0/100 travel limits,
+    see the test above), an intermediate set_cover_position() target has
+    no endstop of its own - only this estimate and the loop's own
+    explicit stop command confirm it. Without this cap, any delay before
+    that stop is confirmed (a resend, say) let the estimate keep
+    counting past the target, each tick re-recording a position further
+    from reality than the blind - which had already stopped - actually
+    was: reported directly against a real set_cover_position(93) run
+    whose Entwicklerwerkzeuge page kept counting down well past the
+    target before finally correcting itself once the stop confirmed.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 10.0})
+    cover._attr_is_closing = True
+    cover._move_start_time = clock()
+    cover._move_start_position = 100
+    cover._target_position = 40
+
+    clock.advance(8.0)  # would estimate 20% without the cap - past the 40% target
+    cover._update_position()
+
+    assert cover._attr_current_cover_position == 40
+
+
+async def test_update_position_caps_an_opening_estimate_at_an_intermediate_target(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors the closing test above for the opening direction."""
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 10.0})
+    cover._attr_is_opening = True
+    cover._move_start_time = clock()
+    cover._move_start_position = 0
+    cover._target_position = 60
+
+    clock.advance(8.0)  # would estimate 80% without the cap - past the 60% target
+    cover._update_position()
+
+    assert cover._attr_current_cover_position == 60
 
 
 async def test_update_position_is_a_noop_without_a_move_in_progress(
@@ -2638,22 +2661,20 @@ async def test_handle_event_stopped_after_backstop_exhaustion_does_not_error(
 ) -> None:
     """A late STOPPED after the backstop gave up must not break log formatting.
 
-    Regression guard for a second bug the same independent review
-    (2026-11-01) found alongside the retarget-leak covered above: once the
-    backstop branch in _async_position_update_loop() sets self._attr_
-    current_cover_position to None (see AUTO_STOP_CONFIRMATION_BACKSTOP_
-    SECONDS's own exhaustion branch), nothing stops a real, late STOPPED
-    confirmation from the stick itself arriving afterwards - the backstop
-    giving up does not mean the motor stopped trying to answer. This
-    handler's own log line used to format that None straight into "%d%%",
-    which raises inside the logging module's own lazy formatting
-    (record.getMessage()) - normally caught by a handler's own
-    handleError() rather than propagating, so this never crashed Home
-    Assistant, but it did turn exactly the event this handler most needs
-    to report cleanly into a confusing traceback instead. Checked here by
-    calling getMessage() directly, the same way a handler's own formatting
-    would, rather than relying on whichever error-swallowing behaviour
-    caplog's own handler happens to have.
+    Once the backstop branch in _async_position_update_loop() sets
+    self._attr_current_cover_position to None (see
+    AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS's own exhaustion branch),
+    nothing stops a real, late STOPPED confirmation from the stick
+    itself arriving afterwards - the backstop giving up does not mean
+    the motor stopped trying to answer. Formatting that None straight
+    into "%d%%" would raise inside the logging module's own lazy
+    formatting (record.getMessage()), normally caught by a handler's
+    own handleError() rather than propagating, turning exactly the
+    event this handler most needs to report cleanly into a confusing
+    traceback instead. Checked here by calling getMessage() directly,
+    the same way a handler's own formatting would, rather than relying
+    on whichever error-swallowing behaviour caplog's own handler
+    happens to have.
     """
     caplog.set_level(logging.INFO, logger="custom_components.schellenberg_usb.cover")
     api = MagicMock()
@@ -2721,13 +2742,13 @@ async def test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_zero(
 ) -> None:
     """NEAR_END_STOP_SNAP_TOLERANCE_PERCENT: calibration drift vs a real stop.
 
-    Real-world report (2026-10-31): closing a blind all the way via its
-    remote consistently left the estimate at 2% instead of 0%, every
-    time, regardless of how directly/quickly it was driven down - the
-    motor's own physical end stop does not line up exactly with elapsed
-    time crossing 0% once calibration's own travel_time is an
-    approximation of the real motor's, which it necessarily always is.
-    An untargeted move (_target_position already None, as every remote/
+    The motor's own physical end stop does not line up exactly with
+    elapsed time crossing 0% once calibration's own travel_time is an
+    approximation of the real motor's, which it necessarily always is -
+    so closing a blind all the way via its remote can leave the estimate
+    at a couple of percent instead of 0%, every time, regardless of how
+    directly/quickly it was driven down. An untargeted move
+    (_target_position already None, as every remote/
     wall-switch/Gurtwickler-driven move always is - see EVENT_STARTED_
     MOVING_DOWN's own handling) landing this close to the edge it was
     already heading toward is this drift, not a deliberate mid-travel
@@ -2760,7 +2781,7 @@ async def test_handle_event_stopped_snaps_a_near_full_targetless_open_to_100(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Mirrors test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_
-    zero above, for the opening/98% side of the same real-world report.
+    zero above, for the opening/98% side of the same drift.
     """
     clock = _FakeClock(1_000.0)
     monkeypatch.setattr(time, "monotonic", clock)
@@ -3396,18 +3417,16 @@ async def test_added_to_hass_leaves_position_unknown_when_nothing_was_restored(
 ) -> None:
     """A brand-new entity with no prior Home Assistant state at all, and no
     CONF_INITIAL_POSITION in its device_data either (e.g. a blind paired
-    before that key existed, or - before the Issue #78 pairing-flow
-    unification (2026-11-07) - via what was then a separate manual-entry
-    path that never calibrated) - see the sibling test right below for
-    the case where that key *is* present.
+    before that key existed, or via a manual-entry path that never
+    calibrated) - see the sibling test right below for the case where
+    that key *is* present.
 
-    Used to default to 0%/closed here - see this branch's own comment in
-    cover.py for the real-world report that traced "every blind on a hub
-    shows closed right after a Home Assistant restart, even ones that
-    were not actually closed" to exactly this fallback. Position/
-    is_closed are both already None from __init__, so leaving them
-    untouched is what actually reports "unknown" rather than a specific,
-    wrong answer.
+    Defaulting to 0%/closed here would make every such blind on a hub
+    show closed right after a Home Assistant restart, even ones that
+    were not actually closed - see this branch's own comment in
+    cover.py. Position/is_closed are both already None from __init__,
+    so leaving them untouched is what actually reports "unknown"
+    rather than a specific, wrong answer.
     """
     api = MagicMock()
     cover = _build_cover(hass, api)

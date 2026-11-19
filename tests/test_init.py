@@ -41,6 +41,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_ENUM,
+    CONF_INITIAL_POSITION,
     CONF_LAST_CALIBRATION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
@@ -276,6 +277,81 @@ async def test_calibration_only_subentry_update_does_not_trigger_reload(
     calibration_only_update[CONF_LAST_CALIBRATION] = "2026-09-27T10:00:00+00:00"
     hass.config_entries.async_update_subentry(
         entry, entry.subentries[subentry_id], data=calibration_only_update
+    )
+    await hass.async_block_till_done()
+
+    mock_reload.assert_not_called()
+
+    rebind_update = dict(entry.subentries[subentry_id].data)
+    rebind_update[CONF_DEVICE_ENUM] = "11"
+    hass.config_entries.async_update_subentry(
+        entry, entry.subentries[subentry_id], data=rebind_update
+    )
+    await hass.async_block_till_done()
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
+
+
+async def test_manual_position_sync_subentry_update_does_not_trigger_reload(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Developer Tools manual position sync must not force a full hub reload.
+
+    Regression (v1.5.1): CONF_INITIAL_POSITION was missing from
+    reload_ignored_subentry_data_keys, even though config_flow.py's own
+    _async_manual_position_sync() persists exactly that field onto the
+    subentry right after already updating the live cover entity via a
+    dispatcher signal (see SchellenbergCover._handle_manual_position_
+    sync()) - no reload needed for that live update to take effect.
+    Before this fix, persisting it therefore still triggered a full hub
+    reload immediately afterwards: disconnecting the serial port (every
+    cover on the hub briefly unavailable) and rebuilding every entity
+    from scratch, which also reset Home Assistant's own "last changed"
+    timestamp for every one of them, not just the blind that was
+    actually corrected - the exact bug reported against this test's own
+    sibling above, but for a manual position sync instead of a
+    recalibration. Changing any other subentry field (e.g. a re-paired
+    device_enum) must still reload, mirrored here from that same sibling
+    test for the same reason.
+    """
+    monkeypatch.setattr(SchellenbergUsbApi, "connect", AsyncMock())
+    monkeypatch.setattr(
+        hass.config_entries, "async_forward_entry_setups", AsyncMock(return_value=True)
+    )
+    mock_reload = AsyncMock()
+    monkeypatch.setattr(hass.config_entries, "async_reload", mock_reload)
+
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERIAL_PORT: "/dev/fake"})
+    entry.add_to_hass(hass)
+    blind = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                CONF_DEVICE_ID: "ABCDEF",
+                CONF_DEVICE_ENUM: "10",
+                CONF_OPEN_TIME: 20.0,
+                CONF_CLOSE_TIME: 18.0,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_BLIND,
+        title="Living Room Blind",
+        unique_id="ABCDEF",
+    )
+    hass.config_entries.async_add_subentry(entry, blind)
+    subentry_id = blind.subentry_id
+
+    assert await async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+    mock_reload.reset_mock()  # ignore anything triggered by setup itself
+
+    # Mirrors config_flow.py's own _async_manual_position_sync(): a full
+    # replacement dict built from the subentry's own current data, with
+    # only CONF_INITIAL_POSITION added/changed - see that method's own
+    # comment on why it starts from subentry.data rather than a smaller
+    # merge-on-top update.
+    manual_sync_update = dict(entry.subentries[subentry_id].data)
+    manual_sync_update[CONF_INITIAL_POSITION] = 42
+    hass.config_entries.async_update_subentry(
+        entry, entry.subentries[subentry_id], data=manual_sync_update
     )
     await hass.async_block_till_done()
 

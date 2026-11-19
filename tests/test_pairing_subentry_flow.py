@@ -258,14 +258,13 @@ async def test_reset_stick_not_ready_reports_status(hass: HomeAssistant) -> None
 
 
 async def test_calibrate_aborts_when_subentry_has_no_enum(hass: HomeAssistant) -> None:
-    """Regression: the guard used to only check the two device_id halves,
-    so a subentry with valid device_ids but no enum data anywhere (neither
-    CONF_COMMAND_ENUM/CONF_DEVICE_ENUM nor CONF_STATUS_ENUM) sailed straight
-    through it. status_enum ended up None and reached
-    handler.set_selected_device() with "enum": None, from there into the
-    serial payload itself unchecked, instead of aborting here with a clear
-    reason. See the matching comment on async_step_calibrate()'s guard in
-    config_flow.py.
+    """Regression: a subentry with valid device_ids but no enum data
+    anywhere (neither CONF_COMMAND_ENUM/CONF_DEVICE_ENUM nor
+    CONF_STATUS_ENUM) must not sail through the guard with status_enum
+    ending up None and reaching handler.set_selected_device() with
+    "enum": None, from there into the serial payload itself unchecked -
+    it must abort here with a clear reason instead. See the matching
+    comment on async_step_calibrate()'s guard in config_flow.py.
     """
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(
@@ -517,11 +516,11 @@ async def test_send_raw_command_transmit_failed(hass: HomeAssistant) -> None:
 
 
 async def test_status_discovery_choice_shows_a_menu(hass: HomeAssistant) -> None:
-    """The new choice step (2026-11-08, project owner's own request) is a
-    plain two-option menu, not a form - so a person without their original
-    remote to hand, or who doesn't want to run discovery right now, is
-    never forced through async_step_discover_status()'s own "Start
-    listening" screen just to get past it.
+    """This choice step is a plain two-option menu, not a form - so a
+    person without their original remote to hand, or who doesn't want to
+    run discovery right now, is never forced through
+    async_step_discover_status()'s own "Start listening" screen just to
+    get past it.
     """
     flow = make_flow(hass)
 
@@ -642,15 +641,11 @@ async def test_confirm_status_discovery_updates_existing_keeps_primary_on_confli
     This is the _status_discovery_updates_existing=True branch's own
     counterpart to test_confirm_status_discovery_keeps_calibration_
     primary_on_conflict below, for the sibling, Developer-Tools/
-    reconfigure path (2026-11-15). Before this fix, the branch this test
-    exercises ran unconditionally whenever discovery found *anything*, so
-    the already-confirmed primary - and the whole secondary list along
-    with it - was simply replaced with whatever this one run found,
-    discarding the original device's identity entirely. Reported as an
-    electronic Gurtwickler's already-working status identity vanishing
-    (and the device producing no reaction in Home Assistant afterward)
-    the moment Developer Tools' "Discover status" was run with the
-    original remote instead.
+    reconfigure path. Without this protection, an electronic
+    Gurtwickler's already-working status identity could vanish (and the
+    device would produce no reaction in Home Assistant afterward) the
+    moment Developer Tools' "Discover status" was run with the original
+    remote instead.
     """
     flow = make_flow(hass)
     existing_secondary = [{"device_id": "778899", "enum": "05"}]
@@ -695,16 +690,16 @@ async def test_confirm_status_discovery_preserves_calibration_identity_when_skip
 
     This is the _pending_finish_data branch's counterpart to
     test_confirm_status_discovery_updates_existing_subentry above - the
-    "brand-new-pairing... calls async_create_entry()" branch that test's
-    own docstring pointed at, left untested until now. Before this fix,
-    self._pending_status_* (this *flow's* own copies, blank unless
-    async_step_discover_status() ran) unconditionally overwrote whatever
-    data CalibrationFlowHandler.async_step_calibration_complete() had
-    already stashed in _pending_finish_data - so the common case (skip
-    discovery entirely, see async_step_skip_status_discovery()) silently
-    wiped out whatever the calibration drive itself found.
-    self._status_discovery_result is None here because no discovery
-    attempt ever ran this round - the actual signal the fix keys off.
+    "brand-new-pairing... calls async_create_entry()" branch. Without
+    this protection, self._pending_status_* (this *flow's* own copies,
+    blank unless async_step_discover_status() ran) would unconditionally
+    overwrite whatever data CalibrationFlowHandler.async_step_
+    calibration_complete() had already stashed in _pending_finish_data -
+    wiping out the calibration drive's own findings even in the common
+    case of skipping discovery entirely (see
+    async_step_skip_status_discovery()). self._status_discovery_result
+    is None here because no discovery attempt ever ran this round - the
+    actual signal this logic keys off.
     """
     flow = make_flow(hass)
     flow._pending_device_id = DEVICE_ID
@@ -753,20 +748,14 @@ async def test_confirm_status_discovery_keeps_calibration_primary_on_conflict(
     already self-echo-confirmed one - it is folded into the secondary
     list instead, never used to replace it.
 
-    Renamed and rewritten (2026-11-15) from
-    test_confirm_status_discovery_overrides_with_a_real_new_primary,
-    which used to assert exactly the opposite - that a real new primary
-    "must still take over from whatever the calibration drive stashed".
-    That was the bug: before this fix, the branch below ran
-    unconditionally whenever discovery found *anything*, overwriting
-    both the primary identity and the whole secondary list in one go -
-    so the calibration-confirmed identity did not even survive as a
-    secondary, it simply vanished. Reported by the project owner as
-    Erstkalibrierung swapping its primary/secondary identities and never
-    recognizing a secondary from the remote at all, traced to hardware
-    (an electronic Gurtwickler) whose motor echoes its own commanded
+    Without this protection, both the primary identity and the whole
+    secondary list could be overwritten in one go whenever discovery
+    found *anything*, so the calibration-confirmed identity would not
+    even survive as a secondary. This can genuinely happen with hardware
+    like an electronic Gurtwickler, whose motor echoes its own commanded
     moves under one identity while the original remote driving the same
-    physical blind is heard under a different one entirely.
+    physical blind is heard under a different one entirely - both real,
+    neither one wrong.
     """
     flow = make_flow(hass)
     flow._pending_device_id = DEVICE_ID
@@ -810,10 +799,10 @@ async def test_confirm_status_discovery_adopts_discovery_primary_if_none_confirm
 ) -> None:
     """When the calibration drive itself found no confirmed primary (its
     own self-echo capture came up empty), a guided discovery result is
-    the only candidate there is, and must still be adopted exactly as
-    before this fix - the "keep the existing one" protection above only
-    ever applies when there actually is an existing, confirmed primary
-    to protect in the first place.
+    the only candidate there is, and must still be adopted - the "keep
+    the existing one" protection above only ever applies when there
+    actually is an existing, confirmed primary to protect in the first
+    place.
     """
     flow = make_flow(hass)
     flow._pending_device_id = DEVICE_ID
