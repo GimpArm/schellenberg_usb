@@ -461,17 +461,17 @@ an update.
 >
 > `stop_latenz` and `korrektur_dauer` (the fixed margin shortening a timed
 > `stop_cover`'s own wait, and the extra wait added after driving into an
-> end stop) have now been removed from both scripts below too, at the
-> project owner's own request, to match their own current, real-world
-> copy of these scripts rather than this more elaborate variant. The
-> timing that remains — `start_ts` plus the `remaining_duration` correction
-> described in the first Note below the scripts — already accounts for
-> the open/close call's own actual duration, which matters more in
-> practice than the smaller, further delay a queued `stop_cover` call can
-> still see on top of that; `stop_latenz` only ever compensated for the
-> latter. If you command several blinds at once and an intermediate
-> target lands a percentage point or two short, that is most likely this
-> trade-off rather than a regression.
+> end stop) were removed from both scripts below too, at the project
+> owner's own request, to match their own current, real-world copy of
+> these scripts rather than this more elaborate variant. At the time, the
+> timing that remained — a `start_ts` plus a `remaining_duration`
+> correction, both computed by the script itself — already accounted for
+> the open/close call's own actual duration, which mattered more in
+> practice than the smaller, further delay a queued `stop_cover` call
+> could still see on top of that; `stop_latenz` only ever compensated for
+> the latter. That self-timed approach has since been replaced outright —
+> see the precision-gap paragraph further below — so this particular
+> trade-off no longer applies either.
 >
 > If you're running a copy with `stop_latenz`/`korrektur_dauer` still in
 > place, replace it with the version below, or remove the pieces
@@ -494,6 +494,29 @@ an update.
 > `min_fahrzeit_doppel` fix further above already had to account for - not
 > just imprecisely, so update both halves in the same edit rather than one
 > at a time.
+>
+> A further precision gap, reported directly from real-world testing after
+> v1.5.1's own position-tracking fixes: both scripts used to estimate the
+> physical move's own duration from a per-blind `open_seconds`/`close_seconds`
+> guess, time it themselves, and send a plain `cover.open_cover`/
+> `cover.close_cover` followed by their own timed `cover.stop_cover` - so the
+> real `cover.*` entity never learned what the actual target was, and could
+> only be as accurate as this script's own duration estimate, its `helper`'s
+> own stored value, and the exact real-world dispatch timing of that final
+> `stop_cover`. A run that looked right to the second could still land the
+> real entity a double-digit percentage away from the intended target, and
+> - since the real entity never knew a target was involved at all - nothing
+> in v1.5.1's own position-estimate fixes could catch or correct it. Both
+> scripts now call `cover.set_cover_position` directly on the real entity
+> instead (inverted, since this helper's own 0/100 convention is the
+> opposite of the real entity's - see the first Note below the scripts) and
+> let the integration's own calibrated, stop-confirmed positioning reach the
+> target precisely, the same way it already does for a direct call to the
+> real entity's own `set_cover_position` (for example, from the dashboard's
+> position slider). `open_seconds`/`close_seconds` are no longer used by
+> either script - the integration already has its own, continuously
+> calibrated numbers for this - but are still accepted as script fields so
+> Step 3/4's existing `data:` blocks do not need to change.
 
 This setup gives you two extra things on top of the integration's own cover
 entities:
@@ -533,8 +556,8 @@ switch it to YAML mode, and paste in everything from `alias:` down.
 |---|---|
 | `requested_position` | Requested position, on this helper's own scale: **0 = fully open**, **100 = fully closed** (see note below) |
 | `helper` | The number helper for this blind, from step 1 |
-| `open_seconds` | Measured seconds for a full **opening** run |
-| `close_seconds` | Measured seconds for a full **closing** run |
+| `open_seconds` | No longer used by either script - the integration's own, continuously calibrated travel time is used instead. Still accepted so Step 3/4's existing `data:` blocks do not need to change |
+| `close_seconds` | Same as `open_seconds` above: no longer used, still accepted |
 | `entity` | The blind's real cover entity from this integration, e.g. `cover.living_room_blind` |
 
 **Script A — for normal use** (dashboards, automations). It does nothing if
@@ -548,52 +571,16 @@ internal_blind_position_logic:
   sequence:
     - condition: template
       value_template: "{{ requested_position | int != states(helper) | int }}"
-    - delay:
-        milliseconds: "{{ range(0, 300) | random }}"
-    - variables:
-        target_position: "{{ requested_position | float(0) }}"
-        current_position: "{{ states(helper) | float(0) }}"
-        open_time: "{{ open_seconds | float(25) }}"
-        close_time: "{{ close_seconds | float(25) }}"
-        moving_down: "{{ target_position > current_position }}"
-        duration: >
-          {% set diff = (current_position - target_position) | abs %} {% set factor = close_time if
-          moving_down else open_time %} {{ ((diff / 100.0) * factor) | round(2) }}
-    - choose:
-        - conditions:
-            - condition: template
-              value_template: "{{ not moving_down }}"
-          sequence:
-            - action: cover.open_cover
-              target:
-                entity_id: "{{ entity }}"
-            - variables:
-                start_ts: "{{ now().timestamp() }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ moving_down }}"
-          sequence:
-            - action: cover.close_cover
-              target:
-                entity_id: "{{ entity }}"
-            - variables:
-                start_ts: "{{ now().timestamp() }}"
-    - variables:
-        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
-    - delay: "{{ remaining_duration }}"
-    - choose:
-        - conditions:
-            - condition: template
-              value_template: "{{ target_position | int != 0 and target_position | int != 100 }}"
-          sequence:
-            - action: cover.stop_cover
-              target:
-                entity_id: "{{ entity }}"
+    - action: cover.set_cover_position
+      target:
+        entity_id: "{{ entity }}"
+      data:
+        position: "{{ 100 - (requested_position | int) }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helper }}"
       data:
-        value: "{{ target_position | float(0) }}"
+        value: "{{ requested_position | float(0) }}"
 ```
 
 **Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
@@ -608,73 +595,26 @@ alexa_blind_position_logic:
   mode: parallel
   max: 12
   sequence:
-    - delay:
-        milliseconds: "{{ range(0, 300) | random }}"
     - variables:
         target_position: "{{ requested_position | float(0) }}"
         current_position: "{{ states(helper) | float(0) }}"
-        open_time: "{{ open_seconds | float(25) }}"
-        close_time: "{{ close_seconds | float(25) }}"
-        reset_moving_down: "{{ target_position >= 50 }}"
-        moving_down: |
+        reset_to_fully_closed: "{{ target_position >= 50 }}"
+        effective_target: |
           {% if target_position == current_position %}
-            {{ reset_moving_down }}
+            {{ 100 if reset_to_fully_closed else 0 }}
           {% else %}
-            {{ target_position > current_position }}
+            {{ target_position }}
           {% endif %}
-        duration: |
-          {% if target_position == current_position %}
-            {% if reset_moving_down %}
-              {{ close_time }}
-            {% else %}
-              {{ (current_position / 100.0) * open_time }}
-            {% endif %}
-          {% else %}
-            {% set diff = (current_position - target_position) | abs %}
-            {% set factor = close_time if moving_down else open_time %}
-            {{ ((diff / 100.0) * factor) | round(2) }}
-          {% endif %}
-    - choose:
-        - conditions:
-            - condition: template
-              value_template: "{{ not moving_down }}"
-          sequence:
-            - action: cover.open_cover
-              target:
-                entity_id: "{{ entity }}"
-            - variables:
-                start_ts: "{{ now().timestamp() }}"
-        - conditions:
-            - condition: template
-              value_template: "{{ moving_down }}"
-          sequence:
-            - action: cover.close_cover
-              target:
-                entity_id: "{{ entity }}"
-            - variables:
-                start_ts: "{{ now().timestamp() }}"
-    - variables:
-        remaining_duration: "{{ [0, duration - (now().timestamp() - start_ts)] | max | round(2) }}"
-    - delay: "{{ remaining_duration }}"
-    - choose:
-        - conditions:
-            - condition: template
-              value_template: >-
-                {{ not (target_position == current_position) and (target_position | int != 0 and target_position | int != 100) }}
-          sequence:
-            - action: cover.stop_cover
-              target:
-                entity_id: "{{ entity }}"
+    - action: cover.set_cover_position
+      target:
+        entity_id: "{{ entity }}"
+      data:
+        position: "{{ 100 - (effective_target | int) }}"
     - action: input_number.set_value
       target:
         entity_id: "{{ helper }}"
       data:
-        value: |
-          {% if target_position == current_position %}
-            {{ 100 if reset_moving_down else 0 }}
-          {% else %}
-            {{ target_position | float(0) }}
-          {% endif %}
+        value: "{{ effective_target | float(0) }}"
 ```
 
 Keep `mode: parallel` and a `max` at least as high as your number of blinds
@@ -778,27 +718,18 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
 - The 0–100 scale used above is this helper's own convention (0 = open, 100
   = closed) and is independent of the position this integration tracks
   internally on the real `cover.*` entity — the two don't need to match.
-- `start_ts` and the second `remaining_duration` (recomputed right after the
-  open/close `choose:` block, replacing the first, rougher estimate) measure
-  how much time the open/close call above actually took, rather than
-  assuming a fixed value — this corrects for whatever the stick's
-  reply/retry time turned out to be: `open_cover`/`close_cover` on this
-  integration's own `cover.*` entity wait for the stick's reply before
-  returning, and retry for as long as it answers busy, so neither call is
-  always instant.
-- When the target is exactly 0 or 100, the scripts intentionally keep
-  driving into the mechanical end stop instead of stopping at the
-  calculated time, which corrects any position drift that built up over
-  previous moves.
-- A manual `stop_cover` — including any these scripts trigger — briefly
-  tries to get priority over other blinds' own *waiting* `open`/`close`
-  commands before transmitting, but not over whichever command currently
-  holds the radio, nor over another blind's own stop that asked for it
-  first — falling back to an instant, unretried write if that brief
-  window (a couple of seconds at most) runs out before its turn comes.
-  For an intermediate target, that queueing is the main source of the
-  small overshoot the note above (under Step 2) describes trading away
-  `stop_latenz` for. `open`/`close` are different: both wait (a few seconds
+- When the target is exactly 0 or 100, `set_cover_position` (called by both
+  scripts above, the same as the real entity's own position slider) drives
+  all the way into the mechanical end stop rather than stopping early,
+  which corrects any position drift that built up over previous moves -
+  inherited from the real entity itself now, rather than something either
+  script has to arrange on its own.
+- A manual `stop_cover` briefly tries to get priority over other blinds'
+  own *waiting* `open`/`close` commands before transmitting, but not over
+  whichever command currently holds the radio, nor over another blind's own
+  stop that asked for it first — falling back to an instant, unretried
+  write if that brief window (a couple of seconds at most) runs out before
+  its turn comes. `open`/`close` are different: both wait (a few seconds
   at most, best-effort) for the stick to report itself idle before
   sending, and if the stick still answers that it is busy right as the
   command goes out (`Transmit error - stick busy`), they keep retrying -
