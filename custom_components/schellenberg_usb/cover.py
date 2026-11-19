@@ -1216,23 +1216,25 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             0.1,
                         )
                         # Baseline is T_stamp alone (see the derivation above), now ~0:
-                        # STOP_COMMAND_LATENCY_SECONDS alone cancels out of this baseline
-                        # exactly when uncontended, since both its appearances are equal.
+                        # STOP_COMMAND_LATENCY_SECONDS alone cancels out of this
+                        # baseline exactly when uncontended, since both its appearances
+                        # are equal.
                         stop_latency_seconds = 0.0
                         # When the shared lock is held by another blind's own move or
                         # stop right now, this stop still has to wait out whatever that
-                        # cycle has left - up to one more STOP_COMMAND_LATENCY_SECONDS added
-                        # to D_stop alone, so the uncontended cancellation above no longer
-                        # holds and this adds it back. Checked fresh every tick, so this
-                        # only widens the lead on ticks where contention is actually
-                        # observed.
+                        # cycle has left - up to one more STOP_COMMAND_LATENCY_SECONDS
+                        # added to D_stop alone, so the uncontended cancellation above
+                        # no longer holds and this adds it back. Checked fresh every
+                        # tick, so this only widens the lead on ticks where contention
+                        # is actually observed.
                         if self._api.move_lock_busy:
                             stop_latency_seconds += STOP_COMMAND_LATENCY_SECONDS
-                        # travel_time_for_lead's own floor above only keeps this division
-                        # from raising; it has no matching ceiling. See MAX_STOP_LEAD_PERCENT's
-                        # own comment in const.py for why an unbounded lead is not just a
-                        # cosmetically large number: past 100 it makes position_reached
-                        # satisfied immediately regardless of actual position.
+                        # travel_time_for_lead's own floor above only keeps this
+                        # division from raising; it has no matching ceiling. See
+                        # MAX_STOP_LEAD_PERCENT's own comment in const.py for why an
+                        # unbounded lead is not just a cosmetically large number: past
+                        # 100 it makes position_reached satisfied immediately regardless
+                        # of actual position.
                         stop_lead_percent = min(
                             (stop_latency_seconds / travel_time_for_lead) * 100,
                             MAX_STOP_LEAD_PERCENT,
@@ -1249,12 +1251,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         <= self._target_position + stop_lead_percent
                     )
                     if position_reached:
-                        previous_position_at_target = (
-                            self._attr_current_cover_position
-                        )
-                        # Default: no resync was pending. Only the needs_stop_command=False
-                        # sub-branch below can flip this True, right before calling
-                        # _confirm_full_travel_resync() - see its own comment there.
+                        previous_position_at_target = self._attr_current_cover_position
+                        # Default: no resync was pending. Only the
+                        # needs_stop_command=False sub-branch below can flip this True,
+                        # right before calling _confirm_full_travel_resync() - see its
+                        # own comment there.
                         resync_was_pending = False
                         self._attr_current_cover_position = self._target_position
                         _LOGGER.info(
@@ -1263,51 +1264,57 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._target_position,
                         )
                         if needs_stop_command:
-                            # Snapshot the target this stop is actually
-                            # for, taken before the await below - see the
-                            # re-check just after that same await for why.
+                            # Snapshot the target this stop is actually for, taken
+                            # before the await below - see the re-check just after that
+                            # same await for why.
                             if (
                                 self._pending_auto_stop_since is None
                                 or self._pending_auto_stop_target
                                 != self._target_position
                             ):
-                                # Either the first attempt for this episode, or a stale timestamp
-                                # left over from a different target's episode that ended without
-                                # going through the usual clearing paths. Either way, start this
-                                # episode's own clock now rather than inheriting another episode's
-                                # already-spent budget.
+                                # Either the first attempt for this episode, or a stale
+                                # timestamp left over from a different target's episode
+                                # that ended without going through the usual clearing
+                                # paths. Either way, start this episode's own clock now
+                                # rather than inheriting another episode's already-spent
+                                # budget.
                                 self._pending_auto_stop_since = time.monotonic()
                                 self._pending_auto_stop_target = self._target_position
                             target_when_stop_was_sent = self._target_position
-                            # Functionally a stop, same as async_stop_cover()'s own manual one
-                            # - cancel_pending_move() comes first because the move ending here
-                            # may still have control_blind_with_retry() retrying it.
+                            # Functionally a stop, same as async_stop_cover()'s own
+                            # manual one - cancel_pending_move() comes first because the
+                            # move ending here may still have control_blind_with_retry()
+                            # retrying it.
                             self._api.cancel_pending_move(self._command_device_id)
-                            # control_blind_stop() waits for this move's own open/close write
-                            # to finish transmitting and is briefly serialized against other
-                            # writes too - closes the same gap async_stop_cover() closes for a
-                            # manual stop, for this automatic one. Adds no delay in the normal
-                            # case (nothing left in flight by the time this is reached).
+                            # control_blind_stop() waits for this move's own open/close
+                            # write to finish transmitting and is briefly serialized
+                            # against other writes too - closes the same gap
+                            # async_stop_cover() closes for a manual stop, for this
+                            # automatic one. Adds no delay in the normal case (nothing
+                            # left in flight by the time this is reached).
                             stop_outcome = await self._api.control_blind_stop(
                                 self._command_enum,
                                 device_id=self._command_device_id,
                             )
                             if stop_outcome is not StopOutcome.CONFIRMED:
-                                # Neither FAILED nor UNCONFIRMED is safe to treat as a successful
-                                # stop: the motor may still be moving and this loop's own ability to
-                                # act once a real stop lands would already be torn down. Leave state
-                                # untouched and retry next tick, up to
-                                # AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS total (see that constant's
-                                # own comment in const.py).
+                                # Neither FAILED nor UNCONFIRMED is safe to treat as a
+                                # successful stop: the motor may still be moving and
+                                # this loop's own ability to act once a real stop lands
+                                # would already be torn down. Leave state untouched and
+                                # retry next tick, up to
+                                # AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS total (see
+                                # that constant's own comment in const.py).
                                 if (
                                     time.monotonic() - self._pending_auto_stop_since
                                     >= AUTO_STOP_CONFIRMATION_BACKSTOP_SECONDS
                                 ):
-                                    # Re-check rather than trust the pre-await snapshot: a
-                                    # same-direction retarget landing during this attempt's own await
-                                    # already pointed self._target_position at its new value, and
-                                    # falling through to the unconditional clear below would wipe that
-                                    # still-live target out from under it.
+                                    # Re-check rather than trust the pre-await snapshot:
+                                    # a same-direction retarget landing during this
+                                    # attempt's own await already pointed
+                                    # self._target_position at its new value, and
+                                    # falling through to the unconditional clear below
+                                    # would wipe that still-live target out from under
+                                    # it.
                                     if (
                                         self._target_position
                                         != target_when_stop_was_sent
@@ -1375,47 +1382,48 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             self._pending_auto_stop_since = None
                             self._pending_auto_stop_target = None
                             if self._target_position != target_when_stop_was_sent:
-                                # A same-direction retarget landed while the await above was in
-                                # flight and already pointed self._target_position at its own new
-                                # value (is_redundant_resend's own piggyback path leaves this same
-                                # task running to keep tracking it). Falling through to the
-                                # unconditional clear below would wipe that still-live target out
-                                # from under it and end this task with nothing left tracking or
-                                # auto-stopping the new leg. The stop just sent above is harmless
-                                # either way - the motor only ever sees a bare pulse, never a
+                                # A same-direction retarget landed while the await above
+                                # was in flight and already pointed
+                                # self._target_position at its own new value
+                                # (is_redundant_resend's own piggyback path leaves this
+                                # same task running to keep tracking it). Falling
+                                # through to the unconditional clear below would wipe
+                                # that still-live target out from under it and end this
+                                # task with nothing left tracking or auto-stopping the
+                                # new leg. The stop just sent above is harmless either
+                                # way - the motor only ever sees a bare pulse, never a
                                 # position - so simply continue instead.
                                 continue
                         else:
-                            # A plain open_cover()/close_cover() reaching 0/100 confirms this
-                            # via _confirm_full_travel_resync() (see the target_position-is-None
-                            # branch below); a set_cover_position(0)/(100) call reaching the
-                            # same endstop through this branch needs the identical call since
-                            # self._full_travel_resync_direction is never armed for this branch
-                            # in the first place (see async_open_cover()'s/async_close_cover()'s
-                            # own ternary, gated on self._target_position is None).
+                            # A plain open_cover()/close_cover() reaching 0/100 confirms
+                            # this via _confirm_full_travel_resync() (see the
+                            # target_position-is-None branch below); a
+                            # set_cover_position(0)/(100) call reaching the same endstop
+                            # through this branch needs the identical call since
+                            # self._full_travel_resync_direction is never armed for this
+                            # branch in the first place (see
+                            # async_open_cover()'s/async_close_cover()'s own ternary,
+                            # gated on self._target_position is None).
                             #
-                            # resync_was_pending is captured before this call, which clears
-                            # self._full_travel_resync_direction the instant it matches, so the
-                            # record_position_update() call in this branch's own common tail
-                            # below can tell whether _confirm_full_travel_resync() already
-                            # recorded this transition itself and skip a duplicate record.
-                            resync_was_pending = (
-                                self._full_travel_resync_direction
-                                == (
-                                    "closing"
-                                    if self._attr_is_closing
-                                    else "opening"
-                                )
+                            # resync_was_pending is captured before this call, which
+                            # clears self._full_travel_resync_direction the instant it
+                            # matches, so the record_position_update() call in this
+                            # branch's own common tail below can tell whether
+                            # _confirm_full_travel_resync() already recorded this
+                            # transition itself and skip a duplicate record.
+                            resync_was_pending = self._full_travel_resync_direction == (
+                                "closing" if self._attr_is_closing else "opening"
                             )
                             self._confirm_full_travel_resync(
                                 "closing" if self._attr_is_closing else "opening",
                                 self._target_position,
                             )
-                        # Reaching a target here is a stop in every sense that matters to
-                        # the entity's own reported state, whether a real stop command went
-                        # out above or the motor's own end-stop did the job via the else
-                        # branch - must clear is_opening/is_closing exactly like
-                        # async_stop_cover() and the plain-open/close branch below do.
+                        # Reaching a target here is a stop in every sense that matters
+                        # to the entity's own reported state, whether a real stop
+                        # command went out above or the motor's own end-stop did the job
+                        # via the else branch - must clear is_opening/is_closing exactly
+                        # like async_stop_cover() and the plain-open/close branch below
+                        # do.
                         self._attr_is_opening = False
                         self._attr_is_closing = False
                         self._move_start_time = None
@@ -1423,10 +1431,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._target_position = None
                         if not resync_was_pending:
                             # Refreshes the diagnostics/"Entwicklerwerkzeuge" page's own
-                            # last-position-update record (api.get_last_position_update()),
-                            # separate from the live position reported above, for a
-                            # set_cover_position() call reaching its intermediate target.
-                            # Skipped on a freshly-armed resync (see resync_was_pending above):
+                            # last-position-update record
+                            # (api.get_last_position_update()), separate from the live
+                            # position reported above, for a set_cover_position() call
+                            # reaching its intermediate target. Skipped on a
+                            # freshly-armed resync (see resync_was_pending above):
                             # _confirm_full_travel_resync() already recorded that same
                             # transition itself, just above.
                             self._record_position_update(
@@ -1450,15 +1459,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             "Device %s reached fully closed position (0%%)",
                             self._device_name,
                         )
-                        previous_position_at_endstop = (
-                            self._attr_current_cover_position
-                        )
+                        previous_position_at_endstop = self._attr_current_cover_position
                         self._attr_current_cover_position = 0
                         # Captured before the call below, which clears
                         # self._full_travel_resync_direction the instant it matches
-                        # "closing" - lets the record_position_update() call further down
-                        # know whether _confirm_full_travel_resync() already recorded this
-                        # transition itself, to avoid a duplicate record.
+                        # "closing" - lets the record_position_update() call further
+                        # down know whether _confirm_full_travel_resync() already
+                        # recorded this transition itself, to avoid a duplicate record.
                         resync_was_pending = (
                             self._full_travel_resync_direction == "closing"
                         )
@@ -1468,10 +1475,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._move_start_time = None
                         self._move_start_position = None
                         if not resync_was_pending:
-                            # Same gap as the intermediate-target branch above, reached via
-                            # the plain full-travel-to-endstop path instead. Skipped on a
-                            # freshly-armed resync: _confirm_full_travel_resync() already
-                            # recorded that same transition itself, just above.
+                            # Same gap as the intermediate-target branch above, reached
+                            # via the plain full-travel-to-endstop path instead. Skipped
+                            # on a freshly-armed resync: _confirm_full_travel_resync()
+                            # already recorded that same transition itself, just above.
                             self._record_position_update(
                                 source=self._position_update_source,
                                 direction="closing",
@@ -1491,15 +1498,13 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                             "Device %s reached fully open position (100%%)",
                             self._device_name,
                         )
-                        previous_position_at_endstop = (
-                            self._attr_current_cover_position
-                        )
+                        previous_position_at_endstop = self._attr_current_cover_position
                         self._attr_current_cover_position = 100
                         # Captured before the call below, which clears
                         # self._full_travel_resync_direction the instant it matches
-                        # "opening" - lets the record_position_update() call further down
-                        # know whether _confirm_full_travel_resync() already recorded this
-                        # transition itself, to avoid a duplicate record.
+                        # "opening" - lets the record_position_update() call further
+                        # down know whether _confirm_full_travel_resync() already
+                        # recorded this transition itself, to avoid a duplicate record.
                         resync_was_pending = (
                             self._full_travel_resync_direction == "opening"
                         )
@@ -1509,10 +1514,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                         self._move_start_time = None
                         self._move_start_position = None
                         if not resync_was_pending:
-                            # Same gap as the intermediate-target branch above, reached via
-                            # the plain full-travel-to-endstop path instead. Skipped on a
-                            # freshly-armed resync: _confirm_full_travel_resync() already
-                            # recorded that same transition itself, just above.
+                            # Same gap as the intermediate-target branch above, reached
+                            # via the plain full-travel-to-endstop path instead. Skipped
+                            # on a freshly-armed resync: _confirm_full_travel_resync()
+                            # already recorded that same transition itself, just above.
                             self._record_position_update(
                                 source=self._position_update_source,
                                 direction="opening",
