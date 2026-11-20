@@ -103,20 +103,14 @@ such as `cover.extension_0_extension_0`.
 2. Select **Add integration**, search for **Schellenberg USB**, and add it.
 3. Select the USB stick path. Prefer `/dev/serial/by-id/...` when offered.
 4. Open the Schellenberg USB integration and choose **Add device**.
-5. Select **Pair a device and calibrate it**.
-6. Follow the on-screen instructions.
-7. Start pairing. Home Assistant listens for pairing/status information and sends
-   the teach sequence to the USB stick.
-8. Give the device a friendly name, for example `Livingroomshutter`.
-9. Run the calibration and save the device.
-
-### Other setup methods
-
-Besides the recommended **Pair a device and calibrate it**, the menu offers:
-
-- **Add a shutter from a remote** can pair and then run a short movement test
-  before calibration. Its optional remote-programming step also does not require
-  waiting for an additional motor signal.
+5. Follow the on-screen instructions and press **Pair**, then either press the
+   pairing button on the device or the programming button on an already-paired
+   remote control followed by a stop command to the motor - both techniques are
+   recognized by this same step.
+6. Home Assistant listens for pairing/status information and sends the teach
+   sequence to the USB stick.
+7. Give the device a friendly name, for example `Livingroomshutter`.
+8. Run the calibration and save the device.
 
 The same pairing method works for any Schellenberg RF receiver - electronic
 belt/strap winders, awning motors, and similar motorized devices included -
@@ -740,12 +734,13 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   command goes out (`Transmit error - stick busy`), they keep retrying -
   with no limit on the number of attempts, the same policy raw RF payload
   testing, teach/pairing, and similar non-movement requests already use -
-  but for no longer than 15 seconds in total. Several blinds commanded
+  but for no longer than 30 seconds in total. Several blinds commanded
   together are serialized one at a time rather than raced against each
   other, so a busy reply to one is normal, not a sign of a problem, and
   does not mean its command is lost - it is simply retried once the stick
-  is free; that 15-second budget also only starts once a blind's own turn
-  actually arrives, not while it is still waiting behind others. A stop
+  is free; that 30-second budget starts the moment the command is
+  requested, though, and counts time spent waiting behind other blinds'
+  own commands too, not just the time after its own turn arrives. A stop
   for a blind that is still waiting out one of these retries ends that
   wait immediately instead of letting it resend the open/close command
   after the stop has already gone out. Because retrying now happens one
@@ -754,7 +749,7 @@ Alexa, so each blind doesn't show up twice in the Alexa app.
   (and, within the couple of seconds above, its own stop too) behind it
   for as long as it keeps trying: pressing **Stop** on that specific
   blind ends its wait and frees the others right away; failing that, it
-  gives up on its own after 15 seconds, the same way any other failed
+  gives up on its own after 30 seconds, the same way any other failed
   open/close command does (the command is reported as failed, and
   diagnostics show the stick reported busy repeatedly and needs a reset).
 
