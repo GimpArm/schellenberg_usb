@@ -261,102 +261,56 @@ def summarize_status_discovery_frames(
     default these can never become "primary"/"secondary"/appear in
     "groups" or "unknown_commands" - excluded from identity *selection*
     entirely, not merely deprioritized - while still counting toward the
-    capture's own total frame count (kept by
-    finish_status_frame_capture()'s caller, outside this function's own
-    return value) for diagnostic transparency. Without this, a capture
-    window open for one blind that happens to overlap with a different,
-    already-working blind's own ordinary movement (its own automation, its
-    own remote) could have that other blind's real frames outscore the
-    blind actually being worked on and get stored as its identity instead -
-    previously only guarded for the separate "movement detected" wait
-    (handle_capture_event in options_flow_calibration.py), never for this,
-    the actual identity decision.
+    capture's own total frame count, for diagnostic transparency. Without
+    this, a capture window for one blind that overlaps with a different,
+    already-working blind's own ordinary movement could have that other
+    blind's real frames outscore the blind actually being worked on and get
+    stored as its identity instead.
 
-    Two exceptions let an excluded identity back in rather than dropped
-    (2026-11-15; the second added the same day, after a real recalibration
-    run showed the first one alone does not cover calibration's own real
-    captures - see below):
+    Two exceptions let an excluded identity back in rather than dropped,
+    each admitting the device for *secondary* status only - never primary,
+    however strong the evidence, and even when no other candidate exists:
 
     1. Its own commands fully reproduce the instructed remote-press order
        (a complete _REMOTE_DISCOVERY_EXPECTED_SEQUENCE match - see below).
        Ambient motor traffic from an unrelated, already-paired blind has no
        reason to reproduce that specific three-step order, so a full match
-       is strong, specific evidence that a person is actually pressing a
-       *shared* remote - one already linked to another blind, now also
-       being pressed for this one, a completely ordinary setup (one
-       physical remote commonly operates several blinds). A partial match
-       is deliberately not enough on its own: an ordinary move start alone
-       already produces a bare "01", so treating that as sufficient
-       evidence would reopen exactly the cross-talk this exclusion exists
-       to prevent.
+       is strong, specific evidence of a person pressing a *shared* remote
+       - one already linked to another blind, now also being pressed for
+       this one. A partial match is deliberately not enough on its own: an
+       ordinary move start alone already produces a bare "01", which would
+       reopen exactly the cross-talk this exclusion exists to prevent.
 
     2. At least one of its frames matches the phase actually being
        commanded during *each* of the two legs - phase_confirmed_opening_
        frame_count > 0 *and* phase_confirmed_closing_frame_count > 0 (see
        _PHASE_CONFIRMING_COMMANDS and _OPENING_LEG_PHASES/_CLOSING_LEG_
        PHASES above) - tracked per leg specifically, not as one aggregate
-       count or as mere presence of "01"/"02" somewhere among its
-       commands: either of those weaker forms can be cleared by frames
-       confined to a *single* leg (e.g. a stray "02" that happens to
-       phase-confirm during "closing", alongside an unrelated "01" that
-       does not), which is exactly what a different, already-paired
-       blind's own unrelated, coincidental movement during this capture's
-       window would ordinarily look like (see
-       test_calibration_excludes_other_blinds_frames_from_identity_result,
-       tests/test_options_flow_calibration.py, a real regression this
-       exception must not reopen, in any shape) - a single leg's own
-       coincidental overlap is common; an unrelated device also happening
-       to move during this blind's *other* leg too, with a frame that
-       itself phase-confirms there, is a materially rarer coincidence. A
-       real, deliberately shared remote pressed through this blind's own
-       full cycle naturally clears this bar in one pass, since the
-       calibration wizard always drives open then closed - exactly why
-       this is the exception that actually matters in practice: a real
-       recalibration log (2026-11-15,
-       Küchenrolladen, 5755AA/08) showed a shared remote driven through an
-       ordinary full open-then-close cycle sends only "01" throughout the
-       open phase and only "02" throughout the close phase - 18 frames
-       each, 36 in total in that capture - and never a "00" in between,
-       since the blind's own end stops handle stopping, not the remote.
-       Exception 1's three-step sequence is therefore practically
-       unreachable from calibration's own captures, the only real caller
-       that ever passes a non-empty exclude_device_ids at all (see below) -
-       so without this second exception, that real report's own remote
-       stayed excluded despite being pressed exactly as intended, and
-       exception 1 above never does any real work outside a test exercising
-       it directly.
+       count: either a single aggregate count or mere presence of "01"/"02"
+       among its commands can be cleared by frames confined to a *single*
+       leg (e.g. a stray "02" that happens to phase-confirm during
+       "closing", alongside an unrelated "01" that does not) - exactly what
+       a different, already-paired blind's own coincidental movement during
+       this capture's window would look like. A real, deliberately shared
+       remote pressed through this blind's own full open-then-close cycle
+       naturally clears this per-leg bar, since the calibration wizard
+       always drives both legs.
 
-    Both exceptions admit a device for *secondary* status only - never
-    primary, however strong the admission evidence, and even when no
-    other candidate exists at all. primary is chosen only among groups
-    never excluded in the first place (see the code below); an excluded
-    device is, by construction, confirmed to belong to a *different*
-    blind, so using one as this blind's own primary would silently hand
-    its live position tracking to the wrong blind's device, exactly the
-    outcome exclude_device_ids exists to prevent - a risk that is not just
-    theoretical: a remote held down for a leg's duration retransmits
-    continuously for RF reliability (the 36 frames above, from one single
-    press-and-hold), while a motor echoes only once per phase transition
-    (as few as 4 for a full open-close cycle), so naively letting
-    phase_confirmed_frame_count decide primary among excluded candidates
-    too - as an earlier version of exception 2 did, before independent
-    review caught it by re-running this function against the real
-    capture's own frame volume rather than a smaller stand-in - would
-    reliably hand primary to whichever shared remote was held longest,
-    not to this blind's own motor.
+    Primary is chosen only among groups never excluded in the first place
+    (see the code below); an excluded device is, by construction, confirmed
+    to belong to a *different* blind, so using it as this blind's own
+    primary would silently hand its live position tracking to the wrong
+    device. This matters because the top-priority comparison key,
+    phase_confirmed_frame_count, is a raw, unnormalized frame count, and a
+    remote held down for a leg's duration retransmits far more frames (for
+    RF reliability) than a motor ever echoes per phase transition - so
+    letting an excluded device into that same comparison would let sheer
+    retransmission volume alone win it primary.
 
-    Before either exception existed, pressing a remote already linked to a
-    different blind during this blind's own calibration was
-    indistinguishable from that other blind's own ordinary traffic and
-    always lost its frames outright, however deliberately or clearly it
-    was pressed - frames are still grouped first regardless of exclusion
-    (needed to even recognize either signal), only the later selection
-    step tells the cases apart. Empty by default: the first blind on a
-    fresh hub (nothing else to exclude yet) and the manual "Discover
-    status from original remote" flow (which never passes this at all -
-    overwriting an existing identity is its whole deliberate purpose, so
-    it is never scoped the same way calibration is, and has no commanded
-    phase for exception 2 to key off anyway) are both unaffected.
+    Empty by default: the first blind on a fresh hub (nothing else to
+    exclude yet) and the manual "Discover status from original remote"
+    flow (which never passes this at all - overwriting an existing identity
+    is its whole deliberate purpose) are both unaffected.
 
     A calibration run's capture window is not a neutral listening post: for
     each leg, *we* already know which direction we just commanded (the phase
@@ -365,11 +319,10 @@ def summarize_status_discovery_frames(
     "opening", a "02" while "closing", a "00" at either leg's end stop) is
     strong evidence of being this blind's own motor; one that does not (an
     "01" received mid-"closing", say) is more likely another device on the
-    same stick coincidentally transmitting during the window - exactly the
-    ambiguity a busy installation with several blinds/winders on one stick
-    runs into with only a single up/down cycle to go on. Weighting by that
-    match lets a single ordinary calibration run resolve this correctly far
-    more often, without asking the person to cycle the blind extra times.
+    same stick coincidentally transmitting during the window. Weighting by
+    that match lets a single ordinary calibration run resolve this
+    correctly far more often, without asking the person to cycle the blind
+    extra times.
 
     Frames from a plain, unphased capture (the manual "Discover status from
     original remote" window, which labels everything the same constant
@@ -377,13 +330,12 @@ def summarize_status_discovery_frames(
     phase check above, so every candidate ties at zero on it and the
     comparison falls through to _remote_discovery_sequence_match_length
     instead: that flow's own on-screen instructions name a specific press
-    order ("OPEN, STOP, CLOSE, STOP"), which is exactly the kind of
-    ground-truth signal the phase check relies on for calibration, just
-    sourced from the person's button presses instead of a commanded
-    direction. Frames from *neither* flow (e.g. identities normalized from
-    plain historical/manual data with no "phase" key at all) tie at zero on
-    both and fall through to the original distinct-commands/frame-count
-    comparison, exactly as before either signal existed.
+    order ("OPEN, STOP, CLOSE, STOP"), the same kind of ground-truth signal
+    the phase check relies on for calibration, just sourced from button
+    presses instead of a commanded direction. Frames from *neither* flow
+    (e.g. identities normalized from plain historical/manual data with no
+    "phase" key at all) tie at zero on both and fall through to the plain
+    distinct-commands/frame-count comparison.
     """
     recognized = {"00", "01", "02"}
     groups: dict[StatusIdentity, dict[str, Any]] = {}

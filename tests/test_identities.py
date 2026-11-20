@@ -124,25 +124,21 @@ def test_summarize_status_discovery_frames_with_no_recognized_commands() -> None
 
 
 def test_summarize_status_discovery_frames_1f82_hardware_regression() -> None:
-    """Concrete regression anchor for the same real-world hardware behind
-    api.py's _resolve_status_command() fallback (see its docstring, and
-    CHANGELOG.md's v1.5.0 entry right after the Issue #85 bullet): two
-    real devices whose "ss" frames carry a constant, non-command "1F" at
-    message[10:12] - the position api.py reads before trying its
-    fallback - with the real command only recoverable from message[14:16].
+    """Concrete regression anchor for the same hardware behind api.py's
+    _resolve_status_command() fallback (see its docstring): some devices'
+    "ss" frames carry a constant, non-command "1F" at message[10:12] -
+    the position api.py reads before trying its fallback - with the real
+    command only recoverable from message[14:16].
 
     This function never sees raw wire bytes, only the already-resolved
     "command" field api.py's _handle_message() put in each frame dict -
-    so it cannot fall back itself. Before the api.py fix, every frame
-    from this hardware carried "1F" here, exactly like the no-recognized-
-    commands case above, and this function could never select it as
-    primary: no amount of open/close/stop cycling would ever produce a
-    recognized command, so calibration's own post-capture identity
-    selection (_finish_calibration_capture() -> this function) would
-    permanently fail for this hardware, independently of - and in
-    addition to - the narrower movement-wait-never-matches symptom the
-    CHANGELOG entry describes. The api.py fix resolves both from the
-    same one-line change, since both consume the same "command" field.
+    so it cannot fall back itself. Without api.py's fallback, every frame
+    from this hardware would carry "1F" here, exactly like the
+    no-recognized-commands case above, and this function could never
+    select it as primary: no amount of open/close/stop cycling would
+    ever produce a recognized command, so calibration's own post-capture
+    identity selection (_finish_calibration_capture() -> this function)
+    would permanently fail for this hardware.
     """
     unresolved_frames = [
         {
@@ -467,14 +463,14 @@ def test_summarize_status_discovery_frames_excludes_foreign_identity_by_default(
 
 
 def test_summarize_status_discovery_frames_full_sequence_admits_foreign_id() -> None:
-    """The first exception to the exclusion above (2026-11-15): a foreign
-    identity whose own commands fully reproduce the instructed press
-    order ("OPEN, STOP, CLOSE") is let back in as a *secondary* identity,
-    since ambient motor traffic from an unrelated, already-paired blind
-    has no reason to reproduce that specific three-step order - strong,
-    specific evidence that a person is actually pressing a *shared*
-    remote already linked to that other blind (one physical remote
-    commonly operates several blinds).
+    """The first exception to the exclusion above: a foreign identity
+    whose own commands fully reproduce the instructed press order ("OPEN,
+    STOP, CLOSE") is let back in as a *secondary* identity, since ambient
+    motor traffic from an unrelated, already-paired blind has no reason
+    to reproduce that specific three-step order - strong, specific
+    evidence that a person is actually pressing a *shared* remote
+    already linked to that other blind (one physical remote commonly
+    operates several blinds).
 
     Never primary, even here where nothing else was captured at all: see
     this function's own docstring for why admitting an excluded identity
@@ -484,13 +480,10 @@ def test_summarize_status_discovery_frames_full_sequence_admits_foreign_id() -> 
     only ever argues it is worth keeping as a secondary reference, never
     that it should become this blind's own (here entirely absent) primary.
 
-    Regression for a real report (2026-11-15): pressing a remote already
-    linked to a different, already-paired blind during this blind's own
-    calibration used to lose every one of its frames outright, however
-    deliberately or clearly it was pressed - reported as no secondary (or
-    even primary) status identity ever being captured during either a
-    fresh pairing's own calibration or a recalibration, despite genuinely
-    pressing the remote each time.
+    Regression: pressing a remote already linked to a different,
+    already-paired blind during this blind's own calibration must not
+    lose every one of its frames outright, however deliberately or
+    clearly it was pressed.
     """
     frames = [
         {
@@ -559,44 +552,32 @@ def test_summarize_status_discovery_frames_partial_sequence_match_stays_excluded
 def test_summarize_status_discovery_frames_phase_confirmation_admits_foreign_id() -> (
     None
 ):
-    """The second exception to the exclusion above (2026-11-15, added the
-    same day as the first, once a real recalibration log showed the first
-    one alone does not cover calibration's own real captures - see this
-    function's own docstring): a foreign identity with phase-confirmed
-    frames in *both* directions ("01" and "02" both present, not just
-    whichever leg happened to overlap with it) is let back in too, as a
-    *secondary* identity - never primary, however many such frames it has
-    (see below).
+    """The second exception to the exclusion above: a foreign identity
+    with phase-confirmed frames in *both* directions ("01" and "02" both
+    present, not just whichever leg happened to overlap with it) is let
+    back in too, as a *secondary* identity - never primary, however many
+    such frames it has (see below).
 
-    Regression for a real recalibration log (2026-11-15, Küchenrolladen,
-    device_id 5755AA/enum 08): a remote already linked to a different,
-    already-paired blind (7953A7/43) was held throughout this blind's own
-    ordinary full open-then-close calibration cycle - 18 "01" frames
-    throughout the open phase and 18 "02" frames throughout the close
-    phase (the log's own exact counts, reproduced here in full rather
-    than a smaller stand-in - see the next paragraph for why that matters),
-    and *no* "00" frame at all, since the blind's own end stops handle
-    stopping, not the remote. The first exception above needs a complete
-    "01", "00", "02" sequence to admit a foreign identity, so it can never
-    fire for a capture like this one - exactly why the secondary identity
-    kept disappearing despite the remote genuinely being pressed, even
-    though the first exception was already in place.
+    Regression: a remote already linked to a different, already-paired
+    blind (7953A7/43) held throughout this blind's own ordinary full
+    open-then-close calibration cycle - many "01" frames throughout the
+    open phase and many "02" frames throughout the close phase, and *no*
+    "00" frame at all, since the blind's own end stops handle stopping,
+    not the remote - must still be admitted as secondary. The first
+    exception above needs a complete "01", "00", "02" sequence to admit a
+    foreign identity, so it can never fire for a capture like this one.
 
-    Also a regression for a flaw independent review found in the first
-    version of this very fix, before it was ever committed: that version
-    admitted an excluded device into the *same* candidate pool primary is
-    chosen from, and a smaller stand-in (3 foreign frames vs. this blind's
-    own 4) happened not to trigger the resulting bug. Re-run against the
-    real log's own frame volume, it did: a remote held down for a whole
+    Also a regression for admitting an excluded device into the *same*
+    candidate pool primary is chosen from: a remote held down for a whole
     leg retransmits continuously for RF reliability (36 frames here)
     while a motor echoes only once per phase transition (4 frames for a
-    full cycle), so the excluded device's sheer volume won it primary
-    outright - silently handing this blind's live position tracking to
-    the *other* blind's remote. Both exceptions now admit a device for
-    secondary status only; primary is chosen only among never-excluded
-    groups (see this function's own docstring and the code below), so
-    this test uses the real log's full, lopsided frame counts specifically
-    to prove that asymmetry no longer matters.
+    full cycle), so the excluded device's sheer volume must never win it
+    primary - that would silently hand this blind's live position
+    tracking to the *other* blind's remote. Both exceptions admit a
+    device for secondary status only; primary is chosen only among
+    never-excluded groups (see this function's own docstring and the
+    code below), so this test uses deliberately lopsided frame counts to
+    prove that asymmetry never matters for the primary decision.
     """
     frames = [
         # --- this blind's own motor: one status echo per phase
@@ -687,24 +668,20 @@ def test_summarize_status_discovery_frames_single_leg_overlap_stays_excluded() -
 
 
 def test_summarize_status_discovery_frames_both_commands_one_leg_excluded() -> None:
-    """A narrower variant of the single-leg overlap above, caught by a
-    second independent review of this same exception: a foreign device
-    whose commands happen to include both "01" and "02" is *not* by
-    itself proof it was driven through both of this blind's own legs -
-    both frames can arrive during the *same* single leg (e.g. a "02" that
-    genuinely phase-confirms during "closing", alongside an unrelated
-    "01" that does not confirm anything there). An earlier version of
-    this exception checked "01"/"02" presence in the group's commands as
-    a whole, decoupled from which leg each confirming frame actually
-    belonged to, and admitted exactly this case - reopening the
-    single-leg cross-talk risk
+    """A narrower variant of the single-leg overlap above: a foreign
+    device whose commands happen to include both "01" and "02" is *not*
+    by itself proof it was driven through both of this blind's own legs
+    - both frames can arrive during the *same* single leg (e.g. a "02"
+    that genuinely phase-confirms during "closing", alongside an
+    unrelated "01" that does not confirm anything there), which would
+    otherwise reopen the single-leg cross-talk risk
     test_calibration_excludes_other_blinds_frames_from_identity_result
     (tests/test_options_flow_calibration.py) and the test above both
-    guard against, just via a different pair of commands. Fixed by
+    guard against, just via a different pair of commands. Guarded by
     tracking phase-confirmed evidence *per leg*
     (phase_confirmed_opening_frame_count/phase_confirmed_closing_frame_
     count) and requiring both, rather than one aggregate count plus a
-    command-presence check that said nothing about which leg either
+    command-presence check that says nothing about which leg either
     command's confirming frame (if any) came from.
     """
     frames = [

@@ -256,10 +256,9 @@ async def test_device_diagnostics_returns_the_hub_sticks_state(
     """Regression test: the hub (USB stick) is registered
     as its own device, tied to its own SUBENTRY_TYPE_HUB subentry rather
     than any blind's - see __init__.py's async_setup_entry(). Downloading
-    diagnostics from *that* device's own page used to always fall through
-    to the generic error below, since the lookup only ever checked
-    SUBENTRY_TYPE_BLIND subentries and skipped every other subentry type,
-    the hub included, outright.
+    diagnostics from *that* device's own page must not fall through to
+    the generic error below the way it would if the lookup only checked
+    SUBENTRY_TYPE_BLIND subentries.
     """
     entry = _build_hub_entry(hass, connected_api)
     _add_blind_subentry(hass, entry)

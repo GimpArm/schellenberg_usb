@@ -337,13 +337,12 @@ async def test_differing_status_identity_still_completes_via_capture_signal(
 ) -> None:
     """A motor whose status frames carry a different id than DEVICE_ID.
 
-    Regression test for the real root cause behind "no RF confirmation
-    during calibration": _wait_for_movement_start()/_wait_for_stop_event()
-    used to listen only on SIGNAL_DEVICE_EVENT_{DEVICE_ID} - the
-    command/pairing identity learned during pairing. A physical device
-    whose status (receive) identity differs from that command identity -
-    a protocol-documented possibility, see README.md's "Advanced protocol
-    notes" - then never satisfied that wait, so calibration always timed
+    Regression test: if _wait_for_movement_start()/_wait_for_stop_event()
+    listened only on SIGNAL_DEVICE_EVENT_{DEVICE_ID} - the command/pairing
+    identity learned during pairing - a physical device whose status
+    (receive) identity differs from that command identity - a
+    protocol-documented possibility, see README.md's "Advanced protocol
+    notes" - would never satisfy that wait, so calibration would time
     out even though the motor genuinely moved. Every signal below is sent
     only on the capture-wide SIGNAL_DEVICE_EVENT_CAPTURE channel, tagged
     with a *different* device id ("FEDCBA") than the one being
@@ -717,16 +716,14 @@ async def test_recalibrating_persists_new_times_and_notifies_the_live_entity(
     # blind ended up closed - args are
     # (entity_id, open_time, close_time, ending_position).
     assert signals[0][3] == 0
-    # Recalibrating an already-paired blind now also refreshes
+    # Recalibrating an already-paired blind also refreshes
     # CONF_INITIAL_POSITION, the durable startup fallback (see that
     # constant's own comment in cover.py, and the comment on this same key
-    # in options_flow_calibration.py's data_updates dict). Before this fix,
-    # this path only ever corrected the blind's *live* position via the
-    # SIGNAL_CALIBRATION_COMPLETED hand-off just asserted on above (
-    # signals[0][3]), leaving this persisted fallback stuck at whatever an
-    # earlier pairing had left (or nothing at all) - exactly the gap a
-    # real-world report (2026-11-01) traced a mix of "Unbekannt"/correctly-
-    # restored blinds on one hub back to. Same ending_position as the live
+    # in options_flow_calibration.py's data_updates dict), not just the
+    # blind's *live* position via the SIGNAL_CALIBRATION_COMPLETED
+    # hand-off just asserted on above (signals[0][3]) - otherwise this
+    # persisted fallback would stay stuck at whatever an earlier pairing
+    # had left (or nothing at all). Same ending_position as the live
     # hand-off above, for the same reason.
     assert updated.data[CONF_INITIAL_POSITION] == 0
 
@@ -902,20 +899,16 @@ async def test_recalibration_adopts_discovered_status_identity_when_it_differs(
 ) -> None:
     """Recalibration trusts this run's own live capture over stale data.
 
-    A real-world report (2026-11) traced the primary/secondary status
-    identities of a live blind being swapped back to exactly this code
-    path's previous behavior: a fresh pairing's live-calibration capture
-    correctly self-echo-confirmed the motor's own identity, but an earlier
-    version of *this* recalibration branch kept whatever identity was
-    already configured and silently discarded a differing fresh finding
-    entirely - so a later recalibration could never recover from a wrong
-    identity that had gotten persisted some other way. A live capture's
-    self-echo is direct, first-hand evidence of what is actually driving
-    this blind right now, so a genuinely different discovered identity is
-    now adopted outright instead - including this run's own secondary
-    list, which replaces whatever was stored before rather than staying
-    frozen at an earlier run's snapshot. See the sibling test right below
-    for the "confirms the same one" case, and
+    If this recalibration branch instead kept whatever identity was
+    already configured and silently discarded a differing fresh finding,
+    a later recalibration could never recover from a wrong identity that
+    had gotten persisted some other way. A live capture's self-echo is
+    direct, first-hand evidence of what is actually driving this blind
+    right now, so a genuinely different discovered identity is adopted
+    outright instead - including this run's own secondary list, which
+    replaces whatever was stored before rather than staying frozen at an
+    earlier run's snapshot. See the sibling test right below for the
+    "confirms the same one" case, and
     test_recalibration_clears_stale_secondary_identity_when_not_reconfirmed
     below for the secondary-clearing consequence this enables.
     """
@@ -1005,20 +998,15 @@ async def test_recalibration_clears_stale_secondary_identity_when_not_reconfirme
     """No remote pressed this round -> its stored secondary ID is dropped,
     even though this round's primary also conflicts with the persisted one.
 
-    Direct coverage for the project owner's own requirement: recalibrating
-    without using a remote control must clear that remote's secondary
-    status identity, rather than leaving it stuck at whatever an earlier
-    run (which did see the remote) had stored - specifically in the
-    conflicting-primary case this fix actually changes the behavior of.
-
-    An earlier version of this test used the *same* primary for both the
-    existing data and this round's fresh capture, which stays on the
-    unconditional "no conflict" branch both before and after this fix -
-    so it would have passed on the pre-fix code too, and never actually
-    exercised the new behavior at all; an independent review caught this.
-    DEVICE_ID/DEVICE_ENUM below is the stale, already-persisted primary;
-    "112233"/"99" - the same differing identity the sibling adoption test
-    above uses - is this round's fresh, genuinely conflicting capture.
+    Recalibrating without using a remote control must clear that remote's
+    secondary status identity, rather than leaving it stuck at whatever
+    an earlier run (which did see the remote) had stored - specifically
+    in the conflicting-primary case, not just the no-conflict one, so
+    the "same primary both times" shape alone would not actually
+    exercise this. DEVICE_ID/DEVICE_ENUM below is the stale,
+    already-persisted primary; "112233"/"99" - the same differing
+    identity the sibling adoption test above uses - is this round's
+    fresh, genuinely conflicting capture.
     """
     handler, flow = _build_bare_handler(
         hass,
@@ -1160,8 +1148,9 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     Every error exit from a calibration leg finishes the status-frame
     capture (_finish_calibration_capture(), api.py's own
     finish_status_frame_capture()). Retrying re-enters this same step,
-    which used to only call set_status_frame_capture_phase() - a silent
-    no-op once no capture is open (see api.py) - so the retry captured
+    so it must actually reopen a fresh capture rather than only call
+    set_status_frame_capture_phase() - a silent no-op once no capture is
+    open (see api.py). Without a fresh capture, the retry would capture
     zero status frames: _wait_for_movement_start()/_wait_for_stop_event()
     still resolve normally, since they listen on a separate dispatcher
     signal that does not depend on the capture buffer, so the retry could
@@ -1187,8 +1176,7 @@ async def test_open_instruction_retry_after_timeout_reopens_the_capture(
     assert result["errors"] == {"base": "calibration_start_timeout"}
     assert connected_api._status_discovery_frames is None
 
-    # Retry: re-enters the same step. Before the fix, the capture stayed
-    # None for the rest of this attempt.
+    # Retry: re-enters the same step, which must reopen the capture.
     wait_for_registration = _spy_on_dispatcher_connect(monkeypatch)
     task = asyncio.ensure_future(
         hass.config_entries.subentries.async_configure(result["flow_id"], user_input={})
@@ -1218,21 +1206,19 @@ async def test_calibration_initial_state_waits_out_busy_capture_without_stealing
     the hub-wide capture buffer out from under another operation, even
     after waiting out a genuinely still-busy one.
 
-    _start_calibration_capture() used to catch start_status_frame_capture()'s
-    RuntimeError and force its way in anyway - finishing and discarding
-    whatever capture already held the one hub-wide buffer, then starting a
-    fresh one in its place. Nothing in this integration serializes two
-    blinds' calibration/discovery flows against each other, so this is a
-    realistic scenario, not a contrived one - and the steal silently
-    corrupted whichever operation lost the buffer, with no error shown to
-    either side. _claim_or_advance_capture() (2026-11-08) replaced the
-    immediate "calibration_capture_busy" error this used to surface with a
-    bounded wait-and-retry instead, so this simulates a second operation
-    (another blind's own calibration, or a status-discovery flow) that
-    holds the buffer for the *entire* wait, and checks that this blind's
-    own capture still backs off with the generic "unknown" fallback once
-    that wait is exhausted, rather than stealing the buffer or hanging
-    forever. STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS and
+    Nothing in this integration serializes two blinds' calibration/
+    discovery flows against each other, so a second operation genuinely
+    holding the one hub-wide buffer is a realistic scenario, not a
+    contrived one - forcing a way in by finishing and discarding that
+    other capture would silently corrupt whichever operation lost the
+    buffer, with no error shown to either side.
+    _claim_or_advance_capture() instead waits-and-retries a busy claim,
+    so this simulates a second operation (another blind's own
+    calibration, or a status-discovery flow) that holds the buffer for
+    the *entire* wait, and checks that this blind's own capture still
+    backs off with the generic "unknown" fallback once that wait is
+    exhausted, rather than stealing the buffer or hanging forever.
+    STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS and
     CAPTURE_CLAIM_RETRY_INTERVAL_SECONDS are both shrunk first so the wait
     this forces is milliseconds, not the real ~120-ish-second deadline -
     only this module's own copy of STATUS_FRAME_CAPTURE_STALE_TIMEOUT_SECONDS
@@ -1427,11 +1413,10 @@ async def test_calibration_initial_state_shows_notice_for_recalibration() -> Non
 
     disable_subentry_creation() is exactly what async_step_calibrate()
     (config_flow.py) calls before reaching this step, so
-    self._create_subentry_after_calibration is False here - the user's
-    own real-world report (an already-confirmed remote identity not
-    surviving a recalibration where it was not used) is why this notice
-    exists at all; see runtime_translation_text.py's "recalibration_notice"
-    entries and CHANGELOG.md.
+    self._create_subentry_after_calibration is False here. This notice
+    exists to warn that an already-confirmed remote identity may not
+    survive a recalibration where it is not used; see
+    runtime_translation_text.py's "recalibration_notice" entries.
     """
     flow = MagicMock()
     flow.hass = None
@@ -1462,11 +1447,9 @@ def test_recorded_leg_times_reflects_whichever_leg_has_actually_completed() -> N
     """recorded_leg_times() is what async_step_manual_times() (config_flow.py)
     calls to pre-fill whichever leg already has a real, measured value
     when the person abandons a live calibration for manual entry after
-    the *other* leg's own timeout (2026-11-08, found and fixed once the
-    calibration_timeout_choice fix made that path reachable for the
-    first time - see that method's own docstring). Covers both legs,
-    not just open, since either can be the one already measured
-    depending on which initial_state choice ran it first.
+    the *other* leg's own timeout (see that method's own docstring).
+    Covers both legs, not just open, since either can be the one already
+    measured depending on which initial_state choice ran it first.
     """
     handler = CalibrationFlowHandler(MagicMock())
     assert handler.recorded_leg_times() == (None, None)
