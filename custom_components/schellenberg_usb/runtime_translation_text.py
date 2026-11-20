@@ -30,10 +30,7 @@ Two complementary lookups are provided:
   and are only translated here, at the moment they reach the UI.
 
 Every translation below aims to read naturally in the target language
-rather than mirroring the English wording word for word (a literal
-translation of some earlier strings - e.g. the German "Endegrund" for
-"end reason" - was confusing and has been corrected; the lesson is applied
-throughout this module).
+rather than mirroring the English wording word for word.
 """
 
 from __future__ import annotations
