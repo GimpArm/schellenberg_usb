@@ -43,6 +43,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_ENUM,
     CONF_INITIAL_POSITION,
     CONF_LAST_CALIBRATION,
+    CONF_LAST_CONFIRMED_POSITION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
     DOMAIN,
@@ -295,24 +296,29 @@ async def test_calibration_only_subentry_update_does_not_trigger_reload(
 async def test_manual_position_sync_subentry_update_does_not_trigger_reload(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Developer Tools manual position sync must not force a full hub reload.
+    """Changing CONF_INITIAL_POSITION or CONF_LAST_CONFIRMED_POSITION alone
+    on a subentry must not force a full hub reload.
 
     Regression (v1.5.1): CONF_INITIAL_POSITION was missing from
-    reload_ignored_subentry_data_keys, even though config_flow.py's own
-    _async_manual_position_sync() persists exactly that field onto the
-    subentry right after already updating the live cover entity via a
-    dispatcher signal (see SchellenbergCover._handle_manual_position_
-    sync()) - no reload needed for that live update to take effect.
-    Before this fix, persisting it therefore still triggered a full hub
-    reload immediately afterwards: disconnecting the serial port (every
-    cover on the hub briefly unavailable) and rebuilding every entity
-    from scratch, which also reset Home Assistant's own "last changed"
-    timestamp for every one of them, not just the blind that was
-    actually corrected - the exact bug reported against this test's own
-    sibling above, but for a manual position sync instead of a
-    recalibration. Changing any other subentry field (e.g. a re-paired
-    device_enum) must still reload, mirrored here from that same sibling
-    test for the same reason.
+    reload_ignored_subentry_data_keys, even though a manual position sync
+    used to persist exactly that field onto the subentry right after
+    already updating the live cover entity via a dispatcher signal (see
+    SchellenbergCover._handle_manual_position_sync()) - no reload needed
+    for that live update to take effect. Before this fix, persisting it
+    therefore still triggered a full hub reload immediately afterwards:
+    disconnecting the serial port (every cover on the hub briefly
+    unavailable) and rebuilding every entity from scratch, which also
+    reset Home Assistant's own "last changed" timestamp for every one of
+    them, not just the blind that was actually corrected - the exact bug
+    reported against this test's own sibling above, but for a manual
+    position sync instead of a recalibration. As of v1.6.0, a manual sync
+    in config_flow.py no longer writes CONF_INITIAL_POSITION at all
+    (see CHANGELOG.md) - cover.py's own durable confirmed-
+    position call sites write CONF_LAST_CONFIRMED_POSITION instead, added
+    to this same ignore list for the same reason and verified below
+    alongside the original field so neither regresses. Changing any other
+    subentry field (e.g. a re-paired device_enum) must still reload,
+    mirrored here from that same sibling test for the same reason.
     """
     monkeypatch.setattr(SchellenbergUsbApi, "connect", AsyncMock())
     monkeypatch.setattr(
@@ -352,6 +358,17 @@ async def test_manual_position_sync_subentry_update_does_not_trigger_reload(
     manual_sync_update[CONF_INITIAL_POSITION] = 42
     hass.config_entries.async_update_subentry(
         entry, entry.subentries[subentry_id], data=manual_sync_update
+    )
+    await hass.async_block_till_done()
+
+    mock_reload.assert_not_called()
+
+    # Mirrors cover.py's own _persist_last_confirmed_position(): same
+    # full-replacement-dict shape, new field.
+    last_confirmed_update = dict(entry.subentries[subentry_id].data)
+    last_confirmed_update[CONF_LAST_CONFIRMED_POSITION] = 77
+    hass.config_entries.async_update_subentry(
+        entry, entry.subentries[subentry_id], data=last_confirmed_update
     )
     await hass.async_block_till_done()
 

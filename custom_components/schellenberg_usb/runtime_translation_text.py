@@ -744,9 +744,13 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "measured during pairing / not confirmed since restart": (
             "gemessen während der Kopplung / seit Neustart nicht bestätigt"
         ),
+        "restored from own backup / not confirmed since restart": (
+            "aus eigenem Backup wiederhergestellt / seit Neustart nicht bestätigt"
+        ),
         "not recorded": "nicht erfasst",
         "startup default": "Startvorgabe",
         "restored HA state": "aus Home-Assistant-Zustand wiederhergestellt",
+        "restored own backup": "aus eigenem Backup wiederhergestellt",
         "manual sync": "manueller Abgleich",
         "calibration": "Kalibrierung",
         "primary status": "Primärstatus",
@@ -761,6 +765,10 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "fresh calibration result": "frisches Kalibrierungsergebnis",
         "startup default (no restored HA state)": (
             "Startvorgabe (kein wiederhergestellter Home-Assistant-Zustand)"
+        ),
+        "restored own backup (no Home Assistant restore_state)": (
+            "aus eigenem Backup wiederhergestellt (kein Home-Assistant-"
+            "restore_state verfügbar)"
         ),
         "completed": "abgeschlossen",
         "cancelled": "abgebrochen",
@@ -810,9 +818,14 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "measured during pairing / not confirmed since restart": (
             "medida durante el emparejamiento / no confirmada desde el reinicio"
         ),
+        "restored from own backup / not confirmed since restart": (
+            "restaurada desde la copia de seguridad propia / no confirmada "
+            "desde el reinicio"
+        ),
         "not recorded": "no registrado",
         "startup default": "valor predeterminado al iniciar",
         "restored HA state": "estado restaurado de Home Assistant",
+        "restored own backup": "copia de seguridad propia restaurada",
         "manual sync": "sincronización manual",
         "calibration": "calibración",
         "primary status": "estado primario",
@@ -827,6 +840,9 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "fresh calibration result": "resultado reciente de la calibración",
         "startup default (no restored HA state)": (
             "valor predeterminado al iniciar (sin estado restaurado de Home Assistant)"
+        ),
+        "restored own backup (no Home Assistant restore_state)": (
+            "copia de seguridad propia restaurada (sin restore_state de Home Assistant)"
         ),
         "completed": "completada",
         "cancelled": "cancelada",
@@ -876,9 +892,14 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "measured during pairing / not confirmed since restart": (
             "mesurée pendant l'appairage / non confirmée depuis le redémarrage"
         ),
+        "restored from own backup / not confirmed since restart": (
+            "restaurée depuis la sauvegarde interne / non confirmée depuis "
+            "le redémarrage"
+        ),
         "not recorded": "non enregistré",
         "startup default": "valeur par défaut au démarrage",
         "restored HA state": "état restauré de Home Assistant",
+        "restored own backup": "sauvegarde interne restaurée",
         "manual sync": "synchronisation manuelle",
         "calibration": "calibrage",
         "primary status": "état principal",
@@ -893,6 +914,9 @@ _PHRASE_TRANSLATIONS: dict[str, dict[str, str]] = {
         "fresh calibration result": "résultat récent du calibrage",
         "startup default (no restored HA state)": (
             "valeur par défaut au démarrage (aucun état Home Assistant restauré)"
+        ),
+        "restored own backup (no Home Assistant restore_state)": (
+            "sauvegarde interne restaurée (pas de restore_state Home Assistant)"
         ),
         "completed": "terminé",
         "cancelled": "annulé",

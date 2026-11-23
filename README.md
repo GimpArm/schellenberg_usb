@@ -581,11 +581,17 @@ internal_blind_position_logic:
         value: "{{ target_position | float(0) }}"
 ```
 
-**Script B — for the Alexa-facing copy.** Alexa's smart-home skill can
-re-send the same target position it already believes a blind is at, which
-script A would then ignore. Script B instead treats "target equals current"
-as an instruction to run a full close (target ≥ 50) or full open (target <
-50), so a repeated Alexa command still moves the blind:
+**Script B — for the Alexa-facing copy.** A voice command always asks for an
+absolute position ("Alexa, close the blind" asks for 100 every single time,
+never "a bit further"), so if the blind is already at the position Alexa is
+asking for, script A's own "do nothing if the target hasn't changed" guard
+stays silent - a second "Alexa, close it" would then appear to do nothing at
+all. Script B exists only to avoid that: it never treats "target equals
+current" as a no-op, and instead reads a repeated command as "go to the
+opposite end" - closing fully if that already-current target was ≥ 50%,
+opening fully if it was < 50% - so a repeated Alexa command always moves the
+blind. The one trade-off is a command repeated while the blind happens to
+sit exactly at the 50% midpoint, where either end is an equally valid guess:
 
 ```yaml
 alexa_blind_position_logic:
