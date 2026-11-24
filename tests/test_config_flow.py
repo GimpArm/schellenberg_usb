@@ -3146,12 +3146,14 @@ async def test_developer_tools_set_position_open_and_closed_sync_without_sending
         assert len(written(connected_api)) == before
         assert result["description_placeholders"] is not None
         assert str(expected_position) in result["description_placeholders"]["result"]
-        # Also persisted as this blind's durable startup fallback (not
-        # just applied to the live entity, which this test never even sets
-        # up) - re-read from entry.subentries rather than the original
-        # `blind` reference, which an update replaces rather than mutates.
+        # As of v1.6.0 (see CHANGELOG.md), deliberately NOT also durably
+        # persisted to the subentry any more - re-read from
+        # entry.subentries rather than the original `blind` reference
+        # (which an update replaces rather than mutates) to prove this
+        # confirmation never touched it, not merely that `blind` itself is
+        # stale.
         updated_subentry = entry.subentries[blind.subentry_id]
-        assert updated_subentry.data[CONF_INITIAL_POSITION] == expected_position
+        assert CONF_INITIAL_POSITION not in updated_subentry.data
 
 
 async def test_developer_tools_set_position_manual_accepts_an_exact_value(
@@ -3182,8 +3184,53 @@ async def test_developer_tools_set_position_manual_accepts_an_exact_value(
     assert result["step_id"] == "developer_tools"
     assert result["description_placeholders"] is not None
     assert "42" in result["description_placeholders"]["result"]
+    # As of v1.6.0 (see CHANGELOG.md), deliberately NOT also durably
+    # persisted to the subentry any more.
     updated_subentry = entry.subentries[blind.subentry_id]
-    assert updated_subentry.data[CONF_INITIAL_POSITION] == 42
+    assert CONF_INITIAL_POSITION not in updated_subentry.data
+
+
+async def test_developer_tools_manual_sync_does_not_overwrite_initial_position(
+    hass: HomeAssistant, connected_api: SchellenbergUsbApi
+) -> None:
+    """A manual sync must not durably override CONF_INITIAL_POSITION.
+
+    As of v1.6.0 (see CHANGELOG.md): an unverified Developer Tools
+    correction used to overwrite this blind's own calibration-confirmed
+    startup fallback, surviving every future restart even if the
+    correction itself turned out to be wrong. Confirms a value some
+    other, genuinely-confirmed source (calibration, here) already wrote
+    is left exactly as it was.
+    """
+    entry = _build_hub_entry(hass, connected_api)
+    blind = _add_existing_blind(hass, entry)
+    calibrated_data = dict(blind.data)
+    calibrated_data[CONF_INITIAL_POSITION] = 73
+    hass.config_entries.async_update_subentry(entry, blind, data=calibrated_data)
+    # See test_developer_tools_set_position_open_and_closed_sync_without_
+    # sending_rf: manual_sync_position() requires the device to be
+    # registered as a "live" cover, which this direct flow-driven test
+    # never does on its own.
+    connected_api.register_entity(
+        None, None, command_device_id=DEVICE_ID, command_enum=DEVICE_ENUM
+    )
+
+    result = await _start_reconfigure_flow(hass, entry, blind)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "developer_tools"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"next_step_id": "set_position_manual"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={"position": 10}
+    )
+
+    assert result["step_id"] == "developer_tools"
+    assert result["description_placeholders"] is not None
+    assert "10" in result["description_placeholders"]["result"]
+    updated_subentry = entry.subentries[blind.subentry_id]
+    assert updated_subentry.data[CONF_INITIAL_POSITION] == 73
 
 
 async def test_developer_tools_teach_motor_success_sends_teach_open_and_stop(

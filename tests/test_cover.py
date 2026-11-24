@@ -43,6 +43,7 @@ from custom_components.schellenberg_usb.const import (
     CONF_DEVICE_ENUM,
     CONF_DEVICE_ID,
     CONF_INITIAL_POSITION,
+    CONF_LAST_CONFIRMED_POSITION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
     CONF_STATUS_DEVICE_ID,
@@ -2859,6 +2860,64 @@ async def test_handle_event_stopped_does_not_snap_a_near_zero_close_started_mid_
     assert cover._attr_is_closed is False
 
 
+async def test_handle_event_stopped_mid_travel_does_not_persist_as_confirmed(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for a bug an independent review caught before
+    v1.6.0 shipped: a mid-travel STOPPED (the common case - any remote/
+    wall-switch/Gurtwickler stop that doesn't land near an edge) only ever
+    has _update_position()'s raw elapsed-time estimate to report, so it
+    must not durably persist as this blind's own CONF_LAST_CONFIRMED_
+    POSITION backup (see that constant's own comment in const.py) -
+    contrast test_handle_event_stopped_snapped_to_endstop_persists_as_
+    confirmed below, where an actual endstop snap correctly does persist.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_OPEN_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._persist_last_confirmed_position = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_opening = True
+    cover._attr_current_cover_position = 20
+    cover._move_start_time = clock()
+    cover._move_start_position = 20
+    cover._target_position = 55  # an externally-interrupted set_position
+
+    clock.advance(5.0)  # a quarter of the 20s open travel time: +25
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 45
+    cover._persist_last_confirmed_position.assert_not_called()
+
+
+async def test_handle_event_stopped_snapped_to_endstop_persists_as_confirmed(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors test_handle_event_stopped_mid_travel_does_not_persist_as_
+    confirmed above: here the move actually does snap to an exact endstop
+    (see test_handle_event_stopped_snaps_a_near_zero_targetless_close_to_
+    zero), so it is a genuine confirmation and must persist.
+    """
+    clock = _FakeClock(1_000.0)
+    monkeypatch.setattr(time, "monotonic", clock)
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_CLOSE_TIME: 20.0})
+    cover._stop_position_tracking = MagicMock()  # type: ignore[method-assign]
+    cover._persist_last_confirmed_position = MagicMock()  # type: ignore[method-assign]
+    cover._attr_is_closing = True
+    cover._attr_current_cover_position = 100
+    cover._move_start_time = clock()
+    cover._move_start_position = 100
+    cover._target_position = None  # a remote/Gurtwickler-driven move
+
+    clock.advance(19.6)  # 98% of the 20s close travel time: snaps to 0
+    cover._handle_event(EVENT_STOPPED)
+
+    assert cover._attr_current_cover_position == 0
+    cover._persist_last_confirmed_position.assert_called_once_with(0)
+
+
 async def test_handle_event_stopped_logs_the_recalculated_position(
     hass: HomeAssistant,
     monkeypatch: pytest.MonkeyPatch,
@@ -3554,6 +3613,99 @@ async def test_added_to_hass_prefers_fresh_calibration_over_restored_state(
     api.pop_fresh_calibration_position.assert_called_once_with(cover._blind_id)
 
 
+async def test_added_to_hass_uses_own_backup_when_nothing_was_restored_from_ha(
+    hass: HomeAssistant,
+) -> None:
+    """No restored Home Assistant state, but this blind's own
+    CONF_LAST_CONFIRMED_POSITION backup is set (see that constant's own
+    comment in const.py) - used instead of falling all the way back to
+    CONF_INITIAL_POSITION, which only ever reflects where calibration
+    itself ended, possibly a while ago.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_LAST_CONFIRMED_POSITION: 42})
+    cover.async_get_last_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=None
+    )
+
+    await cover.async_added_to_hass()
+
+    assert cover._attr_current_cover_position == 42
+    assert cover._attr_is_closed is False
+    assert cover._position_source_kind == "restored own backup"
+
+
+async def test_added_to_hass_prefers_restored_ha_state_over_own_backup(
+    hass: HomeAssistant,
+) -> None:
+    """Restored Home Assistant state outranks this blind's own
+    CONF_LAST_CONFIRMED_POSITION backup - the backup is a fallback for
+    when restore_state has nothing at all, not a second opinion to weigh
+    against a real restored state.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api, device_data={CONF_LAST_CONFIRMED_POSITION: 42})
+    cover.async_get_last_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=State(
+            "cover.living_room_blind", "open", {ATTR_CURRENT_POSITION: 73}
+        )
+    )
+
+    await cover.async_added_to_hass()
+
+    assert cover._attr_current_cover_position == 73
+    assert cover._position_source_kind == "restored HA state"
+
+
+async def test_added_to_hass_prefers_own_backup_over_calibration_ending_position(
+    hass: HomeAssistant,
+) -> None:
+    """This blind's own CONF_LAST_CONFIRMED_POSITION backup outranks
+    CONF_INITIAL_POSITION when both are present and nothing was restored
+    from Home Assistant - the backup is kept current by every genuinely
+    confirmed position since, while CONF_INITIAL_POSITION only ever
+    reflects where calibration itself ended, possibly much earlier.
+    """
+    api = MagicMock()
+    cover = _build_cover(
+        hass,
+        api,
+        device_data={CONF_INITIAL_POSITION: 0, CONF_LAST_CONFIRMED_POSITION: 42},
+    )
+    cover.async_get_last_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=None
+    )
+
+    await cover.async_added_to_hass()
+
+    assert cover._attr_current_cover_position == 42
+    assert cover._attr_is_closed is False
+
+
+async def test_added_to_hass_prefers_fresh_calibration_over_own_backup(
+    hass: HomeAssistant,
+) -> None:
+    """A calibration that just finished, in the same "Pair and calibrate"
+    run, outranks this blind's own CONF_LAST_CONFIRMED_POSITION backup too
+    - not just a restored Home Assistant state - for the same reason
+    test_added_to_hass_prefers_fresh_calibration_over_restored_state above
+    gives: what calibration just measured, seconds ago, is the one value
+    guaranteed to be current.
+    """
+    api = MagicMock()
+    api.pop_fresh_calibration_position.return_value = 100
+    cover = _build_cover(hass, api, device_data={CONF_LAST_CONFIRMED_POSITION: 0})
+    cover.async_get_last_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=None
+    )
+
+    await cover.async_added_to_hass()
+
+    assert cover._attr_current_cover_position == 100
+    assert cover._attr_is_closed is False
+    api.pop_fresh_calibration_position.assert_called_once_with(cover._blind_id)
+
+
 async def test_added_to_hass_wires_up_the_status_identity_signal(
     hass: HomeAssistant,
 ) -> None:
@@ -3636,7 +3788,7 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
     """
     api = MagicMock()
     entry = _build_hub_entry(hass, api)
-    _add_blind_subentry(hass, entry, unique_id="blind-uuid-1")
+    blind_subentry = _add_blind_subentry(hass, entry, unique_id="blind-uuid-1")
     _add_blind_subentry(
         hass,
         entry,
@@ -3659,6 +3811,9 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
     # ...never the raw RF identity, which is only ever used to transmit.
     assert cover._command_device_id == "ABCDEF"
     assert cover._command_enum == "10"
+    # Needed by _persist_last_confirmed_position() to find its way back to
+    # this exact subentry later - see that method in cover.py.
+    assert cover._config_subentry_id == blind_subentry.subentry_id
     api.register_entity.assert_called_once_with(
         "ABCDEF",
         "10",
@@ -3679,6 +3834,76 @@ async def test_async_setup_entry_creates_device_and_cover_with_stable_id(
         )
         is None
     )
+
+
+async def test_persist_last_confirmed_position_writes_to_the_subentry(
+    hass: HomeAssistant,
+) -> None:
+    """A durable confirmed-position call site's new_position must land on
+    this blind's own subentry as CONF_LAST_CONFIRMED_POSITION - the
+    backup async_added_to_hass() falls back to when Home Assistant's own
+    restore_state has nothing (see that constant's own comment in
+    const.py).
+    """
+    api = MagicMock()
+    entry = _build_hub_entry(hass, api)
+    subentry = _add_blind_subentry(hass, entry)
+    cover = _build_cover(
+        hass,
+        api,
+        config_entry_id=entry.entry_id,
+        config_subentry_id=subentry.subentry_id,
+    )
+
+    cover._persist_last_confirmed_position(42)
+
+    assert cover._last_confirmed_position_from_config == 42
+    assert (
+        entry.subentries[subentry.subentry_id].data[CONF_LAST_CONFIRMED_POSITION] == 42
+    )
+
+
+async def test_persist_last_confirmed_position_is_a_noop_when_unchanged(
+    hass: HomeAssistant,
+) -> None:
+    """Called on every durable confirmed position, not just on a genuine
+    change - must not touch the subentry at all when the value already
+    matches, rather than issuing a redundant update on every confirmed
+    stop.
+    """
+    api = MagicMock()
+    entry = _build_hub_entry(hass, api)
+    subentry = _add_blind_subentry(hass, entry, data={CONF_LAST_CONFIRMED_POSITION: 42})
+    cover = _build_cover(
+        hass,
+        api,
+        config_entry_id=entry.entry_id,
+        config_subentry_id=subentry.subentry_id,
+        device_data={CONF_LAST_CONFIRMED_POSITION: 42},
+    )
+    original_subentry = entry.subentries[subentry.subentry_id]
+
+    cover._persist_last_confirmed_position(42)
+
+    # Still the exact same subentry object - async_update_subentry()
+    # replaces it with a new one, so this proves no write happened, not
+    # just that the value coincidentally stayed the same.
+    assert entry.subentries[subentry.subentry_id] is original_subentry
+
+
+async def test_persist_last_confirmed_position_is_a_noop_without_a_subentry_id(
+    hass: HomeAssistant,
+) -> None:
+    """A SchellenbergCover built without config_entry_id/config_subentry_id
+    (as most tests in this file do) must not crash trying to look either
+    up - there is simply nothing to persist to.
+    """
+    api = MagicMock()
+    cover = _build_cover(hass, api)
+
+    cover._persist_last_confirmed_position(42)  # must not raise
+
+    assert cover._last_confirmed_position_from_config is None
 
 
 async def test_async_setup_entry_nulls_a_stale_status_identity_when_source_is_unknown(

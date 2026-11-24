@@ -309,20 +309,12 @@ async def test_set_position_open_confirms_position(
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 100)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 100%" in flow._developer_notice
-    # Also persisted as the blind's durable startup fallback, not just
-    # applied to the live entity - see CONF_INITIAL_POSITION's own comment
-    # in cover.py and _async_manual_position_sync()'s in config_flow.py.
-    update_subentry.assert_called_once()
-    _, update_kwargs = update_subentry.call_args
-    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 100
-    # The persisted update is a full copy of the subentry's existing data
-    # (data = dict(subentry.data)) with just this one key added, not a
-    # partial dict - confirmed here by checking that an unrelated field
-    # make_subentry() already set (CONF_OPEN_TIME) actually survived, since
-    # nothing else in this test would otherwise catch a regression to a
-    # partial/merge-only dict that happened to still get CONF_INITIAL_
-    # POSITION right.
-    assert update_kwargs["data"][CONF_OPEN_TIME] == 20.0
+    # As of v1.6.0, deliberately NOT also persisted to the subentry (see
+    # CHANGELOG.md and _async_manual_position_sync()'s own comment in
+    # config_flow.py): an unverified manual correction used to durably
+    # override the blind's own calibration-confirmed startup fallback.
+    # The live entity update above is the only effect now.
+    update_subentry.assert_not_called()
 
 
 async def test_set_position_closed_confirms_position(
@@ -340,9 +332,9 @@ async def test_set_position_closed_confirms_position(
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 0)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 0%" in flow._developer_notice
-    update_subentry.assert_called_once()
-    _, update_kwargs = update_subentry.call_args
-    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 0
+    # As of v1.6.0, deliberately NOT also persisted - see the sibling
+    # set_position_open test above for why.
+    update_subentry.assert_not_called()
 
 
 async def test_set_position_manual_shows_form_with_last_known_default(
@@ -374,9 +366,9 @@ async def test_set_position_manual_applies_given_position(
     flow._api.manual_sync_position.assert_called_once_with(DEVICE_ID, 37)
     assert result["type"] is FlowResultType.MENU
     assert "manually confirmed at 37%" in flow._developer_notice
-    update_subentry.assert_called_once()
-    _, update_kwargs = update_subentry.call_args
-    assert update_kwargs["data"][CONF_INITIAL_POSITION] == 37
+    # As of v1.6.0, deliberately NOT also persisted - see
+    # test_set_position_open_confirms_position above for why.
+    update_subentry.assert_not_called()
 
 
 async def test_manual_position_sync_reports_unregistered_when_sync_fails(
@@ -384,9 +376,10 @@ async def test_manual_position_sync_reports_unregistered_when_sync_fails(
 ) -> None:
     """An unregistered live cover entity must be reported, not silently dropped.
 
-    Also proves the new subentry persistence added alongside this method
-    (see the two tests above) does not run on this failure path - nothing
-    was actually confirmed, so nothing should be written as if it had been.
+    update_subentry.assert_not_called() here is now trivially true (no call
+    site in this method writes to the subentry at all any more, see the
+    three tests above) but still worth keeping: it would catch a regression
+    that reintroduces a write gated on success, same as any of its siblings.
     """
     flow = make_flow(hass)
     flow._get_reconfigure_subentry = MagicMock(return_value=make_subentry())

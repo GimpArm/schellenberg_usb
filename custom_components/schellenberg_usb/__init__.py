@@ -30,6 +30,7 @@ from .const import (
     CONF_ENUM,
     CONF_INITIAL_POSITION,
     CONF_LAST_CALIBRATION,
+    CONF_LAST_CONFIRMED_POSITION,
     CONF_OPEN_TIME,
     CONF_SERIAL_PORT,
     DOMAIN,
@@ -353,19 +354,27 @@ async def async_setup_entry(
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Fields the running entities already pick up live via a dispatcher
-    # signal, so persisting them must not also force a reload (which would
-    # disconnect/rebuild every cover on the hub and reset every "last
-    # changed" timestamp, not just the one blind that changed):
-    # CONF_OPEN_TIME/CONF_CLOSE_TIME/CONF_LAST_CALIBRATION (calibration,
-    # via cover.py's _handle_calibration_completed) and
-    # CONF_INITIAL_POSITION (manual position sync, via cover.py's
-    # _handle_manual_position_sync). Any other field change still reloads.
+    # Fields a reload would not actually need to pick up, so persisting
+    # them must not also force one (which would disconnect/rebuild every
+    # cover on the hub and reset every "last changed" timestamp, not just
+    # the one blind that changed). CONF_OPEN_TIME/CONF_CLOSE_TIME are
+    # already picked up live via a dispatcher signal (calibration, via
+    # cover.py's _handle_calibration_completed). CONF_INITIAL_POSITION and
+    # CONF_LAST_CONFIRMED_POSITION are startup-only fallbacks that the same
+    # write already updating them (manual position sync / cover.py's own
+    # durable confirmed-position call sites) has, by definition, already
+    # applied live too - a reload would only make a fresh
+    # async_added_to_hass() re-read the same value the running entity
+    # already has. CONF_LAST_CALIBRATION is different again: it is
+    # diagnostics-only (diagnostics.py), with no live-entity representation
+    # that could ever go stale in the first place. Any other field change
+    # still reloads.
     reload_ignored_subentry_data_keys = (
         CONF_OPEN_TIME,
         CONF_CLOSE_TIME,
         CONF_LAST_CALIBRATION,
         CONF_INITIAL_POSITION,
+        CONF_LAST_CONFIRMED_POSITION,
     )
 
     def _subentry_reload_snapshot(
