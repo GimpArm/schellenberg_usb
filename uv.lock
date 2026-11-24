@@ -3147,14 +3147,14 @@ dev = [
     { name = "pytest-homeassistant-custom-component", specifier = "==0.13.375" },
     { name = "pyyaml", specifier = "~=6.0.2" },
     { name = "ruff", specifier = "~=0.17.6" },
-    { name = "types-pyyaml", specifier = "~=6.0.12.20260906" },
+    { name = "types-pyyaml", specifier = "~=6.0.12.20261113" },
     { name = "watchdog", specifier = "~=7.1.0" },
 ]
 lint = [
     { name = "mypy", specifier = "~=2.4.0" },
     { name = "pre-commit", specifier = "~=4.7.0" },
     { name = "ruff", specifier = "~=0.17.6" },
-    { name = "types-pyyaml", specifier = "~=6.0.12.20260906" },
+    { name = "types-pyyaml", specifier = "~=6.0.12.20261113" },
 ]
 test = [
     { name = "croniter", specifier = "~=7.0.0" },
