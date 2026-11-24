@@ -445,6 +445,19 @@ CONF_CLOSE_TIME = "close_time"  # Time it takes to close (down) in seconds
 # the key is absent entirely, which covers just blinds paired before this
 # key existed in the first place.
 CONF_INITIAL_POSITION = "initial_position"
+# This blind's own continuously-updated backup of the last position this
+# integration itself genuinely confirmed - a real RF-confirmed stop, a
+# full-travel endstop estimate, or a completed calibration - independent
+# of Home Assistant's own restore_state (see async_added_to_hass()'s own
+# fallback chain in cover.py). Added after a Home Assistant Core
+# restore_state regression made async_get_last_state() unreliable across
+# a restart on some Core versions - see CHANGELOG.md's v1.6.0 entry.
+# Deliberately never written by a Developer Tools manual position sync
+# (cover.py's _handle_manual_position_sync(), via _record_position_
+# update()'s own durable=False there) - an unverified manual correction
+# must not durably override this backup the way it used to override
+# CONF_INITIAL_POSITION above; see that call site's own comment.
+CONF_LAST_CONFIRMED_POSITION = "last_confirmed_position"
 # Legacy top-level command-device-ID key from before CONF_COMMAND_DEVICE_ID
 # and the separate status identity existed. Despite living in this
 # "calibration constants" block (for historical reasons), it is read as a

@@ -35,6 +35,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_INITIAL_POSITION,
     CONF_INVERT_DIRECTION,
+    CONF_LAST_CONFIRMED_POSITION,
     CONF_OPEN_TIME,
     CONF_SECONDARY_STATUS_IDENTITIES,
     CONF_SERIAL_PORT,
@@ -313,6 +314,7 @@ async def async_setup_entry(
                             subentry.data.get(CONF_INVERT_DIRECTION, False)
                         ),
                         is_newly_registered_entity=is_newly_registered_entity,
+                        config_subentry_id=subentry.subentry_id,
                     )
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -350,6 +352,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         blind_id: str | None = None,
         device_data: Mapping[str, Any] | None = None,
         config_entry_id: str | None = None,
+        config_subentry_id: str | None = None,
         command_device_id: str | None = None,
         status_device_id: str | None = None,
         status_enum: str | None = None,
@@ -398,6 +401,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._invert_direction = invert_direction
         self._device_enum = self._command_enum
         self._config_entry_id = config_entry_id
+        self._config_subentry_id = config_subentry_id
         blind_id_source = blind_id
         if blind_id_source is None and device_data is not None:
             blind_id_source = device_data.get(CONF_BLIND_ID)
@@ -431,6 +435,16 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         # of async_added_to_hass() below for what happens then.
         self._initial_position_from_calibration: int | None = device_data_dict.get(
             CONF_INITIAL_POSITION
+        )
+        # This blind's own last-confirmed-position backup (see that
+        # constant's own comment in const.py) - consulted in
+        # async_added_to_hass() only when Home Assistant's own restore_state
+        # has nothing for this entity, before falling all the way back to
+        # the calibration anchor above. Kept current by _record_position_
+        # update()'s own durable=True call sites; never by a Developer
+        # Tools manual sync.
+        self._last_confirmed_position_from_config: int | None = device_data_dict.get(
+            CONF_LAST_CONFIRMED_POSITION
         )
         self._is_newly_registered_entity = is_newly_registered_entity
         self._move_start_time: float | None = None
@@ -526,6 +540,31 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     raw_position,
                 )
 
+        # Home Assistant's own restore_state had nothing for this entity -
+        # fall back to this blind's own, independently-persisted backup
+        # (see CONF_LAST_CONFIRMED_POSITION's own comment in const.py)
+        # before falling all the way back to the calibration anchor below.
+        # Exists because restore_state itself is not always reliable (a
+        # known Home Assistant Core regression on some versions; see
+        # CHANGELOG.md's v1.6.0 entry) - this backup does not depend on it.
+        restored_from_own_backup = False
+        if (
+            not restored_from_ha
+            and self._last_confirmed_position_from_config is not None
+        ):
+            self._attr_current_cover_position = (
+                self._last_confirmed_position_from_config
+            )
+            self._attr_is_closed = self._attr_current_cover_position == 0
+            restored_from_own_backup = True
+            _LOGGER.debug(
+                "No previous Home Assistant state for %s (%s); using this "
+                "integration's own last confirmed position instead: %d%%",
+                self._device_name,
+                self._device_id,
+                self._attr_current_cover_position,
+            )
+
         # A calibration that just finished in this same "Pair and
         # calibrate" run is more trustworthy than any restored state,
         # including a seemingly-valid one (a reused blind_id could restore
@@ -542,7 +581,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             fresh_position = self._initial_position_from_calibration
 
         if fresh_position is not None:
-            if restored_from_ha:
+            if restored_from_ha or restored_from_own_backup:
                 _LOGGER.debug(
                     "Restored position for %s (%s) was %d%%, but this blind "
                     "was just calibrated in this same pairing - trusting "
@@ -555,6 +594,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._attr_current_cover_position = fresh_position
             self._attr_is_closed = fresh_position == 0
             restored_from_ha = False
+            restored_from_own_backup = False
             fresh_calibration = True
 
         if self._attr_current_cover_position is None:
@@ -593,6 +633,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             self._position_source_kind = "restored HA state"
             self._position_update_source = "restored HA state"
             startup_status = "restored / estimated / not confirmed since restart"
+        elif restored_from_own_backup:
+            self._position_source_kind = "restored own backup"
+            self._position_update_source = (
+                "restored own backup (no Home Assistant restore_state)"
+            )
+            startup_status = "restored from own backup / not confirmed since restart"
         else:
             self._position_source_kind = "startup default"
             self._position_update_source = "startup default (no restored HA state)"
@@ -657,6 +703,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         previous_position: int | None,
         new_position: int | None,
         status: str,
+        durable: bool = False,
     ) -> None:
         """Forward a position change to the API's diagnostic history log.
 
@@ -666,6 +713,12 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
         self._attr_current_cover_position reported to Home Assistant
         itself. Every code path that changes the reported position calls
         this before returning; see each call site's own comment.
+
+        durable=True additionally persists new_position as this blind's own
+        CONF_LAST_CONFIRMED_POSITION backup (see that constant's own
+        comment in const.py) - reserved for a genuinely RF/calibration-
+        confirmed completion, never a plain elapsed-time estimate or a
+        Developer Tools manual sync; see each call site's own comment.
         """
         self._api.record_position_update(
             self._command_device_id,
@@ -676,6 +729,35 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             position_source=self._position_source_kind,
             confirmed_since_restart=self._position_confirmed_since_restart,
             status=status,
+        )
+        if durable and new_position is not None:
+            self._persist_last_confirmed_position(new_position)
+
+    def _persist_last_confirmed_position(self, position: int) -> None:
+        """Durably back up a genuinely confirmed position to this subentry.
+
+        Called only from _record_position_update()'s own durable=True call
+        sites. A no-op when the value has not actually changed (the common
+        case - called on every confirmed stop) or when this entity was
+        built without a config_entry_id/config_subentry_id, same as
+        _async_position_update_loop()'s own background-task setup guards
+        the missing config_entry_id case above.
+        """
+        if position == self._last_confirmed_position_from_config:
+            return
+        if self._config_entry_id is None or self._config_subentry_id is None:
+            return
+        config_entry = self.hass.config_entries.async_get_entry(self._config_entry_id)
+        if config_entry is None:
+            return
+        subentry = config_entry.subentries.get(self._config_subentry_id)
+        if subentry is None:
+            return
+        self._last_confirmed_position_from_config = position
+        data = dict(subentry.data)
+        data[CONF_LAST_CONFIRMED_POSITION] = position
+        self.hass.config_entries.async_update_subentry(
+            config_entry, subentry, data=data
         )
 
     @callback
@@ -706,6 +788,9 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             previous_position=previous_position,
             new_position=normalized_position,
             status="confirmed/manual",
+            # Deliberately not durable - see CONF_LAST_CONFIRMED_POSITION's
+            # own comment in const.py.
+            durable=False,
         )
         _LOGGER.warning(
             "Manual position sync applied cover=%s command_device_id=%s "
@@ -750,6 +835,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             previous_position=previous_position,
             new_position=ending_position,
             status="confirmed",
+            durable=True,
         )
 
         _LOGGER.info(
@@ -919,6 +1005,11 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             # STOPPED event that still finds a target set means the blind was
             # interrupted externally and the commanded target was never reached.
             self._update_position()
+            # Tracks whether the branch below actually snapped to an exact
+            # endstop (0/100), as opposed to leaving _update_position()'s raw
+            # elapsed-time estimate in place - see its use on
+            # _record_position_update()'s durable= argument below.
+            position_snapped_to_endstop = False
             if self._attr_current_cover_position is not None:
                 self._attr_current_cover_position = max(
                     0, min(100, self._attr_current_cover_position)
@@ -953,6 +1044,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                     self._attr_current_cover_position = (
                         0 if self._attr_is_closing else 100
                     )
+                    position_snapped_to_endstop = True
                 self._attr_is_closed = self._attr_current_cover_position == 0
             self._attr_is_opening = False
             self._attr_is_closing = False
@@ -978,6 +1070,14 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                 previous_position=previous_position,
                 new_position=self._attr_current_cover_position,
                 status="confirmed",
+                # Only durable when the branch above actually snapped to an
+                # exact endstop - the far more common case (a mid-travel
+                # remote/wall-switch/Gurtwickler stop) leaves
+                # self._attr_current_cover_position as _update_position()'s raw
+                # elapsed-time estimate, which must never become this blind's
+                # CONF_LAST_CONFIRMED_POSITION backup (see that constant's own
+                # comment in const.py) - caught in review before this shipped.
+                durable=position_snapped_to_endstop,
             )
             self._move_start_time = None
             self._move_start_position = None
@@ -1123,6 +1223,10 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
             previous_position=previous_position,
             new_position=position,
             status="estimated from full travel",
+            # Despite the "estimated" label, a full-travel resync is a real
+            # endstop confirmation (elapsed time matched a full open/close),
+            # so it counts as confirmed for CONF_LAST_CONFIRMED_POSITION.
+            durable=True,
         )
 
     async def _async_position_update_loop(self) -> None:
@@ -1444,6 +1548,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                 previous_position=previous_position_at_target,
                                 new_position=self._attr_current_cover_position,
                                 status="confirmed",
+                                durable=True,
                             )
                         self.async_write_ha_state()
                         return
@@ -1485,6 +1590,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                 previous_position=previous_position_at_endstop,
                                 new_position=self._attr_current_cover_position,
                                 status="confirmed",
+                                durable=True,
                             )
                         self.async_write_ha_state()
                         return
@@ -1524,6 +1630,7 @@ class SchellenbergCover(CoverEntity, RestoreEntity):
                                 previous_position=previous_position_at_endstop,
                                 new_position=self._attr_current_cover_position,
                                 status="confirmed",
+                                durable=True,
                             )
                         self.async_write_ha_state()
                         return

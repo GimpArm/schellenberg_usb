@@ -74,10 +74,12 @@ TRANSMIT_IDLE_TIMEOUT = 5.0
 # evidence the stick accepted the write.
 MOVE_ACK_TIMEOUT = 1.0
 
-# Caps how long control_blind_with_retry() keeps retrying a single move
-# once it already holds _move_lock - not how long a call waits to acquire
-# that lock in the first place, which is unbounded queueing behind other
-# blinds and not part of this budget at all. Without this, a stick that
+# Caps how long control_blind_with_retry() keeps retrying a single move,
+# measured from that call's very first attempt - including the time spent
+# waiting to acquire _move_lock in the first place, not just the cycles
+# after acquiring it (without bounding acquire() too, a move stuck behind a
+# long queue of other moves/stops could run well past this timeout before
+# the retry loop ever got back to checking it). Without this, a stick that
 # stayed persistently busy (or never acked at all) for one device_id would
 # hold the hub-wide lock open-endedly and block every other blind's own
 # open/close behind it - a new coupling between blinds that control_blind()
@@ -3165,7 +3167,10 @@ class SchellenbergUsbApi:
 
     @property
     def device_mode(self) -> str | None:
-        """Return the device mode (bootloader, initial, listening, or pairing)."""
+        """Return the device mode.
+
+        One of bootloader, initial, listening, pairing, or unknown.
+        """
         return self._device_mode
 
     @property
@@ -3203,9 +3208,15 @@ class SchellenbergUsbApi:
     def busy_latched(self) -> bool:
         """Return whether transmission is stuck and needs a manual reset.
 
-        Set when a command's busy (tE) retries are exhausted, or when a
-        sent command's transmitter-idle (t0) ACK never arrives within the
-        wait timeout. Self-heals on the next clean transmit cycle (a t0
+        Set when a sent command's transmitter-idle (t0) ACK never arrives
+        within the wait timeout (teach, raw-transmit, or send_command()'s
+        own busy-triggered retry), or, for a move/stop retried via
+        control_blind_with_retry(), when MOVE_RETRY_OVERALL_TIMEOUT's
+        wall-clock deadline elapses with still no accept. There is no
+        retry-count limit anywhere in this module - "tE" is always
+        retried, never abandoned after some fixed number of attempts - so
+        this always comes from a timeout, never attempts running out.
+        Self-heals on the next clean transmit cycle (a t0
         ACK with nothing ambiguous pending), as well as on connect/
         disconnect/reconnect, so a stick that recovered on its own is not
         left showing a stale stuck-state in diagnostics forever. A stick

@@ -362,11 +362,14 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         self._pending_test_direction: str | None = None
         # Sticky per-blind flag: once a retry has happened, the test_motor
         # form keeps showing the retry_notice explaining why it is being
-        # shown again - set once, on the first inconclusive attempt, and
-        # never cleared again for this blind. There is no retry limit: the
-        # person keeps choosing a direction for as long as they keep
-        # confirming, until an attempt both sends successfully and is
-        # confirmed to have moved the blind.
+        # shown again - set once, on the first inconclusive attempt. There
+        # is no retry limit: the person keeps choosing a direction for as
+        # long as they keep confirming, until an attempt both sends
+        # successfully and is confirmed to have moved the blind. The one
+        # exception: async_step_wrong_motor_reset_notice() clears this back
+        # to False after a wrong-motor retry moves pairing to a fresh
+        # address, since a fresh address is a fresh start (see that step's
+        # own comment).
         self._test_motor_retry_attempted = False
         # Resolved lazily (via runtime_translation_text()) at display time instead of
         # translated here, because self.hass is not attached to a flow
@@ -438,9 +441,11 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         step, since api.pair_device_and_wait() already listens for either
         technique's own frame regardless of which the person actually
         used - see strings.json's "user" step for the combined
-        instructions. Every fresh pairing gets the same motor-test
-        confirmation afterward, via async_step_name_device()'s own
-        menu (calibration_method_choice's "test_motor" option, below).
+        instructions. Every fresh pairing reaches async_step_name_device()'s
+        own menu afterward (calibration_method_choice, below), which offers
+        either a motor-test confirmation ("test_motor") or typing in travel
+        times directly ("manual_times") - see that step's own docstring for
+        why both exist.
         """
         self._pairing_workflow = "pairing"
         return await self._async_pair_device("user", user_input)
@@ -458,7 +463,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         hub_entry = self._get_entry()
         api = hub_entry.runtime_data
 
-        # Initiate pairing and wait for response (up to 10 seconds)
+        # Initiate pairing and wait for response (up to PAIRING_TIMEOUT, 2 minutes)
         pairing_result = await api.pair_device_and_wait()
 
         if pairing_result is None:
@@ -825,8 +830,9 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
         which is what this step does once confirmed.
 
         Nothing has been saved to Home Assistant yet at this point -
-        _finish_pairing() only ever runs after a *successful* motor test,
-        much later, once calibration finishes - so there is no subentry
+        _finish_pairing() only ever runs much later, once calibration
+        finishes (whether reached via a successful motor test or the
+        manual_times alternative that skips it) - so there is no subentry
         or config entry to delete here, despite how that might look from
         the outside. What this step actually abandons is purely in-
         memory: the raw RF teach command already sent for the old
@@ -883,8 +889,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
 
         Not a real choice between options - "Enter travel times manually"
         lives earlier, in calibration_method_choice's own menu before the
-        motor test ever runs (see async_step_name_device()'s own
-        comment) - by the time a person reaches this step, the motor has
+        motor test ever runs (see that step's own docstring) - by the
+        time a person reaches this step, the motor has
         already been confirmed working, so there is nothing left to
         offer manual entry as an alternative *to*. Kept as an explicit,
         plain confirmation (not silently chaining straight into
@@ -902,7 +908,7 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
     async def async_step_manual_times(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Collect travel times and current position after a successful motor test.
+        """Collect travel times and current position by hand instead of a live run.
 
         Unlike the calibration_initial_state/open_instruction/close_instruction
         route (options_flow_calibration.py), nothing here actually drives
@@ -1526,27 +1532,18 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             self._developer_notice = _runtime_translation_text(
                 self.hass, "notice_position_confirmed", position=position
             )
-            # Also persist this confirmation as the blind's durable startup
-            # fallback - the same CONF_INITIAL_POSITION a calibration run
-            # leaves behind (see that constant's own comment in cover.py).
-            # api.manual_sync_position() above only ever reaches the
-            # already-loaded live entity (dispatcher signal -> cover.py's
-            # _handle_manual_position_sync()), which writes real Home
-            # Assistant state but nothing to this blind's own subentry
-            # data - so without this, a manual confirmation here was only
-            # ever as durable as Home Assistant's own, separately-volatile
-            # restore state, same gap this pass already closed for the
-            # Calibrate option. async_update_subentry() (not _and_abort -
-            # this step deliberately returns to the same developer_tools
-            # menu below rather than ending the flow) takes a full
-            # replacement dict, so it starts from the subentry's own
-            # current data rather than data_updates's merge-on-top.
-            subentry = self._get_reconfigure_subentry()
-            data = dict(subentry.data)
-            data[CONF_INITIAL_POSITION] = position
-            self.hass.config_entries.async_update_subentry(
-                self._get_entry(), subentry, data=data
-            )
+            # Deliberately NOT written to CONF_INITIAL_POSITION (or any
+            # other durable subentry field) any more as of v1.6.0 (see
+            # CHANGELOG.md): an unverified manual correction used to
+            # durably override the blind's own startup fallback, so a
+            # wrong click here survived every future restart. cover.py's
+            # _handle_manual_position_sync()
+            # (reached via the dispatcher signal api.manual_sync_position()
+            # above fires) already calls async_write_ha_state(), which is
+            # enough for this to survive an ordinary restart through Home
+            # Assistant's own restore_state, the same as any other state
+            # change - it simply no longer also gets a second, independent
+            # durability guarantee on top of that.
         else:
             self._developer_notice = _runtime_translation_text(
                 self.hass, "notice_position_sync_unregistered"
@@ -2180,8 +2177,8 @@ class SchellenbergPairingSubentryFlow(ConfigSubentryFlow):
             None (nothing recorded yet, e.g. a freshly set up or
             just-restarted blind) renders as "--", matching the live
             panel, rather than the raw literal word "None". Mirrors
-            _developer_snapshot()'s own position_previous/position_new
-            description placeholders below, and is applied to
+            async_step_developer_tools()'s own position_previous/
+            position_new placeholders above, and is applied to
             current_estimated_position too - the same field as
             new_position, read a second time for the confidence section.
             """
